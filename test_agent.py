@@ -315,3 +315,34 @@ class TestRealClaude(unittest.TestCase):
         """Empty prompt doesn't crash."""
         result = agent.call_claude("")
         self.assertIsInstance(result, str)
+
+    def test_code_generation(self):
+        """Claude can generate code."""
+        result = agent.call_claude(
+            "Write a Python function that adds two numbers. Only output the code, no explanation."
+        )
+        self.assertIn("def", result)
+        self.assertIn("return", result)
+
+    def test_multi_language(self):
+        """Claude can respond in Chinese."""
+        result = agent.call_claude("用中文回答：1+1等于几？只回答数字。")
+        self.assertIn("2", result)
+
+    def test_file_awareness_with_cwd(self):
+        """Claude can read files in the cwd when using --dangerously-skip-permissions."""
+        result = agent.call_claude(
+            "Read the file README.md in the current directory and tell me the project name. Reply with just the name.",
+            cwd=os.path.dirname(__file__) or ".",
+        )
+        # Should mention our project
+        self.assertTrue(
+            "telegram" in result.lower() or "claude" in result.lower() or "agent" in result.lower(),
+            f"Expected project name in: {result}"
+        )
+
+    def test_long_response(self):
+        """Claude can produce a longer response."""
+        result = agent.call_claude("Count from 1 to 20, one number per line.")
+        self.assertIn("1", result)
+        self.assertIn("20", result)
