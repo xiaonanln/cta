@@ -286,3 +286,32 @@ class TestBotHandlers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRealClaude(unittest.TestCase):
+    """Integration tests that call the real Claude CLI.
+    
+    These require `claude` to be installed and authenticated.
+    Skip with: python -m unittest test_agent.TestRealClaude --skip
+    """
+
+    def test_simple_question(self):
+        """Claude can answer a simple math question."""
+        result = agent.call_claude("What is 2+2? Reply with just the number.")
+        self.assertIn("4", result)
+
+    def test_respects_cwd(self):
+        """Claude responds without error when given a valid cwd."""
+        result = agent.call_claude(
+            "What directory are you working in? Reply briefly.",
+            cwd=os.path.dirname(__file__) or ".",
+        )
+        # Should get a response, not a crash
+        self.assertIsInstance(result, str)
+        self.assertNotIn("timed out", result)
+        self.assertNotIn("not found", result)
+
+    def test_empty_prompt(self):
+        """Empty prompt doesn't crash."""
+        result = agent.call_claude("")
+        self.assertIsInstance(result, str)
