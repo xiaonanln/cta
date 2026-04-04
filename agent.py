@@ -14,7 +14,7 @@ ALLOWED_USERS = set(
     int(x) for x in os.environ.get("ALLOWED_USERS", "").split(",") if x.strip()
 )
 TIMEOUT = int(os.environ.get("CLAUDE_TIMEOUT", "120"))
-DEFAULT_CWD = os.environ.get("CLAUDE_CWD", os.path.expanduser("~/projects/rpg2d"))
+DEFAULT_CWD = os.environ.get("CLAUDE_CWD", os.getcwd())
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
