@@ -1,4 +1,4 @@
-"""Tests for claude-telegram-agent."""
+"""Tests for CTA (Claude Telegram Agent)."""
 
 import os
 import subprocess

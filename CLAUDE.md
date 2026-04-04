@@ -1,4 +1,4 @@
-# CLAUDE.md — claude-telegram-agent
+# CLAUDE.md — CTA (Claude Telegram Agent)
 
 Self-hosted Telegram bot that uses Claude Code CLI (`claude --print`) as the backend. Runs on Max/Pro subscription — no API tokens, no extra cost.
 

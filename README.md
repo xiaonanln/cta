@@ -1,4 +1,4 @@
-# Claude Telegram Agent
+# CTA — Claude Telegram Agent
 
 Self-hosted Telegram bot powered by Claude Code CLI. Uses your Max/Pro subscription — **no API tokens, no extra cost**.
 
