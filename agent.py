@@ -28,7 +28,7 @@ def call_claude(prompt: str, cwd: str = DEFAULT_CWD) -> str:
     """Call Claude Code CLI in print mode (uses Max subscription)."""
     try:
         result = subprocess.run(
-            ["claude", "--print", "-p", prompt],
+            ["claude", "--print", "--dangerously-skip-permissions", "-p", prompt],
             capture_output=True,
             text=True,
             timeout=TIMEOUT,
