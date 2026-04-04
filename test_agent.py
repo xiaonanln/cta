@@ -11,6 +11,25 @@ os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-token")
 import agent
 
 
+def make_fake_message(text, user_id=123, username="tester"):
+    """Create a fake Telegram message object."""
+    msg = MagicMock()
+    msg.text = text
+    msg.from_user.id = user_id
+    msg.from_user.username = username
+    msg.chat.id = user_id
+    msg.message_id = 1
+    return msg
+
+
+def setup_fake_bot():
+    """Create agent with a fake bot that doesn't hit Telegram API."""
+    agent.bot = MagicMock()
+    agent.conversations.clear()
+    agent.user_cwd.clear()
+    return agent.bot
+
+
 class TestCallClaude(unittest.TestCase):
     """Tests for the call_claude function."""
 
@@ -162,6 +181,107 @@ class TestPromptBuilding(unittest.TestCase):
         self.assertIn("User: hi", prompt)
         self.assertIn("Assistant: hello", prompt)
         self.assertIn("User: how are you", prompt)
+
+
+class TestBotHandlers(unittest.TestCase):
+    """Tests using a fake bot to verify handler behavior."""
+
+    def setUp(self):
+        self.bot = setup_fake_bot()
+        agent.ALLOWED_USERS.clear()
+        agent.ALLOWED_USERS.add(123)
+
+    def test_start_command(self):
+        msg = make_fake_message("/start")
+        agent.cmd_start(msg)
+        self.bot.reply_to.assert_called_once()
+        reply = self.bot.reply_to.call_args[0][1]
+        self.assertIn("Hi", reply)
+
+    def test_start_blocked_for_unknown_user(self):
+        msg = make_fake_message("/start", user_id=999)
+        agent.cmd_start(msg)
+        self.bot.reply_to.assert_not_called()
+
+    def test_clear_command(self):
+        agent.conversations[123] = [{"role": "user", "content": "hi"}]
+        msg = make_fake_message("/clear")
+        agent.cmd_clear(msg)
+        self.assertNotIn(123, agent.conversations)
+        self.bot.reply_to.assert_called_once()
+
+    def test_pwd_command(self):
+        msg = make_fake_message("/pwd")
+        agent.cmd_pwd(msg)
+        self.bot.reply_to.assert_called_once()
+        reply = self.bot.reply_to.call_args[0][1]
+        self.assertIn(os.getcwd(), reply)
+
+    def test_cd_to_valid_dir(self):
+        msg = make_fake_message("/cd /tmp")
+        agent.cmd_cd(msg)
+        self.assertEqual(agent.user_cwd[123], "/tmp")
+        self.bot.reply_to.assert_called_once()
+
+    def test_cd_to_invalid_dir(self):
+        msg = make_fake_message("/cd /nonexistent_dir_xyz")
+        agent.cmd_cd(msg)
+        self.assertNotIn(123, agent.user_cwd)
+        reply = self.bot.reply_to.call_args[0][1]
+        self.assertIn("❌", reply)
+
+    def test_cd_no_arg_shows_current(self):
+        agent.user_cwd[123] = "/tmp"
+        msg = make_fake_message("/cd")
+        agent.cmd_cd(msg)
+        reply = self.bot.reply_to.call_args[0][1]
+        self.assertIn("/tmp", reply)
+
+    @patch("agent.call_claude", return_value="Hello from Claude!")
+    def test_message_calls_claude_and_replies(self, mock_claude):
+        msg = make_fake_message("what is 1+1")
+        agent.handle_message(msg)
+        # handle_message runs in a thread, wait briefly
+        import time
+        time.sleep(0.5)
+        mock_claude.assert_called_once()
+        self.bot.reply_to.assert_called()
+        reply = self.bot.reply_to.call_args[0][1]
+        self.assertEqual(reply, "Hello from Claude!")
+
+    @patch("agent.call_claude", return_value="response")
+    def test_message_adds_to_history(self, mock_claude):
+        msg = make_fake_message("hello")
+        agent.handle_message(msg)
+        import time
+        time.sleep(0.5)
+        self.assertIn(123, agent.conversations)
+        self.assertEqual(agent.conversations[123][0]["content"], "hello")
+        self.assertEqual(agent.conversations[123][1]["content"], "response")
+
+    @patch("agent.call_claude", return_value="ok")
+    def test_message_uses_user_cwd(self, mock_claude):
+        agent.user_cwd[123] = "/tmp/test"
+        msg = make_fake_message("hi")
+        agent.handle_message(msg)
+        import time
+        time.sleep(0.5)
+        _, kwargs = mock_claude.call_args
+        self.assertEqual(kwargs["cwd"], "/tmp/test")
+
+    def test_message_blocked_for_unknown_user(self):
+        msg = make_fake_message("hi", user_id=999)
+        agent.handle_message(msg)
+        self.bot.reply_to.assert_not_called()
+
+    @patch("agent.call_claude", return_value="x" * 5000)
+    def test_long_reply_split(self, mock_claude):
+        msg = make_fake_message("write a long essay")
+        agent.handle_message(msg)
+        import time
+        time.sleep(0.5)
+        # Should be called twice (5000 / 4096 = 2 chunks)
+        self.assertEqual(self.bot.reply_to.call_count, 2)
 
 
 if __name__ == "__main__":
