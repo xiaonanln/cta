@@ -16,7 +16,7 @@ ALLOWED_USERS = set(
 TIMEOUT = int(os.environ.get("CLAUDE_TIMEOUT", "120"))
 DEFAULT_CWD = os.environ.get("CLAUDE_CWD", os.getcwd())
 
-bot = telebot.TeleBot(BOT_TOKEN)
+bot = None  # initialized in main
 
 # Per-user state
 conversations: dict[int, list[dict]] = {}
@@ -44,14 +44,14 @@ def call_claude(prompt: str, cwd: str = DEFAULT_CWD) -> str:
         return "(claude CLI not found — install @anthropic-ai/claude-code)"
 
 
-@bot.message_handler(commands=["start"])
+
 def cmd_start(message):
     if ALLOWED_USERS and message.from_user.id not in ALLOWED_USERS:
         return
     bot.reply_to(message, "👋 Hi! I'm powered by Claude Code CLI. Just send me a message.")
 
 
-@bot.message_handler(commands=["clear"])
+
 def cmd_clear(message):
     if ALLOWED_USERS and message.from_user.id not in ALLOWED_USERS:
         return
@@ -59,7 +59,7 @@ def cmd_clear(message):
     bot.reply_to(message, "🧹 Conversation cleared.")
 
 
-@bot.message_handler(commands=["cd"])
+
 def cmd_cd(message):
     if ALLOWED_USERS and message.from_user.id not in ALLOWED_USERS:
         return
@@ -76,7 +76,7 @@ def cmd_cd(message):
         bot.reply_to(message, f"❌ Not a directory: `{path}`", parse_mode="Markdown")
 
 
-@bot.message_handler(commands=["pwd"])
+
 def cmd_pwd(message):
     if ALLOWED_USERS and message.from_user.id not in ALLOWED_USERS:
         return
@@ -84,7 +84,7 @@ def cmd_pwd(message):
     bot.reply_to(message, f"📂 `{cwd}`", parse_mode="Markdown")
 
 
-@bot.message_handler(func=lambda m: m.text and not m.text.startswith("/"))
+
 def handle_message(message):
     uid = message.from_user.id
     if ALLOWED_USERS and uid not in ALLOWED_USERS:
@@ -120,10 +120,25 @@ def handle_message(message):
     threading.Thread(target=process, daemon=True).start()
 
 
+def create_bot():
+    """Create and configure the Telegram bot."""
+    global bot
+    bot = telebot.TeleBot(BOT_TOKEN)
+
+    # Register handlers
+    bot.message_handler(commands=["start"])(cmd_start)
+    bot.message_handler(commands=["clear"])(cmd_clear)
+    bot.message_handler(commands=["cd"])(cmd_cd)
+    bot.message_handler(commands=["pwd"])(cmd_pwd)
+    bot.message_handler(func=lambda m: m.text and not m.text.startswith("/"))(handle_message)
+    return bot
+
+
 if __name__ == "__main__":
     if not BOT_TOKEN:
         print("Error: TELEGRAM_BOT_TOKEN not set")
         print("Usage: TELEGRAM_BOT_TOKEN=xxx ALLOWED_USERS=123,456 python agent.py")
         exit(1)
+    create_bot()
     print(f"Bot starting... (allowed users: {ALLOWED_USERS or 'all'})")
     bot.infinity_polling()
