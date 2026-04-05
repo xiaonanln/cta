@@ -37,21 +37,12 @@ DEFAULT_CONFIG = {
 
 
 def load_config(config_path=None) -> dict:
-    """Load config from file, with env var overrides."""
+    """Load config from file."""
     config = dict(DEFAULT_CONFIG)
 
     if config_path and os.path.exists(config_path):
         with open(config_path) as f:
             config.update(json.load(f))
-
-    if os.environ.get("TELEGRAM_BOT_TOKEN"):
-        config["telegram_bot_token"] = os.environ["TELEGRAM_BOT_TOKEN"]
-    if os.environ.get("ALLOWED_USERS"):
-        config["allowed_users"] = [int(x) for x in os.environ["ALLOWED_USERS"].split(",") if x.strip()]
-    if os.environ.get("CLAUDE_TIMEOUT"):
-        config["claude_timeout"] = int(os.environ["CLAUDE_TIMEOUT"])
-    if os.environ.get("CLAUDE_MODEL"):
-        config["model"] = os.environ["CLAUDE_MODEL"]
 
     return config
 
@@ -359,7 +350,7 @@ if __name__ == "__main__":
 
     if not BOT_TOKEN:
         print("Error: telegram_bot_token not set")
-        print("Set in config.json or TELEGRAM_BOT_TOKEN env var")
+        print("Set telegram_bot_token in config.json")
         exit(1)
 
     load_sessions()

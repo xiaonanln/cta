@@ -13,8 +13,8 @@ Single Python file. No server, no database, no API keys.
 ## Common Commands
 
 ```sh
-# Run the bot
-TELEGRAM_BOT_TOKEN=xxx ALLOWED_USERS=123 python agent.py
+# Run the bot (configure config.json first)
+python agent.py
 
 # Run tests (mock only, no Claude calls)
 python -m unittest test_agent.TestConfig test_agent.TestSessionPersistence test_agent.TestCallClaude test_agent.TestSplitReply test_agent.TestSendMarkdown test_agent.TestAllowed test_agent.TestTuiLog test_agent.TestBotHandlers test_agent.TestUserCwd test_agent.TestUserModel -v

@@ -63,48 +63,10 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(config["allowed_users"], [111])
         self.assertEqual(config["claude_timeout"], 600)  # default preserved
 
-    def test_file_values_overrideable_by_env(self):
-        cfg = {"telegram_bot_token": "from-file", "claude_timeout": 60}
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(cfg, f)
-            name = f.name
-        try:
-            with patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "from-env"}):
-                config = agent.load_config(name)
-        finally:
-            os.unlink(name)
-        self.assertEqual(config["telegram_bot_token"], "from-env")
-        self.assertEqual(config["claude_timeout"], 60)
-
     def test_missing_file_uses_defaults(self):
         with patch.dict(os.environ, {}, clear=True):
             config = agent.load_config("/nonexistent/config.json")
         self.assertEqual(config["claude_timeout"], 600)
-
-    def test_env_allowed_users_parsed(self):
-        with patch.dict(os.environ, {"ALLOWED_USERS": "1,2,3"}, clear=True):
-            config = agent.load_config(None)
-        self.assertEqual(config["allowed_users"], [1, 2, 3])
-
-    def test_env_allowed_users_single(self):
-        with patch.dict(os.environ, {"ALLOWED_USERS": "42"}, clear=True):
-            config = agent.load_config(None)
-        self.assertEqual(config["allowed_users"], [42])
-
-    def test_env_allowed_users_empty_string(self):
-        with patch.dict(os.environ, {"ALLOWED_USERS": ""}, clear=True):
-            config = agent.load_config(None)
-        self.assertEqual(config["allowed_users"], [])
-
-    def test_env_claude_timeout(self):
-        with patch.dict(os.environ, {"CLAUDE_TIMEOUT": "300"}, clear=True):
-            config = agent.load_config(None)
-        self.assertEqual(config["claude_timeout"], 300)
-
-    def test_env_claude_model(self):
-        with patch.dict(os.environ, {"CLAUDE_MODEL": "claude-sonnet-4-6"}, clear=True):
-            config = agent.load_config(None)
-        self.assertEqual(config["model"], "claude-sonnet-4-6")
 
     def test_init_applies_all_fields(self):
         original_model = agent.MODEL

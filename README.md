@@ -7,16 +7,11 @@ Self-hosted Telegram bot powered by Claude Code CLI. Uses your Max/Pro subscript
 1. Create a Telegram bot via [@BotFather](https://t.me/BotFather)
 2. Install Claude Code CLI: `npm install -g @anthropic-ai/claude-code`
 3. Install Python deps: `pip install -r requirements.txt`
-4. Configure (pick one):
+4. Configure:
 
 ```bash
-# A) Config file
 cp config.example.json config.json
 # Edit config.json — set telegram_bot_token and allowed_users
-
-# B) Environment variables
-export TELEGRAM_BOT_TOKEN=your-bot-token
-export ALLOWED_USERS=your-telegram-user-id
 ```
 
 5. Run:
@@ -27,15 +22,15 @@ python agent.py
 
 ## Configuration
 
-Config file (`config.json`) or environment variables. Env vars override config file values.
+All configuration is in `config.json` (default path, override with `-f`):
 
-| Config Key | Env Var | Default | Description |
-|---|---|---|---|
-| `telegram_bot_token` | `TELEGRAM_BOT_TOKEN` | — | Bot token from [@BotFather](https://t.me/BotFather) |
-| `allowed_users` | `ALLOWED_USERS` | `[]` (all) | Comma-separated Telegram user IDs |
-| `claude_timeout` | `CLAUDE_TIMEOUT` | `600` | Max seconds per Claude call |
-| `model` | `CLAUDE_MODEL` | `claude-opus-4-6` | Claude model to use |
-| `sessions_file` | — | `sessions.json` | Path to session persistence file |
+| Key | Default | Description |
+|---|---|---|
+| `telegram_bot_token` | — | Bot token from [@BotFather](https://t.me/BotFather) |
+| `allowed_users` | `[]` (all) | List of Telegram user IDs |
+| `claude_timeout` | `600` | Max seconds per Claude call |
+| `model` | `claude-opus-4-6` | Claude model to use |
+| `sessions_file` | `sessions.json` | Path to session persistence file |
 
 ## Bot Commands
 
