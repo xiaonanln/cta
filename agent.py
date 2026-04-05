@@ -63,6 +63,7 @@ user_model: dict[int, str] = {}      # per-user model override
 user_queues: dict[int, queue.Queue] = {}
 user_queues_lock = threading.Lock()
 claude_lock = threading.Lock()  # serialize Claude CLI calls (Max subscription concurrency limit)
+claude_busy_for = None  # username of user currently calling Claude
 
 
 def init(config: dict):
@@ -159,19 +160,18 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
            "--model", model or MODEL, "--output-format", "json", "-p", prompt]
     if session_id:
         cmd += ["--resume", session_id]
-    with claude_lock:
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT, cwd=cwd)
-            if not result.stdout.strip():
-                err = result.stderr.strip()
-                return (f"[Error] {err}" if err else "(empty response)"), ""
-            data = json.loads(result.stdout)
-            text = (data.get("result") or "").strip() or "(empty response)"
-            return text, data.get("session_id", "")
-        except subprocess.TimeoutExpired:
-            return "(Claude timed out)", ""
-        except FileNotFoundError:
-            return "(claude CLI not found — install @anthropic-ai/claude-code)", ""
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT, cwd=cwd)
+        if not result.stdout.strip():
+            err = result.stderr.strip()
+            return (f"[Error] {err}" if err else "(empty response)"), ""
+        data = json.loads(result.stdout)
+        text = (data.get("result") or "").strip() or "(empty response)"
+        return text, data.get("session_id", "")
+    except subprocess.TimeoutExpired:
+        return "(Claude timed out)", ""
+    except FileNotFoundError:
+        return "(claude CLI not found — install @anthropic-ai/claude-code)", ""
 
 
 # ── Message processing ────────────────────────────────────────────────────────
@@ -210,18 +210,30 @@ def _typing_loop(chat_id: int, done: threading.Event):
 
 
 def _process_message(uid: int, message, done: threading.Event):
+    global claude_busy_for
     cwd = user_cwd.get(uid, DEFAULT_CWD)
     model = user_model.get(uid, MODEL)
     session_id = user_sessions.get(uid)
-    try:
-        reply, new_session_id = call_claude(message.text, cwd=cwd, session_id=session_id, model=model)
-    finally:
-        done.set()
+    username = message.from_user.username or str(uid)
+
+    # If Claude is busy with another user, notify and wait
+    if claude_lock.locked() and claude_busy_for != username:
+        bot.reply_to(message, f"⏳ Waiting for @{claude_busy_for} to finish...")
+        tui_log(f"[yellow]⏳[/] [bold]{escape(username)}[/] queued (busy: {escape(claude_busy_for or '?')})")
+
+    with claude_lock:
+        claude_busy_for = username
+        try:
+            reply, new_session_id = call_claude(message.text, cwd=cwd, session_id=session_id, model=model)
+        finally:
+            claude_busy_for = None
+            done.set()
+
     if new_session_id:
         user_sessions[uid] = new_session_id
         save_sessions()
     preview = reply[:120].replace("\n", " ")
-    tui_log(f"[blue]←[/] [bold]{escape(str(message.from_user.username or uid))}[/] {escape(preview)}{'…' if len(reply) > 120 else ''}")
+    tui_log(f"[blue]←[/] [bold]{escape(username)}[/] {escape(preview)}{'…' if len(reply) > 120 else ''}")
     for chunk in _split_reply(reply):
         _send_markdown(message, chunk)
 
