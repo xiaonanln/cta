@@ -13,14 +13,69 @@ import queue
 import subprocess
 import sys
 import threading
+import time
+from collections import deque
+from datetime import datetime
+
 import telebot
+from rich.layout import Layout
+from rich.live import Live
+from rich.markup import escape
+from rich.panel import Panel
+from rich.table import Table
+
+# ── TUI ───────────────────────────────────────────────────────────────────────
+
+_log_entries: deque[tuple[str, str]] = deque(maxlen=200)
+_tui_lock = threading.Lock()
+
+
+def tui_log(text: str) -> None:
+    ts = datetime.now().strftime("%H:%M:%S")
+    with _tui_lock:
+        _log_entries.append((ts, text))
+
+
+class _TuiLogHandler(logging.Handler):
+    """Redirect Python log records into the TUI log."""
+    def emit(self, record):
+        tui_log(f"[dim]{escape(self.format(record))}[/]")
+
+
+def _status_panel() -> Panel:
+    info = (
+        f"[bold]model:[/] [cyan]{escape(MODEL)}[/]"
+        f"   [bold]cwd:[/] [cyan]{escape(DEFAULT_CWD)}[/]"
+        f"   [bold]sessions:[/] [cyan]{len(user_sessions)}[/]"
+    )
+    return Panel(info, title="[bold green]CTA[/]")
+
+
+def _log_panel() -> Panel:
+    table = Table(box=None, show_header=False, padding=(0, 1), expand=True)
+    table.add_column("time", style="dim", width=8, no_wrap=True)
+    table.add_column("text")
+    with _tui_lock:
+        entries = list(_log_entries)
+    for ts, text in entries:
+        table.add_row(ts, text)
+    return Panel(table, title="[bold]Log[/]")
+
+
+def _build_layout() -> Layout:
+    layout = Layout()
+    layout.split_column(Layout(name="status", size=3), Layout(name="log"))
+    layout["status"].update(_status_panel())
+    layout["log"].update(_log_panel())
+    return layout
+
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
 DEFAULT_CONFIG = {
     "telegram_bot_token": "",
     "allowed_users": [],
-    "claude_timeout": 120,
+    "claude_timeout": 600,
     "sessions_file": "sessions.json",
 }
 
@@ -83,9 +138,9 @@ def load_sessions():
             data = json.load(f)
         for uid_str, session_id in data.items():
             user_sessions[int(uid_str)] = session_id
-        print(f"Loaded {len(data)} session(s) from {SESSIONS_FILE}", file=sys.stderr)
+        tui_log(f"[dim]Loaded {len(data)} session(s) from {SESSIONS_FILE}[/]")
     except Exception as e:
-        print(f"Warning: could not load sessions: {e}", file=sys.stderr)
+        tui_log(f"[red]Warning: could not load sessions: {escape(str(e))}[/]")
 
 
 def save_sessions():
@@ -96,7 +151,7 @@ def save_sessions():
             json.dump({str(uid): sid for uid, sid in user_sessions.items()}, f)
         os.replace(tmp, SESSIONS_FILE)
     except Exception as e:
-        print(f"Warning: could not save sessions: {e}", file=sys.stderr)
+        tui_log(f"[red]Warning: could not save sessions: {escape(str(e))}[/]")
 
 
 # ── Claude CLI ────────────────────────────────────────────────────────────────
@@ -214,6 +269,8 @@ def _process_message(uid: int, message):
     if new_session_id:
         user_sessions[uid] = new_session_id
         save_sessions()
+    preview = reply[:120].replace("\n", " ")
+    tui_log(f"[blue]←[/] [bold]{escape(str(message.from_user.username or uid))}[/] {escape(preview)}{'…' if len(reply) > 120 else ''}")
     for i in range(0, len(reply), 4096):
         bot.reply_to(message, reply[i : i + 4096])
 
@@ -225,7 +282,7 @@ def _user_worker(uid: int, q: queue.Queue):
         try:
             _process_message(uid, message)
         except Exception as e:
-            print(f"[worker:{uid}] error: {e}", file=sys.stderr)
+            tui_log(f"[red][worker:{uid}] error: {escape(str(e))}[/]")
         finally:
             q.task_done()
 
@@ -241,7 +298,7 @@ def _get_user_queue(uid: int) -> queue.Queue:
 
 def handle_message(message):
     uid = message.from_user.id
-    print(f"[{message.from_user.username or uid}] {message.text}", file=sys.stderr)
+    tui_log(f"[green]→[/] [bold]{escape(str(message.from_user.username or uid))}[/] {escape(message.text)}")
     if ALLOWED_USERS and uid not in ALLOWED_USERS:
         return
     _get_user_queue(uid).put(message)
@@ -255,7 +312,10 @@ class _Suppress409(logging.Filter):
 def create_bot():
     """Create and configure the Telegram bot."""
     global bot
-    logging.getLogger("TeleBot").addFilter(_Suppress409())
+    telebot_log = logging.getLogger("TeleBot")
+    telebot_log.addFilter(_Suppress409())
+    telebot_log.addHandler(_TuiLogHandler())
+    telebot_log.propagate = False
     bot = telebot.TeleBot(BOT_TOKEN)
     bot.message_handler(commands=["start"])(cmd_start)
     bot.message_handler(commands=["clear"])(cmd_clear)
@@ -285,5 +345,11 @@ if __name__ == "__main__":
 
     load_sessions()
     create_bot()
-    print(f"CTA starting... (cwd: {DEFAULT_CWD}, users: {ALLOWED_USERS or 'all'})")
-    bot.infinity_polling()
+    tui_log(f"[dim]CTA starting… model=[cyan]{MODEL}[/] cwd=[cyan]{DEFAULT_CWD}[/] users={ALLOWED_USERS or 'all'}[/]")
+
+    threading.Thread(target=bot.infinity_polling, daemon=True).start()
+    with Live(auto_refresh=False, screen=True) as live:
+        while True:
+            live.update(_build_layout())
+            live.refresh()
+            time.sleep(0.25)

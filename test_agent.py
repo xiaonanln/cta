@@ -286,7 +286,7 @@ class TestConfig(unittest.TestCase):
             config = agent.load_config(None)
         self.assertEqual(config["telegram_bot_token"], "")
         self.assertEqual(config["allowed_users"], [])
-        self.assertEqual(config["claude_timeout"], 120)
+        self.assertEqual(config["claude_timeout"], 600)
 
     def test_load_from_file(self):
         import tempfile, json
@@ -299,7 +299,7 @@ class TestConfig(unittest.TestCase):
         os.unlink(f.name)
         self.assertEqual(config["telegram_bot_token"], "abc:123")
         self.assertEqual(config["allowed_users"], [111])
-        self.assertEqual(config["claude_timeout"], 120)  # default preserved
+        self.assertEqual(config["claude_timeout"], 600)  # default preserved
 
     def test_env_overrides_file(self):
         import tempfile, json
@@ -316,7 +316,7 @@ class TestConfig(unittest.TestCase):
     def test_missing_file_uses_defaults(self):
         with patch.dict(os.environ, {}, clear=True):
             config = agent.load_config("/nonexistent/config.json")
-        self.assertEqual(config["claude_timeout"], 120)
+        self.assertEqual(config["claude_timeout"], 600)
 
     def test_init_applies_config(self):
         config = {"telegram_bot_token": "tok", "allowed_users": [1, 2], "claude_timeout": 30}
