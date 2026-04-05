@@ -63,48 +63,10 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(config["allowed_users"], [111])
         self.assertEqual(config["claude_timeout"], 600)  # default preserved
 
-    def test_file_values_overrideable_by_env(self):
-        cfg = {"telegram_bot_token": "from-file", "claude_timeout": 60}
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(cfg, f)
-            name = f.name
-        try:
-            with patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "from-env"}):
-                config = agent.load_config(name)
-        finally:
-            os.unlink(name)
-        self.assertEqual(config["telegram_bot_token"], "from-env")
-        self.assertEqual(config["claude_timeout"], 60)
-
     def test_missing_file_uses_defaults(self):
         with patch.dict(os.environ, {}, clear=True):
             config = agent.load_config("/nonexistent/config.json")
         self.assertEqual(config["claude_timeout"], 600)
-
-    def test_env_allowed_users_parsed(self):
-        with patch.dict(os.environ, {"ALLOWED_USERS": "1,2,3"}, clear=True):
-            config = agent.load_config(None)
-        self.assertEqual(config["allowed_users"], [1, 2, 3])
-
-    def test_env_allowed_users_single(self):
-        with patch.dict(os.environ, {"ALLOWED_USERS": "42"}, clear=True):
-            config = agent.load_config(None)
-        self.assertEqual(config["allowed_users"], [42])
-
-    def test_env_allowed_users_empty_string(self):
-        with patch.dict(os.environ, {"ALLOWED_USERS": ""}, clear=True):
-            config = agent.load_config(None)
-        self.assertEqual(config["allowed_users"], [])
-
-    def test_env_claude_timeout(self):
-        with patch.dict(os.environ, {"CLAUDE_TIMEOUT": "300"}, clear=True):
-            config = agent.load_config(None)
-        self.assertEqual(config["claude_timeout"], 300)
-
-    def test_env_claude_model(self):
-        with patch.dict(os.environ, {"CLAUDE_MODEL": "claude-sonnet-4-6"}, clear=True):
-            config = agent.load_config(None)
-        self.assertEqual(config["model"], "claude-sonnet-4-6")
 
     def test_init_applies_all_fields(self):
         original_model = agent.MODEL
@@ -135,6 +97,56 @@ class TestConfig(unittest.TestCase):
         agent.init({**agent.DEFAULT_CONFIG, "sessions_file": "/custom/path.json"})
         self.assertEqual(agent.SESSIONS_FILE, "/custom/path.json")
         agent.init(agent.DEFAULT_CONFIG)
+
+    def test_parse_args_config_file(self):
+        args = agent.parse_args(["-f", "my.json"])
+        self.assertEqual(args.config, "my.json")
+        self.assertIsNone(args.token)
+
+    def test_parse_args_token(self):
+        args = agent.parse_args(["--token", "abc:123"])
+        self.assertIsNone(args.config)
+        self.assertEqual(args.token, "abc:123")
+
+    def test_parse_args_config_and_token_exclusive(self):
+        with self.assertRaises(SystemExit):
+            agent.parse_args(["-f", "my.json", "--token", "abc:123"])
+
+    def test_config_from_args_file(self):
+        cfg = {"telegram_bot_token": "from-file", "allowed_users": [1]}
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(cfg, f)
+            name = f.name
+        try:
+            args = agent.parse_args(["-f", name])
+            config = agent.config_from_args(args)
+        finally:
+            os.unlink(name)
+        self.assertEqual(config["telegram_bot_token"], "from-file")
+        self.assertEqual(config["allowed_users"], [1])
+
+    def test_config_from_args_token(self):
+        args = agent.parse_args(["--token", "abc:123", "--allowed-users", "1,2", "--timeout", "30", "--model", "claude-sonnet-4-6", "--sessions-file", "/tmp/s.json"])
+        config = agent.config_from_args(args)
+        self.assertEqual(config["telegram_bot_token"], "abc:123")
+        self.assertEqual(config["allowed_users"], [1, 2])
+        self.assertEqual(config["claude_timeout"], 30)
+        self.assertEqual(config["model"], "claude-sonnet-4-6")
+        self.assertEqual(config["sessions_file"], "/tmp/s.json")
+
+    def test_config_from_args_token_defaults(self):
+        args = agent.parse_args(["--token", "abc:123"])
+        config = agent.config_from_args(args)
+        self.assertEqual(config["telegram_bot_token"], "abc:123")
+        self.assertEqual(config["allowed_users"], [])
+        self.assertEqual(config["claude_timeout"], 600)
+        self.assertEqual(config["model"], "claude-opus-4-6")
+
+    def test_config_from_args_no_flags_uses_default_config(self):
+        args = agent.parse_args([])
+        config = agent.config_from_args(args)
+        # Falls back to loading config.json (default)
+        self.assertIn("telegram_bot_token", config)
 
 
 # ── Session persistence ───────────────────────────────────────────────────────

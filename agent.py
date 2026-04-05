@@ -37,21 +37,12 @@ DEFAULT_CONFIG = {
 
 
 def load_config(config_path=None) -> dict:
-    """Load config from file, with env var overrides."""
+    """Load config from file."""
     config = dict(DEFAULT_CONFIG)
 
     if config_path and os.path.exists(config_path):
         with open(config_path) as f:
             config.update(json.load(f))
-
-    if os.environ.get("TELEGRAM_BOT_TOKEN"):
-        config["telegram_bot_token"] = os.environ["TELEGRAM_BOT_TOKEN"]
-    if os.environ.get("ALLOWED_USERS"):
-        config["allowed_users"] = [int(x) for x in os.environ["ALLOWED_USERS"].split(",") if x.strip()]
-    if os.environ.get("CLAUDE_TIMEOUT"):
-        config["claude_timeout"] = int(os.environ["CLAUDE_TIMEOUT"])
-    if os.environ.get("CLAUDE_MODEL"):
-        config["model"] = os.environ["CLAUDE_MODEL"]
 
     return config
 
@@ -349,17 +340,44 @@ def create_bot():
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="CTA — Claude Telegram Agent")
-    parser.add_argument("-f", "--config", default="config.json", help="Config file path (default: config.json)")
-    args = parser.parse_args()
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("-f", "--config", default=None, help="Config file path")
+    group.add_argument("--token", dest="token", default=None, help="Telegram bot token")
+    parser.add_argument("--allowed-users", default=None, help="Comma-separated Telegram user IDs")
+    parser.add_argument("--timeout", type=int, default=None, help="Max seconds per Claude call")
+    parser.add_argument("--model", default=None, help="Claude model to use")
+    parser.add_argument("--sessions-file", default=None, help="Path to session persistence file")
+    return parser.parse_args(argv)
 
-    config = load_config(args.config)
+
+def config_from_args(args) -> dict:
+    """Build config from CLI args. Uses config file if -f given, otherwise CLI args."""
+    if args.config is not None or args.token is None:
+        return load_config(args.config or "config.json")
+
+    config = dict(DEFAULT_CONFIG)
+    config["telegram_bot_token"] = args.token
+    if args.allowed_users is not None:
+        config["allowed_users"] = [int(x) for x in args.allowed_users.split(",") if x.strip()]
+    if args.timeout is not None:
+        config["claude_timeout"] = args.timeout
+    if args.model is not None:
+        config["model"] = args.model
+    if args.sessions_file is not None:
+        config["sessions_file"] = args.sessions_file
+    return config
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    config = config_from_args(args)
     init(config)
 
     if not BOT_TOKEN:
         print("Error: telegram_bot_token not set")
-        print("Set in config.json or TELEGRAM_BOT_TOKEN env var")
+        print("Set telegram_bot_token in config.json")
         exit(1)
 
     load_sessions()
