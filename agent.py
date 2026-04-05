@@ -7,6 +7,7 @@ Uses Max subscription — no API tokens needed.
 
 import json
 import logging
+import math
 import os
 import queue
 import subprocess
@@ -161,7 +162,15 @@ def _status_panel() -> tuple[Panel, int]:
             body = f"[bold]session:[/] {sid_str}\n[bold]model:[/]   [cyan]{model}[/]\n[bold]cwd:[/]     [cyan]{cwd}[/]\n[bold]msgs:[/]    [yellow]{count}[/]"
             cards.append(Panel(body, title=f"[bold green]{label}[/]"))
         content = Columns(cards, equal=True, expand=True)
-        size = 8
+        try:
+            term_width = os.get_terminal_size().columns
+        except OSError:
+            term_width = 80
+        card_width = 40  # approximate min card width
+        cols = max(1, term_width // card_width)
+        rows = math.ceil(len(cards) / cols)
+        card_height = 6  # 4 content lines + 2 border lines
+        size = 3 + rows * card_height
     else:
         content = header + "   [bold]sessions:[/] [dim]none[/]"
         size = 3
