@@ -446,27 +446,27 @@ class TestBotHandlers(unittest.TestCase):
         self.assertIn(os.getcwd(), reply)
 
     def test_pwd_shows_custom_cwd(self):
-        agent.user_cwd[123] = "/tmp"
+        agent.user_cwd[(123, 123)] = "/tmp"
         agent.cmd_pwd(make_fake_message("/pwd"))
         self.assertIn("/tmp", self.bot.reply_to.call_args[0][1])
 
     def test_cd_valid_dir(self):
         agent.cmd_cd(make_fake_message("/cd /tmp"))
-        self.assertEqual(agent.user_cwd[123], "/tmp")
+        self.assertEqual(agent.user_cwd[(123, 123)], "/tmp")
 
     def test_cd_invalid_dir(self):
         agent.cmd_cd(make_fake_message("/cd /nonexistent_xyz_abc"))
-        self.assertNotIn(123, agent.user_cwd)
+        self.assertNotIn((123, 123), agent.user_cwd)
         self.assertIn("❌", self.bot.reply_to.call_args[0][1])
 
     def test_cd_no_arg_shows_current(self):
-        agent.user_cwd[123] = "/tmp"
+        agent.user_cwd[(123, 123)] = "/tmp"
         agent.cmd_cd(make_fake_message("/cd"))
         self.assertIn("/tmp", self.bot.reply_to.call_args[0][1])
 
     def test_cd_expands_tilde(self):
         agent.cmd_cd(make_fake_message("/cd ~"))
-        self.assertEqual(agent.user_cwd[123], os.path.expanduser("~"))
+        self.assertEqual(agent.user_cwd[(123, 123)], os.path.expanduser("~"))
 
     def test_model_shows_current(self):
         agent.MODEL = "claude-opus-4-6"
@@ -475,7 +475,7 @@ class TestBotHandlers(unittest.TestCase):
 
     def test_model_switches(self):
         agent.cmd_model(make_fake_message("/model claude-sonnet-4-6"))
-        self.assertEqual(agent.user_model[123], "claude-sonnet-4-6")
+        self.assertEqual(agent.user_model[(123, 123)], "claude-sonnet-4-6")
 
     def test_model_clears_session(self):
         agent.user_sessions[(123, 123)] = "old-session"
@@ -487,8 +487,8 @@ class TestBotHandlers(unittest.TestCase):
         self.bot.reply_to.assert_not_called()
 
     def test_status_shows_model_cwd_session(self):
-        agent.user_model[123] = "claude-opus-4-6"
-        agent.user_cwd[123] = "/tmp"
+        agent.user_model[(123, 123)] = "claude-opus-4-6"
+        agent.user_cwd[(123, 123)] = "/tmp"
         agent.user_sessions[(123, 123)] = "sess-id-123"
         agent.cmd_status(make_fake_message("/status"))
         reply = self.bot.reply_to.call_args[0][1]
@@ -519,14 +519,14 @@ class TestBotHandlers(unittest.TestCase):
 
     @patch("agent.call_claude", return_value=("ok", "s"))
     def test_handle_message_uses_user_cwd(self, mock_claude):
-        agent.user_cwd[123] = "/tmp/test"
+        agent.user_cwd[(123, 123)] = "/tmp/test"
         agent.handle_message(make_fake_message("hi"))
         time.sleep(0.5)
         self.assertEqual(mock_claude.call_args[1]["cwd"], "/tmp/test")
 
     @patch("agent.call_claude", return_value=("ok", "s"))
     def test_handle_message_uses_user_model(self, mock_claude):
-        agent.user_model[123] = "claude-sonnet-4-6"
+        agent.user_model[(123, 123)] = "claude-sonnet-4-6"
         agent.handle_message(make_fake_message("hi"))
         time.sleep(0.5)
         self.assertEqual(mock_claude.call_args[1]["model"], "claude-sonnet-4-6")
@@ -744,11 +744,11 @@ class TestUserCwd(unittest.TestCase):
         self.assertEqual(agent.DEFAULT_CWD, os.getcwd())
 
     def test_per_user_override(self):
-        agent.user_cwd[123] = "/tmp"
-        self.assertEqual(agent.user_cwd.get(123, agent.DEFAULT_CWD), "/tmp")
+        agent.user_cwd[(123, 123)] = "/tmp"
+        self.assertEqual(agent.user_cwd.get((123, 123), agent.DEFAULT_CWD), "/tmp")
 
     def test_unknown_user_gets_default(self):
-        self.assertEqual(agent.user_cwd.get(999, agent.DEFAULT_CWD), agent.DEFAULT_CWD)
+        self.assertEqual(agent.user_cwd.get((999, 999), agent.DEFAULT_CWD), agent.DEFAULT_CWD)
 
 
 class TestUserModel(unittest.TestCase):
@@ -757,17 +757,17 @@ class TestUserModel(unittest.TestCase):
         agent.user_model.clear()
 
     def test_no_override_uses_global(self):
-        self.assertEqual(agent.user_model.get(123, agent.MODEL), agent.MODEL)
+        self.assertEqual(agent.user_model.get((123, 123), agent.MODEL), agent.MODEL)
 
     def test_per_user_override(self):
-        agent.user_model[123] = "claude-sonnet-4-6"
-        self.assertEqual(agent.user_model.get(123, agent.MODEL), "claude-sonnet-4-6")
+        agent.user_model[(123, 123)] = "claude-sonnet-4-6"
+        self.assertEqual(agent.user_model.get((123, 123), agent.MODEL), "claude-sonnet-4-6")
 
     def test_different_users_independent(self):
-        agent.user_model[1] = "model-a"
-        agent.user_model[2] = "model-b"
-        self.assertEqual(agent.user_model[1], "model-a")
-        self.assertEqual(agent.user_model[2], "model-b")
+        agent.user_model[(1, 1)] = "model-a"
+        agent.user_model[(2, 2)] = "model-b"
+        self.assertEqual(agent.user_model[(1, 1)], "model-a")
+        self.assertEqual(agent.user_model[(2, 2)], "model-b")
 
 
 # ── Real Claude integration ───────────────────────────────────────────────────

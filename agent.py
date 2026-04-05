@@ -68,8 +68,8 @@ SESSIONS_PATH = os.path.join(CTA_HOME, "sessions.json")
 
 bot = None  # initialized in create_bot()
 user_sessions: dict[tuple[int, int], str] = {}  # (uid, chat_id) → Claude session ID
-user_cwd: dict[int, str] = {}        # per-user working directory
-user_model: dict[int, str] = {}      # per-user model override
+user_cwd: dict[tuple[int, int], str] = {}  # (uid, chat_id) → working directory
+user_model: dict[tuple[int, int], str] = {}  # (uid, chat_id) → model override
 user_queues: dict[tuple[int, int], queue.Queue] = {}
 user_queues_lock = threading.Lock()
 claude_lock = threading.Lock()  # serialize Claude CLI calls (Max subscription concurrency limit)
@@ -221,8 +221,8 @@ def _typing_loop(chat_id: int, done: threading.Event):
 
 def _process_message(uid: int, chat_id: int, message, done: threading.Event):
     global claude_busy_for
-    cwd = user_cwd.get(uid, DEFAULT_CWD)
-    model = user_model.get(uid, MODEL)
+    cwd = user_cwd.get((uid, chat_id), DEFAULT_CWD)
+    model = user_model.get((uid, chat_id), MODEL)
     session_id = user_sessions.get((uid, chat_id))
     username = message.from_user.username or str(uid)
 
@@ -299,11 +299,11 @@ def cmd_cd(message):
     uid = message.from_user.id
     path = message.text.replace("/cd", "", 1).strip()
     if not path:
-        bot.reply_to(message, f"📂 Current: `{user_cwd.get(uid, DEFAULT_CWD)}`", parse_mode="Markdown")
+        bot.reply_to(message, f"📂 Current: `{user_cwd.get((uid, message.chat.id), DEFAULT_CWD)}`", parse_mode="Markdown")
         return
     expanded = os.path.expanduser(path)
     if os.path.isdir(expanded):
-        user_cwd[uid] = expanded
+        user_cwd[(uid, message.chat.id)] = expanded
         user_sessions.pop((uid, message.chat.id), None)
         save_sessions()
         bot.reply_to(message, f"📂 → `{expanded}` (session cleared)", parse_mode="Markdown")
@@ -313,7 +313,7 @@ def cmd_cd(message):
 
 def cmd_pwd(message):
     if not _allowed(message): return
-    bot.reply_to(message, f"📂 `{user_cwd.get(message.from_user.id, DEFAULT_CWD)}`", parse_mode="Markdown")
+    bot.reply_to(message, f"📂 `{user_cwd.get((message.from_user.id, message.chat.id), DEFAULT_CWD)}`", parse_mode="Markdown")
 
 
 def cmd_model(message):
@@ -321,9 +321,9 @@ def cmd_model(message):
     uid = message.from_user.id
     name = message.text.replace("/model", "", 1).strip()
     if not name:
-        bot.reply_to(message, f"🤖 Model: `{user_model.get(uid, MODEL)}`", parse_mode="Markdown")
+        bot.reply_to(message, f"🤖 Model: `{user_model.get((uid, message.chat.id), MODEL)}`", parse_mode="Markdown")
         return
-    user_model[uid] = name
+    user_model[(uid, message.chat.id)] = name
     user_sessions.pop((uid, message.chat.id), None)
     save_sessions()
     bot.reply_to(message, f"🤖 Model → `{name}` (session cleared)", parse_mode="Markdown")
@@ -334,8 +334,8 @@ def cmd_status(message):
     uid = message.from_user.id
     bot.reply_to(
         message,
-        f"🤖 Model: `{user_model.get(uid, MODEL)}`\n"
-        f"📂 Cwd: `{user_cwd.get(uid, DEFAULT_CWD)}`\n"
+        f"🤖 Model: `{user_model.get((uid, message.chat.id), MODEL)}`\n"
+        f"📂 Cwd: `{user_cwd.get((uid, message.chat.id), DEFAULT_CWD)}`\n"
         f"🔑 Session: `{user_sessions.get((uid, message.chat.id), 'none')}`",
         parse_mode="Markdown",
     )
