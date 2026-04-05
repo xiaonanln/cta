@@ -300,7 +300,9 @@ def cmd_cd(message):
     expanded = os.path.expanduser(path)
     if os.path.isdir(expanded):
         user_cwd[uid] = expanded
-        bot.reply_to(message, f"📂 → `{expanded}`", parse_mode="Markdown")
+        user_sessions.pop((uid, message.chat.id), None)
+        save_sessions()
+        bot.reply_to(message, f"📂 → `{expanded}` (session cleared)", parse_mode="Markdown")
     else:
         bot.reply_to(message, f"❌ Not a directory: `{path}`", parse_mode="Markdown")
 
