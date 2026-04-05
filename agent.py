@@ -320,10 +320,6 @@ def handle_message(message):
     tui_log(f"[green]→[/] [bold]{escape(str(message.from_user.username or uid))}[/] {escape(message.text)}")
     if ALLOWED_USERS and uid not in ALLOWED_USERS:
         return
-    try:
-        bot.send_chat_action(message.chat.id, "typing")
-    except Exception:
-        pass
     _get_user_queue(uid).put(message)
 
 
@@ -339,7 +335,7 @@ def create_bot():
     telebot_log.addFilter(_Suppress409())
     telebot_log.addHandler(_TuiLogHandler())
     telebot_log.propagate = False
-    bot = telebot.TeleBot(BOT_TOKEN)
+    bot = telebot.TeleBot(BOT_TOKEN, num_threads=8)
     bot.message_handler(commands=["start"])(cmd_start)
     bot.message_handler(commands=["clear"])(cmd_clear)
     bot.message_handler(commands=["cd"])(cmd_cd)
