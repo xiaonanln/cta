@@ -7,6 +7,7 @@ Uses Max subscription — no API tokens needed.
 
 import json
 import logging
+import math
 import os
 import queue
 import subprocess
@@ -18,6 +19,7 @@ from datetime import datetime
 
 import telebot
 import telegramify_markdown
+from rich.columns import Columns
 from rich.layout import Layout
 from rich.live import Live
 from rich.markup import escape
@@ -72,8 +74,11 @@ user_cwd: dict[tuple[int, int], str] = {}  # (uid, chat_id) → working director
 user_model: dict[tuple[int, int], str] = {}  # (uid, chat_id) → model override
 user_queues: dict[tuple[int, int], queue.Queue] = {}
 user_queues_lock = threading.Lock()
+chat_labels: dict[tuple[int, int], str] = {}   # (uid, chat_id) → "DM" or group name
+msg_counts: dict[tuple[int, int], int] = {}    # (uid, chat_id) → messages processed
 claude_lock = threading.Lock()  # serialize Claude CLI calls (Max subscription concurrency limit)
 claude_busy_for = None  # username of user currently calling Claude
+claude_busy_key = None  # (uid, chat_id) of active session
 
 
 def init(config: dict):
@@ -90,9 +95,16 @@ def load_sessions():
     try:
         with open(SESSIONS_PATH) as f:
             data = json.load(f)
-        for key_str, session_id in data.items():
+        for key_str, entry in data.items():
             uid_str, chat_str = key_str.split(":", 1)
-            user_sessions[(int(uid_str), int(chat_str))] = session_id
+            key = (int(uid_str), int(chat_str))
+            if isinstance(entry, str):  # backward compat
+                user_sessions[key] = entry
+            else:
+                if entry.get("session"):
+                    user_sessions[key] = entry["session"]
+                if entry.get("cwd"):
+                    user_cwd[key] = entry["cwd"]
         tui_log(f"[dim]Loaded {len(data)} session(s) from {SESSIONS_PATH}[/]")
     except Exception as e:
         tui_log(f"[red]Warning: could not load sessions: {escape(str(e))}[/]")
@@ -101,8 +113,18 @@ def load_sessions():
 def save_sessions():
     tmp = SESSIONS_PATH + ".tmp"
     try:
+        all_keys = set(user_sessions) | set(user_cwd)
+        data = {}
+        for key in all_keys:
+            uid, chat_id = key
+            entry = {}
+            if key in user_sessions:
+                entry["session"] = user_sessions[key]
+            if key in user_cwd:
+                entry["cwd"] = user_cwd[key]
+            data[f"{uid}:{chat_id}"] = entry
         with open(tmp, "w") as f:
-            json.dump({f"{uid}:{chat_id}": sid for (uid, chat_id), sid in user_sessions.items()}, f)
+            json.dump(data, f, indent=2)
         os.replace(tmp, SESSIONS_PATH)
     except Exception as e:
         tui_log(f"[red]Warning: could not save sessions: {escape(str(e))}[/]")
@@ -126,15 +148,35 @@ class _TuiLogHandler(logging.Handler):
 
 
 def _status_panel() -> tuple[Panel, int]:
-    line1 = f"[bold]model:[/] [cyan]{escape(MODEL)}[/]   [bold]cwd:[/] [cyan]{escape(DEFAULT_CWD)}[/]"
-    if user_sessions:
-        sessions_str = "   ".join(f"[bold]{uid}:{chat_id}:[/] [dim]{sid[:8]}…[/]" for (uid, chat_id), sid in user_sessions.items())
-        info = line1 + "\n[bold]sessions:[/] " + sessions_str
-        size = 5
+    header = f"[bold]model:[/] [cyan]{escape(MODEL)}[/]   [bold]cwd:[/] [cyan]{escape(DEFAULT_CWD)}[/]"
+    all_keys = set(user_sessions) | set(msg_counts)
+    if all_keys:
+        cards = []
+        for key in sorted(all_keys):
+            uid, chat_id = key
+            label = escape(chat_labels.get(key, f"{uid}:{chat_id}"))
+            sid = user_sessions.get(key, "")
+            sid_str = f"[dim]{sid[:8]}…[/]" if sid else "[dim]no session[/]"
+            model = escape(user_model.get(key, MODEL))
+            cwd = escape(user_cwd.get(key, DEFAULT_CWD))
+            count = msg_counts.get(key, 0)
+            body = f"[bold]session:[/] {sid_str}\n[bold]model:[/]   [cyan]{model}[/]\n[bold]cwd:[/]     [cyan]{cwd}[/]\n[bold]msgs:[/]    [yellow]{count}[/]"
+            active = key == claude_busy_key
+            cards.append(Panel(body, title=f"[bold {'yellow' if active else 'green'}]{label}[/]", border_style="yellow" if active else "default"))
+        content = Columns(cards, equal=True, expand=True)
+        try:
+            term_width = os.get_terminal_size().columns
+        except OSError:
+            term_width = 80
+        card_width = 40  # approximate min card width
+        cols = max(1, term_width // card_width)
+        rows = math.ceil(len(cards) / cols)
+        card_height = 6  # 4 content lines + 2 border lines
+        size = 3 + rows * card_height
     else:
-        info = line1 + "   [bold]sessions:[/] [dim]none[/]"
+        content = header + "   [bold]sessions:[/] [dim]none[/]"
         size = 3
-    return Panel(info, title="[bold green]CTA[/]"), size
+    return Panel(content, title=f"[bold green]CTA[/]  {header}"), size
 
 
 def _log_panel() -> Panel:
@@ -220,11 +262,16 @@ def _typing_loop(chat_id: int, done: threading.Event):
 
 
 def _process_message(uid: int, chat_id: int, message, done: threading.Event):
-    global claude_busy_for
-    cwd = user_cwd.get((uid, chat_id), DEFAULT_CWD)
-    model = user_model.get((uid, chat_id), MODEL)
-    session_id = user_sessions.get((uid, chat_id))
+    global claude_busy_for, claude_busy_key
+    key = (uid, chat_id)
+    cwd = user_cwd.get(key, DEFAULT_CWD)
+    model = user_model.get(key, MODEL)
+    session_id = user_sessions.get(key)
     username = message.from_user.username or str(uid)
+    if message.chat.type == "private":
+        chat_labels[key] = f"DM:{username}"
+    else:
+        chat_labels[key] = message.chat.title or str(chat_id)
 
     # If Claude is busy with another user, notify and wait
     if claude_lock.locked() and claude_busy_for != username:
@@ -233,19 +280,22 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
 
     with claude_lock:
         claude_busy_for = username
+        claude_busy_key = key
         try:
             reply, new_session_id = call_claude(message.text, cwd=cwd, session_id=session_id, model=model)
             if session_id and "No conversation found with session ID" in reply:
                 tui_log(f"[yellow]⚠ stale session for {escape(username)}, retrying fresh[/]")
-                user_sessions.pop((uid, chat_id), None)
+                user_sessions.pop(key, None)
                 reply, new_session_id = call_claude(message.text, cwd=cwd, session_id=None, model=model)
         finally:
             claude_busy_for = None
+            claude_busy_key = None
             done.set()
 
     if new_session_id:
-        user_sessions[(uid, chat_id)] = new_session_id
+        user_sessions[key] = new_session_id
         save_sessions()
+    msg_counts[key] = msg_counts.get(key, 0) + 1
     preview = reply[:120].replace("\n", " ")
     tui_log(f"[blue]←[/] [bold]{escape(username)}[/] {escape(preview)}{'…' if len(reply) > 120 else ''}")
     for chunk in _split_reply(reply):

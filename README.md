@@ -31,7 +31,7 @@ All configuration is in `~/.cta/config.json`:
 | `claude_timeout` | `600` | Max seconds per Claude call |
 | `model` | `claude-opus-4-6` | Claude model to use |
 
-Sessions are persisted in `~/.cta/sessions.json` automatically.
+Sessions and working directories are persisted in `~/.cta/sessions.json` automatically — both are restored on restart.
 
 ## Bot Commands
 
@@ -55,4 +55,5 @@ You → Telegram → CTA → claude --print --resume <session> → response → 
 - **Separate sessions per context**: DMs and each group chat maintain independent Claude conversations — switching between them never bleeds context
 - Session persistence: conversations survive restarts via `~/.cta/sessions.json`
 - Per-user message queues: sequential processing per user, serialized Claude calls
+- Rich TUI status panel: each active chat shown as a card with label, model, cwd, and message count
 - Markdown formatting via `telegramify-markdown`

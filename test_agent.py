@@ -36,6 +36,8 @@ def setup_fake_bot():
     agent.user_sessions.clear()
     agent.user_cwd.clear()
     agent.user_model.clear()
+    agent.chat_labels.clear()
+    agent.msg_counts.clear()
     return agent.bot
 
 
@@ -112,6 +114,7 @@ class TestSessionPersistence(unittest.TestCase):
 
     def tearDown(self):
         agent.user_sessions.clear()
+        agent.user_cwd.clear()
         agent.SESSIONS_PATH = self._orig_sessions_path
         agent.init(agent.DEFAULT_CONFIG)
         for path in [self.tmp.name, self.tmp.name + ".tmp"]:
@@ -127,12 +130,28 @@ class TestSessionPersistence(unittest.TestCase):
         self.assertEqual(agent.user_sessions[(123, 123)], "sess-abc")
         self.assertEqual(agent.user_sessions[(456, 456)], "sess-def")
 
+    def test_cwd_persisted_and_restored(self):
+        agent.user_sessions[(123, 123)] = "sess-abc"
+        agent.user_cwd[(123, 123)] = "/tmp/myproject"
+        agent.save_sessions()
+        agent.user_sessions.clear()
+        agent.user_cwd.clear()
+        agent.load_sessions()
+        self.assertEqual(agent.user_sessions[(123, 123)], "sess-abc")
+        self.assertEqual(agent.user_cwd[(123, 123)], "/tmp/myproject")
+
+    def test_backward_compat_string_format(self):
+        with open(self.tmp.name, "w") as f:
+            json.dump({"77:77": "old-session-id"}, f)
+        agent.load_sessions()
+        self.assertEqual(agent.user_sessions[(77, 77)], "old-session-id")
+
     def test_save_writes_valid_json(self):
         agent.user_sessions[(99, 99)] = "my-session"
         agent.save_sessions()
         with open(self.tmp.name) as f:
             data = json.load(f)
-        self.assertEqual(data["99:99"], "my-session")
+        self.assertEqual(data["99:99"]["session"], "my-session")
 
     def test_load_missing_file_is_noop(self):
         os.unlink(self.tmp.name)
