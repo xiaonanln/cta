@@ -48,7 +48,7 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(config["telegram_bot_token"], "")
         self.assertEqual(config["allowed_users"], [])
         self.assertEqual(config["claude_timeout"], 600)
-        self.assertEqual(config["model"], "claude-opus-4-6")
+        self.assertEqual(config["model"], "claude-sonnet-4-6")
 
     def test_load_from_file(self):
         cfg = {"telegram_bot_token": "abc:123", "allowed_users": [111]}

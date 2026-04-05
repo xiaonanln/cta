@@ -33,7 +33,7 @@ DEFAULT_CONFIG = {
     "telegram_bot_token": "",
     "allowed_users": [],
     "claude_timeout": 600,
-    "model": "claude-opus-4-6",
+    "model": "claude-sonnet-4-6",
 }
 
 
@@ -62,7 +62,7 @@ def load_config() -> dict:
 BOT_TOKEN = ""
 ALLOWED_USERS: set[int] = set()
 TIMEOUT = 600
-MODEL = "claude-opus-4-6"
+MODEL = "claude-sonnet-4-6"
 DEFAULT_CWD = os.getcwd()
 SESSIONS_PATH = os.path.join(CTA_HOME, "sessions.json")
 
@@ -81,7 +81,7 @@ def init(config: dict):
     BOT_TOKEN = config["telegram_bot_token"]
     ALLOWED_USERS = set(config["allowed_users"])
     TIMEOUT = config["claude_timeout"]
-    MODEL = config.get("model", "claude-opus-4-6")
+    MODEL = config.get("model", "claude-sonnet-4-6")
 
 
 def load_sessions():
