@@ -9,6 +9,7 @@ import argparse
 import json
 import logging
 import os
+import queue
 import subprocess
 import sys
 import threading
@@ -57,6 +58,9 @@ DEFAULT_CWD = os.getcwd()
 bot = None  # initialized in create_bot()
 user_sessions: dict[int, str] = {}  # per-user Claude session IDs
 user_cwd: dict[int, str] = {}       # per-user working directory
+user_model: dict[int, str] = {}     # per-user model override
+user_queues: dict[int, queue.Queue] = {}  # per-user message queues (serializes requests)
+user_queues_lock = threading.Lock()
 
 
 def init(config: dict):
@@ -69,10 +73,10 @@ def init(config: dict):
 
 # ── Claude CLI ────────────────────────────────────────────────────────────────
 
-def call_claude(prompt: str, cwd: str = None, session_id: str = None) -> tuple[str, str]:
+def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str = None) -> tuple[str, str]:
     """Call Claude Code CLI. Returns (text, session_id)."""
     cwd = cwd or DEFAULT_CWD
-    cmd = ["claude", "--print", "--dangerously-skip-permissions", "--model", MODEL,
+    cmd = ["claude", "--print", "--dangerously-skip-permissions", "--model", model or MODEL,
            "--output-format", "json", "-p", prompt]
     if session_id:
         cmd += ["--resume", session_id]
@@ -128,36 +132,88 @@ def cmd_pwd(message):
     bot.reply_to(message, f"📂 `{cwd}`", parse_mode="Markdown")
 
 
+def cmd_model(message):
+    if ALLOWED_USERS and message.from_user.id not in ALLOWED_USERS:
+        return
+    uid = message.from_user.id
+    name = message.text.replace("/model", "", 1).strip()
+    if not name:
+        current = user_model.get(uid, MODEL)
+        bot.reply_to(message, f"🤖 Model: `{current}`", parse_mode="Markdown")
+        return
+    user_model[uid] = name
+    user_sessions.pop(uid, None)  # new model = fresh session
+    bot.reply_to(message, f"🤖 Model → `{name}` (session cleared)", parse_mode="Markdown")
+
+
+def cmd_status(message):
+    if ALLOWED_USERS and message.from_user.id not in ALLOWED_USERS:
+        return
+    uid = message.from_user.id
+    cwd = user_cwd.get(uid, DEFAULT_CWD)
+    model = user_model.get(uid, MODEL)
+    session_id = user_sessions.get(uid, "none")
+    bot.reply_to(
+        message,
+        f"🤖 Model: `{model}`\n📂 Cwd: `{cwd}`\n🔑 Session: `{session_id}`",
+        parse_mode="Markdown",
+    )
+
+
+def _process_message(uid: int, message):
+    """Process a single message for a user (called serially from the user's worker thread)."""
+    cwd = user_cwd.get(uid, DEFAULT_CWD)
+    model = user_model.get(uid, MODEL)
+    session_id = user_sessions.get(uid)
+
+    done = threading.Event()
+
+    def typing_loop():
+        while not done.wait(timeout=4):
+            try:
+                bot.send_chat_action(message.chat.id, "typing")
+            except Exception:
+                pass
+
+    threading.Thread(target=typing_loop, daemon=True).start()
+    try:
+        reply, new_session_id = call_claude(message.text, cwd=cwd, session_id=session_id, model=model)
+    finally:
+        done.set()
+
+    if new_session_id:
+        user_sessions[uid] = new_session_id
+    for i in range(0, len(reply), 4096):
+        bot.reply_to(message, reply[i : i + 4096])
+
+
+def _user_worker(uid: int, q: queue.Queue):
+    """Worker thread: processes one message at a time for a user."""
+    while True:
+        message = q.get()
+        try:
+            _process_message(uid, message)
+        except Exception as e:
+            print(f"[worker:{uid}] error: {e}", file=sys.stderr)
+        finally:
+            q.task_done()
+
+
+def _get_user_queue(uid: int) -> queue.Queue:
+    with user_queues_lock:
+        if uid not in user_queues:
+            q = queue.Queue()
+            user_queues[uid] = q
+            threading.Thread(target=_user_worker, args=(uid, q), daemon=True).start()
+        return user_queues[uid]
+
+
 def handle_message(message):
     uid = message.from_user.id
     print(f"[{message.from_user.username or uid}] {message.text}", file=sys.stderr)
     if ALLOWED_USERS and uid not in ALLOWED_USERS:
         return
-    cwd = user_cwd.get(uid, DEFAULT_CWD)
-    session_id = user_sessions.get(uid)
-
-    def process():
-        done = threading.Event()
-
-        def typing_loop():
-            while not done.wait(timeout=4):
-                try:
-                    bot.send_chat_action(message.chat.id, "typing")
-                except Exception:
-                    pass
-
-        threading.Thread(target=typing_loop, daemon=True).start()
-        try:
-            reply, new_session_id = call_claude(message.text, cwd=cwd, session_id=session_id)
-        finally:
-            done.set()
-
-        if new_session_id:
-            user_sessions[uid] = new_session_id
-        for i in range(0, len(reply), 4096):
-            bot.reply_to(message, reply[i : i + 4096])
-
-    threading.Thread(target=process, daemon=True).start()
+    _get_user_queue(uid).put(message)
 
 
 class _Suppress409(logging.Filter):
@@ -174,6 +230,8 @@ def create_bot():
     bot.message_handler(commands=["clear"])(cmd_clear)
     bot.message_handler(commands=["cd"])(cmd_cd)
     bot.message_handler(commands=["pwd"])(cmd_pwd)
+    bot.message_handler(commands=["model"])(cmd_model)
+    bot.message_handler(commands=["status"])(cmd_status)
     bot.message_handler(func=lambda m: m.text and not m.text.startswith("/"))(handle_message)
     return bot
 
