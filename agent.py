@@ -158,7 +158,7 @@ def _status_panel() -> tuple[Panel, int]:
             sid = user_sessions.get(key, "")
             sid_str = f"[dim]{sid[:8]}…[/]" if sid else "[dim]no session[/]"
             model = escape(user_model.get(key, MODEL))
-            cwd = escape(user_cwd.get(key, DEFAULT_CWD))
+            cwd = escape(user_cwd.get(key, DEFAULT_CWD).replace(os.path.expanduser("~"), "~", 1))
             count = msg_counts.get(key, 0)
             body = f"[bold]session:[/] {sid_str}\n[bold]model:[/]   [cyan]{model}[/]\n[bold]cwd:[/]     [cyan]{cwd}[/]\n[bold]msgs:[/]    [yellow]{count}[/]"
             active = key == claude_busy_key
