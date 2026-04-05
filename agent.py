@@ -43,12 +43,22 @@ class _TuiLogHandler(logging.Handler):
 
 
 def _status_panel() -> Panel:
-    info = (
+    line1 = (
         f"[bold]model:[/] [cyan]{escape(MODEL)}[/]"
         f"   [bold]cwd:[/] [cyan]{escape(DEFAULT_CWD)}[/]"
-        f"   [bold]sessions:[/] [cyan]{len(user_sessions)}[/]"
     )
-    return Panel(info, title="[bold green]CTA[/]")
+    if user_sessions:
+        session_parts = [
+            f"[bold]{uid}:[/] [dim]{sid[:8]}…[/]"
+            for uid, sid in user_sessions.items()
+        ]
+        line2 = "[bold]sessions:[/] " + "   ".join(session_parts)
+        info = line1 + "\n" + line2
+        size = 5
+    else:
+        info = line1 + "   [bold]sessions:[/] [dim]none[/]"
+        size = 3
+    return Panel(info, title="[bold green]CTA[/]"), size
 
 
 def _log_panel() -> Panel:
@@ -64,8 +74,9 @@ def _log_panel() -> Panel:
 
 def _build_layout() -> Layout:
     layout = Layout()
-    layout.split_column(Layout(name="status", size=3), Layout(name="log"))
-    layout["status"].update(_status_panel())
+    panel, size = _status_panel()
+    layout.split_column(Layout(name="status", size=size), Layout(name="log"))
+    layout["status"].update(panel)
     layout["log"].update(_log_panel())
     return layout
 
@@ -346,6 +357,13 @@ if __name__ == "__main__":
     load_sessions()
     create_bot()
     tui_log(f"[dim]CTA starting… model=[cyan]{MODEL}[/] cwd=[cyan]{DEFAULT_CWD}[/] users={ALLOWED_USERS or 'all'}[/]")
+
+    notify_uids = ALLOWED_USERS or set(user_sessions.keys())
+    for uid in notify_uids:
+        try:
+            bot.send_message(uid, "✅ CTA is ready.")
+        except Exception as e:
+            tui_log(f"[red]Could not notify {uid}: {escape(str(e))}[/]")
 
     threading.Thread(target=bot.infinity_polling, daemon=True).start()
     with Live(auto_refresh=False, screen=True) as live:
