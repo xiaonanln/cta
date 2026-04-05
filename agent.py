@@ -172,7 +172,7 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
         text = (data.get("result") or "").strip() or "(empty response)"
         return text, data.get("session_id", "")
     except subprocess.TimeoutExpired:
-        return "(Claude timed out)", None  # None signals caller to clear the session
+        return "(Claude timed out)", ""
     except FileNotFoundError:
         return "(claude CLI not found — install @anthropic-ai/claude-code)", ""
 
@@ -266,11 +266,7 @@ def _process_message(uid: int, message):
     finally:
         done.set()
 
-    if new_session_id is None:
-        # Timeout — session is corrupted, clear it
-        user_sessions.pop(uid, None)
-        save_sessions()
-    elif new_session_id:
+    if new_session_id:
         user_sessions[uid] = new_session_id
         save_sessions()
     preview = reply[:120].replace("\n", " ")
