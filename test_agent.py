@@ -5,10 +5,12 @@ import subprocess
 import unittest
 from unittest.mock import patch, MagicMock
 
-# Set required env before importing
+# Initialize with test config before importing
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-token")
 
 import agent
+
+agent.init(agent.DEFAULT_CONFIG)
 
 
 def make_fake_message(text, user_id=123, username="tester"):
@@ -346,3 +348,56 @@ class TestRealClaude(unittest.TestCase):
         result = agent.call_claude("Count from 1 to 20, one number per line.")
         self.assertIn("1", result)
         self.assertIn("20", result)
+
+
+class TestConfig(unittest.TestCase):
+    """Tests for config loading."""
+
+    def test_default_config(self):
+        with patch.dict(os.environ, {}, clear=True):
+            config = agent.load_config(None)
+        self.assertEqual(config["telegram_bot_token"], "")
+        self.assertEqual(config["allowed_users"], [])
+        self.assertEqual(config["claude_timeout"], 120)
+        self.assertEqual(config["max_history"], 20)
+
+    def test_load_from_file(self):
+        import tempfile, json
+        cfg = {"telegram_bot_token": "abc:123", "allowed_users": [111]}
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(cfg, f)
+            f.flush()
+            with patch.dict(os.environ, {}, clear=True):
+                config = agent.load_config(f.name)
+        os.unlink(f.name)
+        self.assertEqual(config["telegram_bot_token"], "abc:123")
+        self.assertEqual(config["allowed_users"], [111])
+        self.assertEqual(config["claude_timeout"], 120)  # default preserved
+
+    def test_env_overrides_file(self):
+        import tempfile, json
+        cfg = {"telegram_bot_token": "from-file", "claude_timeout": 60}
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(cfg, f)
+            f.flush()
+            with patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "from-env"}):
+                config = agent.load_config(f.name)
+        os.unlink(f.name)
+        self.assertEqual(config["telegram_bot_token"], "from-env")
+        self.assertEqual(config["claude_timeout"], 60)
+
+    def test_missing_file_uses_defaults(self):
+        with patch.dict(os.environ, {}, clear=True):
+            config = agent.load_config("/nonexistent/config.json")
+        self.assertEqual(config["claude_timeout"], 120)
+        self.assertEqual(config["max_history"], 20)
+
+    def test_init_applies_config(self):
+        config = {"telegram_bot_token": "tok", "allowed_users": [1, 2], "claude_timeout": 30, "max_history": 10}
+        agent.init(config)
+        self.assertEqual(agent.BOT_TOKEN, "tok")
+        self.assertEqual(agent.ALLOWED_USERS, {1, 2})
+        self.assertEqual(agent.TIMEOUT, 30)
+        self.assertEqual(agent.MAX_HISTORY, 10)
+        # Reset
+        agent.init(agent.DEFAULT_CONFIG)

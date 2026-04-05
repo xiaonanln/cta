@@ -1,0 +1,6 @@
+{
+  "telegram_bot_token": "YOUR_BOT_TOKEN_HERE",
+  "allowed_users": [2018384667],
+  "claude_timeout": 120,
+  "max_history": 20
+}

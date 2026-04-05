@@ -1,28 +1,75 @@
 #!/usr/bin/env python3
 """
+CTA — Claude Telegram Agent.
 Telegram bot powered by Claude Code CLI.
 Uses Max subscription — no API tokens needed.
 """
 
+import argparse
+import json
 import os
 import subprocess
 import threading
 import telebot
 
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-ALLOWED_USERS = set(
-    int(x) for x in os.environ.get("ALLOWED_USERS", "").split(",") if x.strip()
-)
-TIMEOUT = int(os.environ.get("CLAUDE_TIMEOUT", "120"))
-DEFAULT_CWD = os.environ.get("CLAUDE_CWD", os.getcwd())
+# ── Config ────────────────────────────────────────────────────────────────────
 
-bot = None  # initialized in main
+DEFAULT_CONFIG = {
+    "telegram_bot_token": "",
+    "allowed_users": [],
+    "claude_timeout": 120,
+    "max_history": 20,
+}
 
-# Per-user state
-conversations: dict[int, list[dict]] = {}
-user_cwd: dict[int, str] = {}  # per-user working directory
+
+def load_config(config_path=None) -> dict:
+    """Load config from file, with env var overrides."""
+    config = dict(DEFAULT_CONFIG)
+
+    # Load from file
+    if config_path and os.path.exists(config_path):
+        with open(config_path) as f:
+            file_config = json.load(f)
+        config.update(file_config)
+
+    # Env vars override file config
+    if os.environ.get("TELEGRAM_BOT_TOKEN"):
+        config["telegram_bot_token"] = os.environ["TELEGRAM_BOT_TOKEN"]
+    if os.environ.get("ALLOWED_USERS"):
+        config["allowed_users"] = [
+            int(x) for x in os.environ["ALLOWED_USERS"].split(",") if x.strip()
+        ]
+    if os.environ.get("CLAUDE_TIMEOUT"):
+        config["claude_timeout"] = int(os.environ["CLAUDE_TIMEOUT"])
+    if os.environ.get("MAX_HISTORY"):
+        config["max_history"] = int(os.environ["MAX_HISTORY"])
+
+    return config
+
+
+# ── Globals (set by init()) ───────────────────────────────────────────────────
+
+BOT_TOKEN = ""
+ALLOWED_USERS: set[int] = set()
+TIMEOUT = 120
 MAX_HISTORY = 20
+DEFAULT_CWD = os.getcwd()
 
+bot = None  # initialized in create_bot()
+conversations: dict[int, list[dict]] = {}
+user_cwd: dict[int, str] = {}
+
+
+def init(config: dict):
+    """Apply config to module globals."""
+    global BOT_TOKEN, ALLOWED_USERS, TIMEOUT, MAX_HISTORY
+    BOT_TOKEN = config["telegram_bot_token"]
+    ALLOWED_USERS = set(config["allowed_users"])
+    TIMEOUT = config["claude_timeout"]
+    MAX_HISTORY = config["max_history"]
+
+
+# ── Claude CLI ────────────────────────────────────────────────────────────────
 
 def call_claude(prompt: str, cwd: str = DEFAULT_CWD) -> str:
     """Call Claude Code CLI in print mode (uses Max subscription)."""
@@ -44,6 +91,7 @@ def call_claude(prompt: str, cwd: str = DEFAULT_CWD) -> str:
         return "(claude CLI not found — install @anthropic-ai/claude-code)"
 
 
+# ── Bot Handlers ──────────────────────────────────────────────────────────────
 
 def cmd_start(message):
     if ALLOWED_USERS and message.from_user.id not in ALLOWED_USERS:
@@ -51,13 +99,11 @@ def cmd_start(message):
     bot.reply_to(message, "👋 Hi! I'm powered by Claude Code CLI. Just send me a message.")
 
 
-
 def cmd_clear(message):
     if ALLOWED_USERS and message.from_user.id not in ALLOWED_USERS:
         return
     conversations.pop(message.from_user.id, None)
     bot.reply_to(message, "🧹 Conversation cleared.")
-
 
 
 def cmd_cd(message):
@@ -76,7 +122,6 @@ def cmd_cd(message):
         bot.reply_to(message, f"❌ Not a directory: `{path}`", parse_mode="Markdown")
 
 
-
 def cmd_pwd(message):
     if ALLOWED_USERS and message.from_user.id not in ALLOWED_USERS:
         return
@@ -84,22 +129,18 @@ def cmd_pwd(message):
     bot.reply_to(message, f"📂 `{cwd}`", parse_mode="Markdown")
 
 
-
 def handle_message(message):
     uid = message.from_user.id
     if ALLOWED_USERS and uid not in ALLOWED_USERS:
         return
 
-    # Build conversation context
     if uid not in conversations:
         conversations[uid] = []
     conversations[uid].append({"role": "user", "content": message.text})
 
-    # Trim history
     if len(conversations[uid]) > MAX_HISTORY:
         conversations[uid] = conversations[uid][-MAX_HISTORY:]
 
-    # Build prompt with history
     prompt_parts = []
     for msg in conversations[uid]:
         prefix = "User" if msg["role"] == "user" else "Assistant"
@@ -107,13 +148,11 @@ def handle_message(message):
     prompt_parts.append("Assistant:")
     prompt = "\n\n".join(prompt_parts)
 
-    # Call Claude in background thread to not block
     cwd = user_cwd.get(uid, DEFAULT_CWD)
 
     def process():
         reply = call_claude(prompt, cwd=cwd)
         conversations[uid].append({"role": "assistant", "content": reply})
-        # Telegram max message length = 4096
         for i in range(0, len(reply), 4096):
             bot.reply_to(message, reply[i : i + 4096])
 
@@ -124,8 +163,6 @@ def create_bot():
     """Create and configure the Telegram bot."""
     global bot
     bot = telebot.TeleBot(BOT_TOKEN)
-
-    # Register handlers
     bot.message_handler(commands=["start"])(cmd_start)
     bot.message_handler(commands=["clear"])(cmd_clear)
     bot.message_handler(commands=["cd"])(cmd_cd)
@@ -134,11 +171,22 @@ def create_bot():
     return bot
 
 
+# ── Main ──────────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="CTA — Claude Telegram Agent")
+    parser.add_argument("-f", "--config", default="config.json", help="Config file path (default: config.json)")
+    args = parser.parse_args()
+
+    config = load_config(args.config)
+    init(config)
+
     if not BOT_TOKEN:
-        print("Error: TELEGRAM_BOT_TOKEN not set")
-        print("Usage: TELEGRAM_BOT_TOKEN=xxx ALLOWED_USERS=123,456 python agent.py")
+        print("Error: telegram_bot_token not set")
+        print("Set in config.json or TELEGRAM_BOT_TOKEN env var")
+        print(f"  python agent.py -f config.json")
         exit(1)
+
     create_bot()
-    print(f"Bot starting... (allowed users: {ALLOWED_USERS or 'all'})")
+    print(f"CTA starting... (cwd: {DEFAULT_CWD}, users: {ALLOWED_USERS or 'all'})")
     bot.infinity_polling()
