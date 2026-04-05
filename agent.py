@@ -62,6 +62,7 @@ user_cwd: dict[int, str] = {}        # per-user working directory
 user_model: dict[int, str] = {}      # per-user model override
 user_queues: dict[int, queue.Queue] = {}
 user_queues_lock = threading.Lock()
+claude_lock = threading.Lock()  # serialize Claude CLI calls (Max subscription concurrency limit)
 
 
 def init(config: dict):
@@ -148,24 +149,29 @@ def _build_layout() -> Layout:
 # ── Claude CLI ────────────────────────────────────────────────────────────────
 
 def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str = None) -> tuple[str, str]:
-    """Call Claude Code CLI. Returns (text, session_id)."""
+    """Call Claude Code CLI. Returns (text, session_id).
+
+    Serialized with claude_lock because Max/Pro subscriptions only allow
+    one concurrent CLI session — a second call would hang or error.
+    """
     cwd = cwd or DEFAULT_CWD
     cmd = ["claude", "--print", "--dangerously-skip-permissions",
            "--model", model or MODEL, "--output-format", "json", "-p", prompt]
     if session_id:
         cmd += ["--resume", session_id]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT, cwd=cwd)
-        if not result.stdout.strip():
-            err = result.stderr.strip()
-            return (f"[Error] {err}" if err else "(empty response)"), ""
-        data = json.loads(result.stdout)
-        text = (data.get("result") or "").strip() or "(empty response)"
-        return text, data.get("session_id", "")
-    except subprocess.TimeoutExpired:
-        return "(Claude timed out)", ""
-    except FileNotFoundError:
-        return "(claude CLI not found — install @anthropic-ai/claude-code)", ""
+    with claude_lock:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT, cwd=cwd)
+            if not result.stdout.strip():
+                err = result.stderr.strip()
+                return (f"[Error] {err}" if err else "(empty response)"), ""
+            data = json.loads(result.stdout)
+            text = (data.get("result") or "").strip() or "(empty response)"
+            return text, data.get("session_id", "")
+        except subprocess.TimeoutExpired:
+            return "(Claude timed out)", ""
+        except FileNotFoundError:
+            return "(claude CLI not found — install @anthropic-ai/claude-code)", ""
 
 
 # ── Message processing ────────────────────────────────────────────────────────
