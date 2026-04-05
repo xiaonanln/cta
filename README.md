@@ -10,8 +10,7 @@ Self-hosted Telegram bot powered by Claude Code CLI. Uses your Max/Pro subscript
 4. Configure:
 
 ```bash
-mkdir -p ~/.cta
-cp config.example.json ~/.cta/config.json
+python agent.py  # auto-generates ~/.cta/config.json on first run
 # Edit ~/.cta/config.json — set telegram_bot_token and allowed_users
 ```
 
@@ -53,6 +52,7 @@ You → Telegram → CTA → claude --print --resume <session> → response → 
 
 - Calls `claude --print --dangerously-skip-permissions` with your local Claude Code subscription
 - Full tool access: Claude can read/write files and run commands in the working directory
+- **Separate sessions per context**: DMs and each group chat maintain independent Claude conversations — switching between them never bleeds context
 - Session persistence: conversations survive restarts via `~/.cta/sessions.json`
 - Per-user message queues: sequential processing per user, serialized Claude calls
 - Markdown formatting via `telegramify-markdown`

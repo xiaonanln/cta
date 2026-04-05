@@ -67,10 +67,10 @@ DEFAULT_CWD = os.getcwd()
 SESSIONS_PATH = os.path.join(CTA_HOME, "sessions.json")
 
 bot = None  # initialized in create_bot()
-user_sessions: dict[int, str] = {}   # per-user Claude session IDs
+user_sessions: dict[tuple[int, int], str] = {}  # (uid, chat_id) → Claude session ID
 user_cwd: dict[int, str] = {}        # per-user working directory
 user_model: dict[int, str] = {}      # per-user model override
-user_queues: dict[int, queue.Queue] = {}
+user_queues: dict[tuple[int, int], queue.Queue] = {}
 user_queues_lock = threading.Lock()
 claude_lock = threading.Lock()  # serialize Claude CLI calls (Max subscription concurrency limit)
 claude_busy_for = None  # username of user currently calling Claude
@@ -90,8 +90,9 @@ def load_sessions():
     try:
         with open(SESSIONS_PATH) as f:
             data = json.load(f)
-        for uid_str, session_id in data.items():
-            user_sessions[int(uid_str)] = session_id
+        for key_str, session_id in data.items():
+            uid_str, chat_str = key_str.split(":", 1)
+            user_sessions[(int(uid_str), int(chat_str))] = session_id
         tui_log(f"[dim]Loaded {len(data)} session(s) from {SESSIONS_PATH}[/]")
     except Exception as e:
         tui_log(f"[red]Warning: could not load sessions: {escape(str(e))}[/]")
@@ -101,7 +102,7 @@ def save_sessions():
     tmp = SESSIONS_PATH + ".tmp"
     try:
         with open(tmp, "w") as f:
-            json.dump({str(uid): sid for uid, sid in user_sessions.items()}, f)
+            json.dump({f"{uid}:{chat_id}": sid for (uid, chat_id), sid in user_sessions.items()}, f)
         os.replace(tmp, SESSIONS_PATH)
     except Exception as e:
         tui_log(f"[red]Warning: could not save sessions: {escape(str(e))}[/]")
@@ -127,7 +128,7 @@ class _TuiLogHandler(logging.Handler):
 def _status_panel() -> tuple[Panel, int]:
     line1 = f"[bold]model:[/] [cyan]{escape(MODEL)}[/]   [bold]cwd:[/] [cyan]{escape(DEFAULT_CWD)}[/]"
     if user_sessions:
-        sessions_str = "   ".join(f"[bold]{uid}:[/] [dim]{sid[:8]}…[/]" for uid, sid in user_sessions.items())
+        sessions_str = "   ".join(f"[bold]{uid}:{chat_id}:[/] [dim]{sid[:8]}…[/]" for (uid, chat_id), sid in user_sessions.items())
         info = line1 + "\n[bold]sessions:[/] " + sessions_str
         size = 5
     else:
@@ -218,11 +219,11 @@ def _typing_loop(chat_id: int, done: threading.Event):
             break
 
 
-def _process_message(uid: int, message, done: threading.Event):
+def _process_message(uid: int, chat_id: int, message, done: threading.Event):
     global claude_busy_for
     cwd = user_cwd.get(uid, DEFAULT_CWD)
     model = user_model.get(uid, MODEL)
-    session_id = user_sessions.get(uid)
+    session_id = user_sessions.get((uid, chat_id))
     username = message.from_user.username or str(uid)
 
     # If Claude is busy with another user, notify and wait
@@ -239,7 +240,7 @@ def _process_message(uid: int, message, done: threading.Event):
             done.set()
 
     if new_session_id:
-        user_sessions[uid] = new_session_id
+        user_sessions[(uid, chat_id)] = new_session_id
         save_sessions()
     preview = reply[:120].replace("\n", " ")
     tui_log(f"[blue]←[/] [bold]{escape(username)}[/] {escape(preview)}{'…' if len(reply) > 120 else ''}")
@@ -247,27 +248,28 @@ def _process_message(uid: int, message, done: threading.Event):
         _send_markdown(message, chunk)
 
 
-def _user_worker(uid: int, q: queue.Queue):
+def _user_worker(uid: int, chat_id: int, q: queue.Queue):
     while True:
         message = q.get()
         done = threading.Event()
-        threading.Thread(target=_typing_loop, args=(message.chat.id, done), daemon=True).start()
+        threading.Thread(target=_typing_loop, args=(chat_id, done), daemon=True).start()
         try:
-            _process_message(uid, message, done)
+            _process_message(uid, chat_id, message, done)
         except Exception as e:
             done.set()
-            tui_log(f"[red][worker:{uid}] error: {escape(str(e))}[/]")
+            tui_log(f"[red][worker:{uid}:{chat_id}] error: {escape(str(e))}[/]")
         finally:
             q.task_done()
 
 
-def _get_user_queue(uid: int) -> queue.Queue:
+def _get_user_queue(uid: int, chat_id: int) -> queue.Queue:
+    key = (uid, chat_id)
     with user_queues_lock:
-        if uid not in user_queues:
+        if key not in user_queues:
             q = queue.Queue()
-            user_queues[uid] = q
-            threading.Thread(target=_user_worker, args=(uid, q), daemon=True).start()
-        return user_queues[uid]
+            user_queues[key] = q
+            threading.Thread(target=_user_worker, args=(uid, chat_id, q), daemon=True).start()
+        return user_queues[key]
 
 
 # ── Bot handlers ──────────────────────────────────────────────────────────────
@@ -283,7 +285,7 @@ def cmd_start(message):
 
 def cmd_clear(message):
     if not _allowed(message): return
-    user_sessions.pop(message.from_user.id, None)
+    user_sessions.pop((message.from_user.id, message.chat.id), None)
     save_sessions()
     bot.reply_to(message, "🧹 Conversation cleared.")
 
@@ -316,7 +318,7 @@ def cmd_model(message):
         bot.reply_to(message, f"🤖 Model: `{user_model.get(uid, MODEL)}`", parse_mode="Markdown")
         return
     user_model[uid] = name
-    user_sessions.pop(uid, None)
+    user_sessions.pop((uid, message.chat.id), None)
     save_sessions()
     bot.reply_to(message, f"🤖 Model → `{name}` (session cleared)", parse_mode="Markdown")
 
@@ -328,7 +330,7 @@ def cmd_status(message):
         message,
         f"🤖 Model: `{user_model.get(uid, MODEL)}`\n"
         f"📂 Cwd: `{user_cwd.get(uid, DEFAULT_CWD)}`\n"
-        f"🔑 Session: `{user_sessions.get(uid, 'none')}`",
+        f"🔑 Session: `{user_sessions.get((uid, message.chat.id), 'none')}`",
         parse_mode="Markdown",
     )
 
@@ -342,7 +344,7 @@ def handle_message(message):
     tui_log(f"[green]→[/] {source} [bold]{escape(str(message.from_user.username or uid))}[/] {escape(message.text)}")
     if not _allowed(message):
         return
-    _get_user_queue(uid).put(message)
+    _get_user_queue(uid, message.chat.id).put(message)
 
 
 # ── Bot setup ─────────────────────────────────────────────────────────────────

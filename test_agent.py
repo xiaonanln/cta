@@ -119,20 +119,20 @@ class TestSessionPersistence(unittest.TestCase):
                 os.unlink(path)
 
     def test_save_and_reload(self):
-        agent.user_sessions[123] = "sess-abc"
-        agent.user_sessions[456] = "sess-def"
+        agent.user_sessions[(123, 123)] = "sess-abc"
+        agent.user_sessions[(456, 456)] = "sess-def"
         agent.save_sessions()
         agent.user_sessions.clear()
         agent.load_sessions()
-        self.assertEqual(agent.user_sessions[123], "sess-abc")
-        self.assertEqual(agent.user_sessions[456], "sess-def")
+        self.assertEqual(agent.user_sessions[(123, 123)], "sess-abc")
+        self.assertEqual(agent.user_sessions[(456, 456)], "sess-def")
 
     def test_save_writes_valid_json(self):
-        agent.user_sessions[99] = "my-session"
+        agent.user_sessions[(99, 99)] = "my-session"
         agent.save_sessions()
         with open(self.tmp.name) as f:
             data = json.load(f)
-        self.assertEqual(data["99"], "my-session")
+        self.assertEqual(data["99:99"], "my-session")
 
     def test_load_missing_file_is_noop(self):
         os.unlink(self.tmp.name)
@@ -147,7 +147,7 @@ class TestSessionPersistence(unittest.TestCase):
 
     def test_save_is_atomic(self):
         """save_sessions must not leave a .tmp file behind."""
-        agent.user_sessions[1] = "s"
+        agent.user_sessions[(1, 1)] = "s"
         agent.save_sessions()
         self.assertFalse(os.path.exists(self.tmp.name + ".tmp"))
         self.assertTrue(os.path.exists(self.tmp.name))
@@ -424,9 +424,9 @@ class TestBotHandlers(unittest.TestCase):
         self.bot.reply_to.assert_not_called()
 
     def test_clear_removes_session(self):
-        agent.user_sessions[123] = "sess"
+        agent.user_sessions[(123, 123)] = "sess"
         agent.cmd_clear(make_fake_message("/clear"))
-        self.assertNotIn(123, agent.user_sessions)
+        self.assertNotIn((123, 123), agent.user_sessions)
         self.bot.reply_to.assert_called_once()
 
     def test_clear_blocked_unknown_user(self):
@@ -471,9 +471,9 @@ class TestBotHandlers(unittest.TestCase):
         self.assertEqual(agent.user_model[123], "claude-sonnet-4-6")
 
     def test_model_clears_session(self):
-        agent.user_sessions[123] = "old-session"
+        agent.user_sessions[(123, 123)] = "old-session"
         agent.cmd_model(make_fake_message("/model claude-sonnet-4-6"))
-        self.assertNotIn(123, agent.user_sessions)
+        self.assertNotIn((123, 123), agent.user_sessions)
 
     def test_model_blocked_unknown_user(self):
         agent.cmd_model(make_fake_message("/model opus", user_id=999))
@@ -482,7 +482,7 @@ class TestBotHandlers(unittest.TestCase):
     def test_status_shows_model_cwd_session(self):
         agent.user_model[123] = "claude-opus-4-6"
         agent.user_cwd[123] = "/tmp"
-        agent.user_sessions[123] = "sess-id-123"
+        agent.user_sessions[(123, 123)] = "sess-id-123"
         agent.cmd_status(make_fake_message("/status"))
         reply = self.bot.reply_to.call_args[0][1]
         self.assertIn("claude-opus-4-6", reply)
@@ -508,7 +508,7 @@ class TestBotHandlers(unittest.TestCase):
     def test_handle_message_stores_session(self, _):
         agent.handle_message(make_fake_message("hello"))
         time.sleep(0.5)
-        self.assertEqual(agent.user_sessions[123], "sess-abc")
+        self.assertEqual(agent.user_sessions[(123, 123)], "sess-abc")
 
     @patch("agent.call_claude", return_value=("ok", "s"))
     def test_handle_message_uses_user_cwd(self, mock_claude):
@@ -534,7 +534,7 @@ class TestBotHandlers(unittest.TestCase):
     def test_empty_session_id_not_stored(self, _):
         agent.handle_message(make_fake_message("hi"))
         time.sleep(0.5)
-        self.assertNotIn(123, agent.user_sessions)
+        self.assertNotIn((123, 123), agent.user_sessions)
 
     @patch("agent.call_claude", return_value=("reply", "new-sess"))
     def test_messages_processed_sequentially(self, mock_claude):
@@ -547,7 +547,7 @@ class TestBotHandlers(unittest.TestCase):
             return "reply", "new-sess"
 
         mock_claude.side_effect = side_effect
-        q = agent._get_user_queue(123)
+        q = agent._get_user_queue(123, 123)
         agent.handle_message(make_fake_message("msg1"))
         agent.handle_message(make_fake_message("msg2"))
         time.sleep(1.0)
@@ -595,13 +595,13 @@ class TestConcurrentUsers(unittest.TestCase):
 
         # Start user A (uid=1) — will hold the lock
         msg_a = make_fake_message("hello", user_id=1, username="alice")
-        agent._get_user_queue(1)
+        agent._get_user_queue(1, 1)
         agent.handle_message(msg_a)
         time.sleep(0.1)  # let worker thread start
 
         # Start user B (uid=2) — should get queued
         msg_b = make_fake_message("hi", user_id=2, username="bob")
-        agent._get_user_queue(2)
+        agent._get_user_queue(2, 2)
         agent.handle_message(msg_b)
         time.sleep(0.1)
         barrier.wait()  # release first call
@@ -630,8 +630,8 @@ class TestConcurrentUsers(unittest.TestCase):
 
         msg_a = make_fake_message("q1", user_id=1, username="alice")
         msg_b = make_fake_message("q2", user_id=2, username="bob")
-        agent._get_user_queue(1)
-        agent._get_user_queue(2)
+        agent._get_user_queue(1, 1)
+        agent._get_user_queue(2, 2)
         agent.handle_message(msg_a)
         time.sleep(0.1)
         agent.handle_message(msg_b)
@@ -666,7 +666,7 @@ class TestConcurrentUsers(unittest.TestCase):
         mock_claude.side_effect = capture_claude
 
         msg = make_fake_message("hi", user_id=1, username="alice")
-        agent._get_user_queue(1)
+        agent._get_user_queue(1, 1)
         agent.handle_message(msg)
         time.sleep(0.5)
 
@@ -689,7 +689,7 @@ class TestConcurrentUsers(unittest.TestCase):
 
         msg1 = make_fake_message("q1", user_id=1, username="alice")
         msg2 = make_fake_message("q2", user_id=1, username="alice")
-        agent._get_user_queue(1)
+        agent._get_user_queue(1, 1)
         agent.handle_message(msg1)
         agent.handle_message(msg2)
         time.sleep(0.1)
