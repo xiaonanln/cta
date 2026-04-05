@@ -5,7 +5,6 @@ Telegram bot powered by Claude Code CLI.
 Uses Max subscription — no API tokens needed.
 """
 
-import argparse
 import json
 import logging
 import os
@@ -27,21 +26,23 @@ from rich.table import Table
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
+CTA_HOME = os.path.expanduser("~/.cta")
+CONFIG_PATH = os.path.join(CTA_HOME, "config.json")
+
 DEFAULT_CONFIG = {
     "telegram_bot_token": "",
     "allowed_users": [],
     "claude_timeout": 600,
-    "sessions_file": "sessions.json",
     "model": "claude-opus-4-6",
 }
 
 
-def load_config(config_path=None) -> dict:
-    """Load config from file."""
+def load_config() -> dict:
+    """Load config from ~/.cta/config.json."""
     config = dict(DEFAULT_CONFIG)
 
-    if config_path and os.path.exists(config_path):
-        with open(config_path) as f:
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH) as f:
             config.update(json.load(f))
 
     return config
@@ -54,7 +55,7 @@ ALLOWED_USERS: set[int] = set()
 TIMEOUT = 600
 MODEL = "claude-opus-4-6"
 DEFAULT_CWD = os.getcwd()
-SESSIONS_FILE = "sessions.json"
+SESSIONS_PATH = os.path.join(CTA_HOME, "sessions.json")
 
 bot = None  # initialized in create_bot()
 user_sessions: dict[int, str] = {}   # per-user Claude session IDs
@@ -67,33 +68,32 @@ claude_busy_for = None  # username of user currently calling Claude
 
 
 def init(config: dict):
-    global BOT_TOKEN, ALLOWED_USERS, TIMEOUT, SESSIONS_FILE, MODEL
+    global BOT_TOKEN, ALLOWED_USERS, TIMEOUT, MODEL
     BOT_TOKEN = config["telegram_bot_token"]
     ALLOWED_USERS = set(config["allowed_users"])
     TIMEOUT = config["claude_timeout"]
-    SESSIONS_FILE = config.get("sessions_file", "sessions.json")
     MODEL = config.get("model", "claude-opus-4-6")
 
 
 def load_sessions():
-    if not os.path.exists(SESSIONS_FILE):
+    if not os.path.exists(SESSIONS_PATH):
         return
     try:
-        with open(SESSIONS_FILE) as f:
+        with open(SESSIONS_PATH) as f:
             data = json.load(f)
         for uid_str, session_id in data.items():
             user_sessions[int(uid_str)] = session_id
-        tui_log(f"[dim]Loaded {len(data)} session(s) from {SESSIONS_FILE}[/]")
+        tui_log(f"[dim]Loaded {len(data)} session(s) from {SESSIONS_PATH}[/]")
     except Exception as e:
         tui_log(f"[red]Warning: could not load sessions: {escape(str(e))}[/]")
 
 
 def save_sessions():
-    tmp = SESSIONS_FILE + ".tmp"
+    tmp = SESSIONS_PATH + ".tmp"
     try:
         with open(tmp, "w") as f:
             json.dump({str(uid): sid for uid, sid in user_sessions.items()}, f)
-        os.replace(tmp, SESSIONS_FILE)
+        os.replace(tmp, SESSIONS_PATH)
     except Exception as e:
         tui_log(f"[red]Warning: could not save sessions: {escape(str(e))}[/]")
 
@@ -358,44 +358,14 @@ def create_bot():
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="CTA — Claude Telegram Agent")
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("-f", "--config", default=None, help="Config file path")
-    group.add_argument("--token", dest="token", default=None, help="Telegram bot token")
-    parser.add_argument("--allowed-users", default=None, help="Comma-separated Telegram user IDs")
-    parser.add_argument("--timeout", type=int, default=None, help="Max seconds per Claude call")
-    parser.add_argument("--model", default=None, help="Claude model to use")
-    parser.add_argument("--sessions-file", default=None, help="Path to session persistence file")
-    return parser.parse_args(argv)
-
-
-def config_from_args(args) -> dict:
-    """Build config from CLI args. Uses config file if -f given, otherwise CLI args."""
-    if args.config is not None or args.token is None:
-        return load_config(args.config or "config.json")
-
-    config = dict(DEFAULT_CONFIG)
-    config["telegram_bot_token"] = args.token
-    if args.allowed_users is not None:
-        config["allowed_users"] = [int(x) for x in args.allowed_users.split(",") if x.strip()]
-    if args.timeout is not None:
-        config["claude_timeout"] = args.timeout
-    if args.model is not None:
-        config["model"] = args.model
-    if args.sessions_file is not None:
-        config["sessions_file"] = args.sessions_file
-    return config
-
-
 if __name__ == "__main__":
-    args = parse_args()
-    config = config_from_args(args)
+    os.makedirs(CTA_HOME, exist_ok=True)
+
+    config = load_config()
     init(config)
 
     if not BOT_TOKEN:
-        print("Error: telegram_bot_token not set")
-        print("Set telegram_bot_token in config.json")
+        print(f"Error: telegram_bot_token not set in {CONFIG_PATH}")
         exit(1)
 
     load_sessions()
