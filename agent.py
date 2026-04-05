@@ -62,6 +62,8 @@ user_cwd: dict[int, str] = {}        # per-user working directory
 user_model: dict[int, str] = {}      # per-user model override
 user_queues: dict[int, queue.Queue] = {}
 user_queues_lock = threading.Lock()
+claude_lock = threading.Lock()  # serialize Claude CLI calls (Max subscription concurrency limit)
+claude_busy_for = None  # username of user currently calling Claude
 
 
 def init(config: dict):
@@ -148,7 +150,11 @@ def _build_layout() -> Layout:
 # ── Claude CLI ────────────────────────────────────────────────────────────────
 
 def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str = None) -> tuple[str, str]:
-    """Call Claude Code CLI. Returns (text, session_id)."""
+    """Call Claude Code CLI. Returns (text, session_id).
+
+    Serialized with claude_lock because Max/Pro subscriptions only allow
+    one concurrent CLI session — a second call would hang or error.
+    """
     cwd = cwd or DEFAULT_CWD
     cmd = ["claude", "--print", "--dangerously-skip-permissions",
            "--model", model or MODEL, "--output-format", "json", "-p", prompt]
@@ -204,18 +210,30 @@ def _typing_loop(chat_id: int, done: threading.Event):
 
 
 def _process_message(uid: int, message, done: threading.Event):
+    global claude_busy_for
     cwd = user_cwd.get(uid, DEFAULT_CWD)
     model = user_model.get(uid, MODEL)
     session_id = user_sessions.get(uid)
-    try:
-        reply, new_session_id = call_claude(message.text, cwd=cwd, session_id=session_id, model=model)
-    finally:
-        done.set()
+    username = message.from_user.username or str(uid)
+
+    # If Claude is busy with another user, notify and wait
+    if claude_lock.locked() and claude_busy_for != username:
+        bot.reply_to(message, f"⏳ Waiting for @{claude_busy_for} to finish...")
+        tui_log(f"[yellow]⏳[/] [bold]{escape(username)}[/] queued (busy: {escape(claude_busy_for or '?')})")
+
+    with claude_lock:
+        claude_busy_for = username
+        try:
+            reply, new_session_id = call_claude(message.text, cwd=cwd, session_id=session_id, model=model)
+        finally:
+            claude_busy_for = None
+            done.set()
+
     if new_session_id:
         user_sessions[uid] = new_session_id
         save_sessions()
     preview = reply[:120].replace("\n", " ")
-    tui_log(f"[blue]←[/] [bold]{escape(str(message.from_user.username or uid))}[/] {escape(preview)}{'…' if len(reply) > 120 else ''}")
+    tui_log(f"[blue]←[/] [bold]{escape(username)}[/] {escape(preview)}{'…' if len(reply) > 120 else ''}")
     for chunk in _split_reply(reply):
         _send_markdown(message, chunk)
 
