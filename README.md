@@ -7,33 +7,55 @@ Self-hosted Telegram bot powered by Claude Code CLI. Uses your Max/Pro subscript
 1. Create a Telegram bot via [@BotFather](https://t.me/BotFather)
 2. Install Claude Code CLI: `npm install -g @anthropic-ai/claude-code`
 3. Install Python deps: `pip install -r requirements.txt`
-4. Run:
+4. Configure (pick one):
 
 ```bash
-TELEGRAM_BOT_TOKEN=your-bot-token \
-ALLOWED_USERS=your-telegram-user-id \
+# A) Config file
+cp config.example.json config.json
+# Edit config.json — set telegram_bot_token and allowed_users
+
+# B) Environment variables
+export TELEGRAM_BOT_TOKEN=your-bot-token
+export ALLOWED_USERS=your-telegram-user-id
+```
+
+5. Run:
+
+```bash
 python agent.py
 ```
 
-## Environment Variables
+## Configuration
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `TELEGRAM_BOT_TOKEN` | Yes | From @BotFather |
-| `ALLOWED_USERS` | No | Comma-separated Telegram user IDs. Empty = allow all |
-| `CLAUDE_TIMEOUT` | No | Max seconds per Claude call (default: 120) |
+Config file (`config.json`) or environment variables. Env vars override config file values.
 
-## Commands
+| Config Key | Env Var | Default | Description |
+|---|---|---|---|
+| `telegram_bot_token` | `TELEGRAM_BOT_TOKEN` | — | Bot token from [@BotFather](https://t.me/BotFather) |
+| `allowed_users` | `ALLOWED_USERS` | `[]` (all) | Comma-separated Telegram user IDs |
+| `claude_timeout` | `CLAUDE_TIMEOUT` | `600` | Max seconds per Claude call |
+| `model` | `CLAUDE_MODEL` | `claude-opus-4-6` | Claude model to use |
+| `sessions_file` | — | `sessions.json` | Path to session persistence file |
 
-- `/start` — Hello
-- `/clear` — Clear conversation history
+## Bot Commands
 
-## How it works
+| Command | Description |
+|---|---|
+| `/start` | Hello message |
+| `/clear` | Clear conversation (reset session) |
+| `/cd <path>` | Change Claude's working directory |
+| `/pwd` | Show current working directory |
+| `/model <name>` | Switch Claude model (clears session) |
+| `/status` | Show model, cwd, and session info |
 
-Calls `claude --print -p "prompt"` which uses your local Claude Code subscription (Max/Pro). No API key needed, no extra usage charges.
+## How It Works
 
-## Limitations
+```
+You → Telegram → CTA → claude --print --resume <session> → response → Telegram
+```
 
-- Subject to Max subscription rate limits
-- No tool use (file ops, web search etc.) — just conversation
-- Conversation history is in-memory only (lost on restart)
+- Calls `claude --print --dangerously-skip-permissions` with your local Claude Code subscription
+- Full tool access: Claude can read/write files and run commands in the working directory
+- Session persistence: conversations survive restarts via `sessions.json`
+- Per-user message queues: sequential processing per user, concurrent across users
+- Markdown formatting via `telegramify-markdown`
