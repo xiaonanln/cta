@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch, MagicMock, call
@@ -594,6 +595,146 @@ class TestBotHandlers(unittest.TestCase):
         # First call: no session yet. Second call: session from first.
         self.assertIsNone(results[0])
         self.assertEqual(results[1], "new-sess")
+
+
+# ── Concurrent users ─────────────────────────────────────────────────────────
+
+class TestConcurrentUsers(unittest.TestCase):
+    """Tests for Claude CLI serialization and queue notification."""
+
+    def setUp(self):
+        self.bot = setup_fake_bot()
+        agent.ALLOWED_USERS.clear()
+        agent.claude_busy_for = None
+
+    def tearDown(self):
+        agent.ALLOWED_USERS.clear()
+        agent.claude_busy_for = None
+
+    @patch("agent.call_claude")
+    def test_second_user_gets_queue_notification(self, mock_claude):
+        """When user A is being processed, user B sees a waiting message."""
+        barrier = threading.Barrier(2, timeout=5)
+        call_count = []
+
+        def slow_claude(*args, **kwargs):
+            call_count.append(1)
+            if len(call_count) == 1:
+                barrier.wait()  # first call: wait until second user is queued
+                time.sleep(0.3)  # give time for notification to be sent
+            return "reply", "sess"
+
+        mock_claude.side_effect = slow_claude
+
+        # Start user A (uid=1) — will hold the lock
+        msg_a = make_fake_message("hello", user_id=1, username="alice")
+        agent._get_user_queue(1)
+        agent.handle_message(msg_a)
+        time.sleep(0.1)  # let worker thread start
+
+        # Start user B (uid=2) — should get queued
+        msg_b = make_fake_message("hi", user_id=2, username="bob")
+        agent._get_user_queue(2)
+        agent.handle_message(msg_b)
+        time.sleep(0.1)
+        barrier.wait()  # release first call
+
+        time.sleep(1.5)  # let both finish
+
+        # User B should have received a "Waiting" notification
+        all_replies = [str(c) for c in self.bot.reply_to.call_args_list]
+        waiting_replies = [r for r in all_replies if "Waiting" in r]
+        self.assertGreaterEqual(len(waiting_replies), 1, "User B should get a waiting notification")
+
+    @patch("agent.call_claude")
+    def test_both_users_get_responses(self, mock_claude):
+        """Both users eventually receive Claude's response."""
+        barrier = threading.Barrier(2, timeout=5)
+        call_count = []
+
+        def slow_claude(*args, **kwargs):
+            call_count.append(1)
+            if len(call_count) == 1:
+                barrier.wait()
+                time.sleep(0.2)
+            return f"reply-{len(call_count)}", "sess"
+
+        mock_claude.side_effect = slow_claude
+
+        msg_a = make_fake_message("q1", user_id=1, username="alice")
+        msg_b = make_fake_message("q2", user_id=2, username="bob")
+        agent._get_user_queue(1)
+        agent._get_user_queue(2)
+        agent.handle_message(msg_a)
+        time.sleep(0.1)
+        agent.handle_message(msg_b)
+        time.sleep(0.1)
+        barrier.wait()
+
+        time.sleep(2.0)
+
+        self.assertEqual(mock_claude.call_count, 2, "Both users should get a Claude call")
+
+    @patch("agent.call_claude")
+    def test_claude_busy_for_cleared_after_call(self, mock_claude):
+        """claude_busy_for is None after processing completes."""
+        mock_claude.return_value = ("ok", "sess")
+        agent.ALLOWED_USERS.add(1)
+
+        msg = make_fake_message("hi", user_id=1, username="alice")
+        agent.handle_message(msg)
+        time.sleep(0.5)
+
+        self.assertIsNone(agent.claude_busy_for)
+
+    @patch("agent.call_claude")
+    def test_claude_busy_for_set_during_call(self, mock_claude):
+        """claude_busy_for is set to the current user during processing."""
+        captured = []
+
+        def capture_claude(*args, **kwargs):
+            captured.append(agent.claude_busy_for)
+            return "ok", "sess"
+
+        mock_claude.side_effect = capture_claude
+
+        msg = make_fake_message("hi", user_id=1, username="alice")
+        agent._get_user_queue(1)
+        agent.handle_message(msg)
+        time.sleep(0.5)
+
+        self.assertEqual(captured, ["alice"])
+
+    @patch("agent.call_claude")
+    def test_same_user_no_queue_notification(self, mock_claude):
+        """Same user sending multiple messages should not get queue notification."""
+        barrier = threading.Barrier(2, timeout=5)
+        call_count = []
+
+        def slow_claude(*args, **kwargs):
+            call_count.append(1)
+            if len(call_count) == 1:
+                barrier.wait()
+                time.sleep(0.2)
+            return "reply", "sess"
+
+        mock_claude.side_effect = slow_claude
+
+        msg1 = make_fake_message("q1", user_id=1, username="alice")
+        msg2 = make_fake_message("q2", user_id=1, username="alice")
+        agent._get_user_queue(1)
+        agent.handle_message(msg1)
+        agent.handle_message(msg2)
+        time.sleep(0.1)
+        barrier.wait()
+
+        time.sleep(2.0)
+
+        # Same user's second message is processed by the same per-user worker
+        # sequentially, so no "Waiting" notification should appear
+        all_replies = [str(c) for c in self.bot.reply_to.call_args_list]
+        waiting_replies = [r for r in all_replies if "Waiting" in r]
+        self.assertEqual(len(waiting_replies), 0, "Same user should NOT get waiting notification")
 
 
 # ── User state ────────────────────────────────────────────────────────────────
