@@ -27,7 +27,7 @@ def make_fake_message(text, user_id=123, username="tester"):
 def setup_fake_bot():
     """Create agent with a fake bot that doesn't hit Telegram API."""
     agent.bot = MagicMock()
-    agent.conversations.clear()
+    agent.user_sessions.clear()
     agent.user_cwd.clear()
     return agent.bot
 
@@ -37,79 +37,104 @@ class TestCallClaude(unittest.TestCase):
 
     @patch("agent.subprocess.run")
     def test_returns_stdout(self, mock_run):
-        mock_run.return_value = MagicMock(stdout="Hello world", stderr="")
+        mock_run.return_value = MagicMock(
+            stdout='{"result": "Hello world", "session_id": "abc-123", "is_error": false}',
+            stderr=""
+        )
         result = agent.call_claude("hi")
-        self.assertEqual(result, "Hello world")
+        self.assertEqual(result[0], "Hello world")
+        self.assertEqual(result[1], "abc-123")
 
     @patch("agent.subprocess.run")
     def test_passes_cwd(self, mock_run):
-        mock_run.return_value = MagicMock(stdout="ok", stderr="")
+        mock_run.return_value = MagicMock(
+            stdout='{"result": "ok", "session_id": "s1", "is_error": false}',
+            stderr=""
+        )
         agent.call_claude("hi", cwd="/tmp/test")
         _, kwargs = mock_run.call_args
         self.assertEqual(kwargs["cwd"], "/tmp/test")
 
     @patch("agent.subprocess.run")
     def test_uses_dangerously_skip_permissions(self, mock_run):
-        mock_run.return_value = MagicMock(stdout="ok", stderr="")
+        mock_run.return_value = MagicMock(
+            stdout='{"result": "ok", "session_id": "s1", "is_error": false}',
+            stderr=""
+        )
         agent.call_claude("hi")
         args = mock_run.call_args[0][0]
         self.assertIn("--dangerously-skip-permissions", args)
         self.assertIn("--print", args)
+        self.assertIn("--output-format", args)
+        self.assertIn("json", args)
 
     @patch("agent.subprocess.run")
     def test_returns_stderr_on_empty_stdout(self, mock_run):
         mock_run.return_value = MagicMock(stdout="", stderr="some error")
         result = agent.call_claude("hi")
-        self.assertIn("Error", result)
-        self.assertIn("some error", result)
+        self.assertIn("Error", result[0])
+        self.assertIn("some error", result[0])
 
     @patch("agent.subprocess.run")
     def test_returns_empty_response_message(self, mock_run):
         mock_run.return_value = MagicMock(stdout="", stderr="")
         result = agent.call_claude("hi")
-        self.assertEqual(result, "(empty response)")
+        self.assertEqual(result[0], "(empty response)")
 
     @patch("agent.subprocess.run", side_effect=subprocess.TimeoutExpired("claude", 120))
     def test_timeout_returns_message(self, mock_run):
         result = agent.call_claude("hi")
-        self.assertIn("timed out", result)
+        self.assertIn("timed out", result[0])
 
     @patch("agent.subprocess.run", side_effect=FileNotFoundError)
     def test_cli_not_found(self, mock_run):
         result = agent.call_claude("hi")
-        self.assertIn("not found", result)
+        self.assertIn("not found", result[0])
 
     @patch("agent.subprocess.run")
     def test_strips_whitespace(self, mock_run):
-        mock_run.return_value = MagicMock(stdout="  hello  \n", stderr="")
+        mock_run.return_value = MagicMock(
+            stdout='{"result": "  hello  \\n", "session_id": "s1", "is_error": false}',
+            stderr=""
+        )
         result = agent.call_claude("hi")
-        self.assertEqual(result, "hello")
+        self.assertEqual(result[0], "hello")
+
+    @patch("agent.subprocess.run")
+    def test_resumes_session(self, mock_run):
+        mock_run.return_value = MagicMock(
+            stdout='{"result": "ok", "session_id": "sess-456", "is_error": false}',
+            stderr=""
+        )
+        agent.call_claude("hi", session_id="sess-456")
+        args = mock_run.call_args[0][0]
+        self.assertIn("--resume", args)
+        self.assertIn("sess-456", args)
+
+    @patch("agent.subprocess.run")
+    def test_returns_session_id(self, mock_run):
+        mock_run.return_value = MagicMock(
+            stdout='{"result": "hello", "session_id": "new-session-789", "is_error": false}',
+            stderr=""
+        )
+        text, session_id = agent.call_claude("hi")
+        self.assertEqual(session_id, "new-session-789")
 
 
-class TestConversationHistory(unittest.TestCase):
-    """Tests for conversation history management."""
+class TestSessionManagement(unittest.TestCase):
+    """Tests for Claude session management."""
 
     def setUp(self):
-        agent.conversations.clear()
+        agent.user_sessions.clear()
         agent.user_cwd.clear()
 
-    def test_history_starts_empty(self):
-        self.assertEqual(len(agent.conversations), 0)
+    def test_sessions_start_empty(self):
+        self.assertEqual(len(agent.user_sessions), 0)
 
-    def test_history_trimmed_to_max(self):
-        uid = 123
-        agent.conversations[uid] = [
-            {"role": "user", "content": f"msg{i}"} for i in range(30)
-        ]
-        # Simulate trim logic from handle_message
-        if len(agent.conversations[uid]) > agent.MAX_HISTORY:
-            agent.conversations[uid] = agent.conversations[uid][-agent.MAX_HISTORY:]
-        self.assertEqual(len(agent.conversations[uid]), agent.MAX_HISTORY)
-
-    def test_clear_removes_history(self):
-        agent.conversations[123] = [{"role": "user", "content": "hi"}]
-        agent.conversations.pop(123, None)
-        self.assertNotIn(123, agent.conversations)
+    def test_clear_removes_session(self):
+        agent.user_sessions[123] = "sess-id"
+        agent.user_sessions.pop(123, None)
+        self.assertNotIn(123, agent.user_sessions)
 
 
 class TestUserCwd(unittest.TestCase):
@@ -154,37 +179,6 @@ class TestAllowedUsers(unittest.TestCase):
             self.assertEqual(users, {2018384667})
 
 
-class TestPromptBuilding(unittest.TestCase):
-    """Tests for conversation prompt construction."""
-
-    def test_single_message_prompt(self):
-        history = [{"role": "user", "content": "hello"}]
-        parts = []
-        for msg in history:
-            prefix = "User" if msg["role"] == "user" else "Assistant"
-            parts.append(f"{prefix}: {msg['content']}")
-        parts.append("Assistant:")
-        prompt = "\n\n".join(parts)
-        self.assertIn("User: hello", prompt)
-        self.assertTrue(prompt.endswith("Assistant:"))
-
-    def test_multi_turn_prompt(self):
-        history = [
-            {"role": "user", "content": "hi"},
-            {"role": "assistant", "content": "hello"},
-            {"role": "user", "content": "how are you"},
-        ]
-        parts = []
-        for msg in history:
-            prefix = "User" if msg["role"] == "user" else "Assistant"
-            parts.append(f"{prefix}: {msg['content']}")
-        parts.append("Assistant:")
-        prompt = "\n\n".join(parts)
-        self.assertIn("User: hi", prompt)
-        self.assertIn("Assistant: hello", prompt)
-        self.assertIn("User: how are you", prompt)
-
-
 class TestBotHandlers(unittest.TestCase):
     """Tests using a fake bot to verify handler behavior."""
 
@@ -206,10 +200,10 @@ class TestBotHandlers(unittest.TestCase):
         self.bot.reply_to.assert_not_called()
 
     def test_clear_command(self):
-        agent.conversations[123] = [{"role": "user", "content": "hi"}]
+        agent.user_sessions[123] = "some-session-id"
         msg = make_fake_message("/clear")
         agent.cmd_clear(msg)
-        self.assertNotIn(123, agent.conversations)
+        self.assertNotIn(123, agent.user_sessions)
         self.bot.reply_to.assert_called_once()
 
     def test_pwd_command(self):
@@ -239,7 +233,7 @@ class TestBotHandlers(unittest.TestCase):
         reply = self.bot.reply_to.call_args[0][1]
         self.assertIn("/tmp", reply)
 
-    @patch("agent.call_claude", return_value="Hello from Claude!")
+    @patch("agent.call_claude", return_value=("Hello from Claude!", "sess-123"))
     def test_message_calls_claude_and_replies(self, mock_claude):
         msg = make_fake_message("what is 1+1")
         agent.handle_message(msg)
@@ -251,17 +245,15 @@ class TestBotHandlers(unittest.TestCase):
         reply = self.bot.reply_to.call_args[0][1]
         self.assertEqual(reply, "Hello from Claude!")
 
-    @patch("agent.call_claude", return_value="response")
-    def test_message_adds_to_history(self, mock_claude):
+    @patch("agent.call_claude", return_value=("Hello from Claude!", "sess-123"))
+    def test_message_stores_session_id(self, mock_claude):
         msg = make_fake_message("hello")
         agent.handle_message(msg)
         import time
         time.sleep(0.5)
-        self.assertIn(123, agent.conversations)
-        self.assertEqual(agent.conversations[123][0]["content"], "hello")
-        self.assertEqual(agent.conversations[123][1]["content"], "response")
+        self.assertEqual(agent.user_sessions[123], "sess-123")
 
-    @patch("agent.call_claude", return_value="ok")
+    @patch("agent.call_claude", return_value=("ok", "sess-abc"))
     def test_message_uses_user_cwd(self, mock_claude):
         agent.user_cwd[123] = "/tmp/test"
         msg = make_fake_message("hi")
@@ -276,7 +268,7 @@ class TestBotHandlers(unittest.TestCase):
         agent.handle_message(msg)
         self.bot.reply_to.assert_not_called()
 
-    @patch("agent.call_claude", return_value="x" * 5000)
+    @patch("agent.call_claude", return_value=("x" * 5000, "sess-123"))
     def test_long_reply_split(self, mock_claude):
         msg = make_fake_message("write a long essay")
         agent.handle_message(msg)
@@ -284,70 +276,6 @@ class TestBotHandlers(unittest.TestCase):
         time.sleep(0.5)
         # Should be called twice (5000 / 4096 = 2 chunks)
         self.assertEqual(self.bot.reply_to.call_count, 2)
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
-class TestRealClaude(unittest.TestCase):
-    """Integration tests that call the real Claude CLI.
-    
-    These require `claude` to be installed and authenticated.
-    Skip with: python -m unittest test_agent.TestRealClaude --skip
-    """
-
-    def test_simple_question(self):
-        """Claude can answer a simple math question."""
-        result = agent.call_claude("What is 2+2? Reply with just the number.")
-        self.assertIn("4", result)
-
-    def test_respects_cwd(self):
-        """Claude responds without error when given a valid cwd."""
-        result = agent.call_claude(
-            "What directory are you working in? Reply briefly.",
-            cwd=os.path.dirname(__file__) or ".",
-        )
-        # Should get a response, not a crash
-        self.assertIsInstance(result, str)
-        self.assertNotIn("timed out", result)
-        self.assertNotIn("not found", result)
-
-    def test_empty_prompt(self):
-        """Empty prompt doesn't crash."""
-        result = agent.call_claude("")
-        self.assertIsInstance(result, str)
-
-    def test_code_generation(self):
-        """Claude can generate code."""
-        result = agent.call_claude(
-            "Write a Python function that adds two numbers. Only output the code, no explanation."
-        )
-        self.assertIn("def", result)
-        self.assertIn("return", result)
-
-    def test_multi_language(self):
-        """Claude can respond in Chinese."""
-        result = agent.call_claude("用中文回答：1+1等于几？只回答数字。")
-        self.assertIn("2", result)
-
-    def test_file_awareness_with_cwd(self):
-        """Claude can read files in the cwd when using --dangerously-skip-permissions."""
-        result = agent.call_claude(
-            "Read the file README.md in the current directory and tell me the project name. Reply with just the name.",
-            cwd=os.path.dirname(__file__) or ".",
-        )
-        # Should mention our project
-        self.assertTrue(
-            "telegram" in result.lower() or "claude" in result.lower() or "agent" in result.lower(),
-            f"Expected project name in: {result}"
-        )
-
-    def test_long_response(self):
-        """Claude can produce a longer response."""
-        result = agent.call_claude("Count from 1 to 20, one number per line.")
-        self.assertIn("1", result)
-        self.assertIn("20", result)
 
 
 class TestConfig(unittest.TestCase):
@@ -359,7 +287,6 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(config["telegram_bot_token"], "")
         self.assertEqual(config["allowed_users"], [])
         self.assertEqual(config["claude_timeout"], 120)
-        self.assertEqual(config["max_history"], 20)
 
     def test_load_from_file(self):
         import tempfile, json
@@ -390,14 +317,76 @@ class TestConfig(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             config = agent.load_config("/nonexistent/config.json")
         self.assertEqual(config["claude_timeout"], 120)
-        self.assertEqual(config["max_history"], 20)
 
     def test_init_applies_config(self):
-        config = {"telegram_bot_token": "tok", "allowed_users": [1, 2], "claude_timeout": 30, "max_history": 10}
+        config = {"telegram_bot_token": "tok", "allowed_users": [1, 2], "claude_timeout": 30}
         agent.init(config)
         self.assertEqual(agent.BOT_TOKEN, "tok")
         self.assertEqual(agent.ALLOWED_USERS, {1, 2})
         self.assertEqual(agent.TIMEOUT, 30)
-        self.assertEqual(agent.MAX_HISTORY, 10)
         # Reset
         agent.init(agent.DEFAULT_CONFIG)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class TestRealClaude(unittest.TestCase):
+    """Integration tests that call the real Claude CLI.
+
+    These require `claude` to be installed and authenticated.
+    Skip with: python -m unittest test_agent.TestRealClaude --skip
+    """
+
+    def test_simple_question(self):
+        """Claude can answer a simple math question."""
+        result, _ = agent.call_claude("What is 2+2? Reply with just the number.")
+        self.assertIn("4", result)
+
+    def test_respects_cwd(self):
+        """Claude responds without error when given a valid cwd."""
+        result, _ = agent.call_claude(
+            "What directory are you working in? Reply briefly.",
+            cwd=os.path.dirname(__file__) or ".",
+        )
+        # Should get a response, not a crash
+        self.assertIsInstance(result, str)
+        self.assertNotIn("timed out", result)
+        self.assertNotIn("not found", result)
+
+    def test_empty_prompt(self):
+        """Empty prompt doesn't crash."""
+        result, _ = agent.call_claude("")
+        self.assertIsInstance(result, str)
+
+    def test_code_generation(self):
+        """Claude can generate code."""
+        result, _ = agent.call_claude(
+            "Write a Python function that adds two numbers. Only output the code, no explanation."
+        )
+        self.assertIn("def", result)
+        self.assertIn("return", result)
+
+    def test_multi_language(self):
+        """Claude can respond in Chinese."""
+        result, _ = agent.call_claude("用中文回答：1+1等于几？只回答数字。")
+        self.assertIn("2", result)
+
+    def test_file_awareness_with_cwd(self):
+        """Claude can read files in the cwd when using --dangerously-skip-permissions."""
+        result, _ = agent.call_claude(
+            "Read the file README.md in the current directory and tell me the project name. Reply with just the name.",
+            cwd=os.path.dirname(__file__) or ".",
+        )
+        # Should mention our project
+        self.assertTrue(
+            "telegram" in result.lower() or "claude" in result.lower() or "agent" in result.lower(),
+            f"Expected project name in: {result}"
+        )
+
+    def test_long_response(self):
+        """Claude can produce a longer response."""
+        result, _ = agent.call_claude("Count from 1 to 20, one number per line.")
+        self.assertIn("1", result)
+        self.assertIn("20", result)

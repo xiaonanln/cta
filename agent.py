@@ -18,7 +18,6 @@ DEFAULT_CONFIG = {
     "telegram_bot_token": "",
     "allowed_users": [],
     "claude_timeout": 120,
-    "max_history": 20,
 }
 
 
@@ -41,8 +40,6 @@ def load_config(config_path=None) -> dict:
         ]
     if os.environ.get("CLAUDE_TIMEOUT"):
         config["claude_timeout"] = int(os.environ["CLAUDE_TIMEOUT"])
-    if os.environ.get("MAX_HISTORY"):
-        config["max_history"] = int(os.environ["MAX_HISTORY"])
 
     return config
 
@@ -52,43 +49,43 @@ def load_config(config_path=None) -> dict:
 BOT_TOKEN = ""
 ALLOWED_USERS: set[int] = set()
 TIMEOUT = 120
-MAX_HISTORY = 20
+MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-5")
 DEFAULT_CWD = os.getcwd()
 
 bot = None  # initialized in create_bot()
-conversations: dict[int, list[dict]] = {}
-user_cwd: dict[int, str] = {}
+user_sessions: dict[int, str] = {}  # per-user Claude session IDs
+user_cwd: dict[int, str] = {}       # per-user working directory
 
 
 def init(config: dict):
     """Apply config to module globals."""
-    global BOT_TOKEN, ALLOWED_USERS, TIMEOUT, MAX_HISTORY
+    global BOT_TOKEN, ALLOWED_USERS, TIMEOUT
     BOT_TOKEN = config["telegram_bot_token"]
     ALLOWED_USERS = set(config["allowed_users"])
     TIMEOUT = config["claude_timeout"]
-    MAX_HISTORY = config["max_history"]
 
 
 # ── Claude CLI ────────────────────────────────────────────────────────────────
 
-def call_claude(prompt: str, cwd: str = DEFAULT_CWD) -> str:
-    """Call Claude Code CLI in print mode (uses Max subscription)."""
+def call_claude(prompt: str, cwd: str = None, session_id: str = None) -> tuple[str, str]:
+    """Call Claude Code CLI. Returns (text, session_id)."""
+    cwd = cwd or DEFAULT_CWD
+    cmd = ["claude", "--print", "--dangerously-skip-permissions", "--model", MODEL,
+           "--output-format", "json", "-p", prompt]
+    if session_id:
+        cmd += ["--resume", session_id]
     try:
-        result = subprocess.run(
-            ["claude", "--print", "--dangerously-skip-permissions", "-p", prompt],
-            capture_output=True,
-            text=True,
-            timeout=TIMEOUT,
-            cwd=cwd,
-        )
-        output = result.stdout.strip()
-        if not output and result.stderr:
-            output = f"[Error] {result.stderr.strip()}"
-        return output or "(empty response)"
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT, cwd=cwd)
+        if not result.stdout.strip():
+            err = result.stderr.strip()
+            return (f"[Error] {err}" if err else "(empty response)"), ""
+        data = json.loads(result.stdout)
+        text = (data.get("result") or "").strip() or "(empty response)"
+        return text, data.get("session_id", "")
     except subprocess.TimeoutExpired:
-        return "(Claude timed out)"
+        return "(Claude timed out)", ""
     except FileNotFoundError:
-        return "(claude CLI not found — install @anthropic-ai/claude-code)"
+        return "(claude CLI not found — install @anthropic-ai/claude-code)", ""
 
 
 # ── Bot Handlers ──────────────────────────────────────────────────────────────
@@ -102,7 +99,7 @@ def cmd_start(message):
 def cmd_clear(message):
     if ALLOWED_USERS and message.from_user.id not in ALLOWED_USERS:
         return
-    conversations.pop(message.from_user.id, None)
+    user_sessions.pop(message.from_user.id, None)
     bot.reply_to(message, "🧹 Conversation cleared.")
 
 
@@ -133,26 +130,13 @@ def handle_message(message):
     uid = message.from_user.id
     if ALLOWED_USERS and uid not in ALLOWED_USERS:
         return
-
-    if uid not in conversations:
-        conversations[uid] = []
-    conversations[uid].append({"role": "user", "content": message.text})
-
-    if len(conversations[uid]) > MAX_HISTORY:
-        conversations[uid] = conversations[uid][-MAX_HISTORY:]
-
-    prompt_parts = []
-    for msg in conversations[uid]:
-        prefix = "User" if msg["role"] == "user" else "Assistant"
-        prompt_parts.append(f"{prefix}: {msg['content']}")
-    prompt_parts.append("Assistant:")
-    prompt = "\n\n".join(prompt_parts)
-
     cwd = user_cwd.get(uid, DEFAULT_CWD)
+    session_id = user_sessions.get(uid)
 
     def process():
-        reply = call_claude(prompt, cwd=cwd)
-        conversations[uid].append({"role": "assistant", "content": reply})
+        reply, new_session_id = call_claude(message.text, cwd=cwd, session_id=session_id)
+        if new_session_id:
+            user_sessions[uid] = new_session_id
         for i in range(0, len(reply), 4096):
             bot.reply_to(message, reply[i : i + 4096])
 
