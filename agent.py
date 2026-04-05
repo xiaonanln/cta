@@ -18,6 +18,7 @@ from datetime import datetime
 
 import telebot
 import telegramify_markdown
+from rich.columns import Columns
 from rich.layout import Layout
 from rich.live import Live
 from rich.markup import escape
@@ -128,10 +129,10 @@ class _TuiLogHandler(logging.Handler):
 
 
 def _status_panel() -> tuple[Panel, int]:
-    line1 = f"[bold]default model:[/] [cyan]{escape(MODEL)}[/]   [bold]default cwd:[/] [cyan]{escape(DEFAULT_CWD)}[/]"
+    header = f"[bold]model:[/] [cyan]{escape(MODEL)}[/]   [bold]cwd:[/] [cyan]{escape(DEFAULT_CWD)}[/]"
     all_keys = set(user_sessions) | set(msg_counts)
     if all_keys:
-        rows = []
+        cards = []
         for key in sorted(all_keys):
             uid, chat_id = key
             label = escape(chat_labels.get(key, f"{uid}:{chat_id}"))
@@ -140,13 +141,14 @@ def _status_panel() -> tuple[Panel, int]:
             model = escape(user_model.get(key, MODEL))
             cwd = escape(user_cwd.get(key, DEFAULT_CWD))
             count = msg_counts.get(key, 0)
-            rows.append(f"  [bold]{label}[/] {sid_str}  model=[cyan]{model}[/]  cwd=[cyan]{cwd}[/]  msgs=[yellow]{count}[/]")
-        info = line1 + "\n" + "\n".join(rows)
-        size = 3 + len(rows)
+            body = f"[bold]session:[/] {sid_str}\n[bold]model:[/]   [cyan]{model}[/]\n[bold]cwd:[/]     [cyan]{cwd}[/]\n[bold]msgs:[/]    [yellow]{count}[/]"
+            cards.append(Panel(body, title=f"[bold green]{label}[/]"))
+        content = Columns(cards, equal=True, expand=True)
+        size = 8
     else:
-        info = line1 + "   [bold]sessions:[/] [dim]none[/]"
+        content = header + "   [bold]sessions:[/] [dim]none[/]"
         size = 3
-    return Panel(info, title="[bold green]CTA[/]"), size
+    return Panel(content, title=f"[bold green]CTA[/]  {header}"), size
 
 
 def _log_panel() -> Panel:
