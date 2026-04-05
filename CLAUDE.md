@@ -17,7 +17,7 @@ Single Python file. No server, no database, no API keys.
 TELEGRAM_BOT_TOKEN=xxx ALLOWED_USERS=123 python agent.py
 
 # Run tests (mock only, no Claude calls)
-python -m unittest test_agent.TestCallClaude test_agent.TestBotHandlers test_agent.TestConversationHistory test_agent.TestUserCwd test_agent.TestAllowedUsers test_agent.TestPromptBuilding -v
+python -m unittest test_agent.TestConfig test_agent.TestSessionPersistence test_agent.TestCallClaude test_agent.TestSplitReply test_agent.TestSendMarkdown test_agent.TestAllowed test_agent.TestTuiLog test_agent.TestBotHandlers test_agent.TestUserCwd test_agent.TestUserModel -v
 
 # Run real Claude integration tests (requires claude CLI authenticated)
 python -m unittest test_agent.TestRealClaude -v
