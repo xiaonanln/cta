@@ -256,22 +256,23 @@ def cmd_status(message):
     )
 
 
-def _process_message(uid: int, message):
+def _typing_loop(chat_id: int, done: threading.Event):
+    """Send typing action immediately, then every 4s until done."""
+    while True:
+        try:
+            bot.send_chat_action(chat_id, "typing")
+        except Exception:
+            pass
+        if done.wait(timeout=4):
+            break
+
+
+def _process_message(uid: int, message, done: threading.Event):
     """Process a single message for a user (called serially from the user's worker thread)."""
     cwd = user_cwd.get(uid, DEFAULT_CWD)
     model = user_model.get(uid, MODEL)
     session_id = user_sessions.get(uid)
 
-    done = threading.Event()
-
-    def typing_loop():
-        while not done.wait(timeout=4):
-            try:
-                bot.send_chat_action(message.chat.id, "typing")
-            except Exception:
-                pass
-
-    threading.Thread(target=typing_loop, daemon=True).start()
     try:
         reply, new_session_id = call_claude(message.text, cwd=cwd, session_id=session_id, model=model)
     finally:
@@ -290,9 +291,12 @@ def _user_worker(uid: int, q: queue.Queue):
     """Worker thread: processes one message at a time for a user."""
     while True:
         message = q.get()
+        done = threading.Event()
+        threading.Thread(target=_typing_loop, args=(message.chat.id, done), daemon=True).start()
         try:
-            _process_message(uid, message)
+            _process_message(uid, message, done)
         except Exception as e:
+            done.set()
             tui_log(f"[red][worker:{uid}] error: {escape(str(e))}[/]")
         finally:
             q.task_done()
@@ -312,6 +316,10 @@ def handle_message(message):
     tui_log(f"[green]→[/] [bold]{escape(str(message.from_user.username or uid))}[/] {escape(message.text)}")
     if ALLOWED_USERS and uid not in ALLOWED_USERS:
         return
+    try:
+        bot.send_chat_action(message.chat.id, "typing")
+    except Exception:
+        pass
     _get_user_queue(uid).put(message)
 
 
