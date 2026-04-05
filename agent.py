@@ -93,9 +93,16 @@ def load_sessions():
     try:
         with open(SESSIONS_PATH) as f:
             data = json.load(f)
-        for key_str, session_id in data.items():
+        for key_str, entry in data.items():
             uid_str, chat_str = key_str.split(":", 1)
-            user_sessions[(int(uid_str), int(chat_str))] = session_id
+            key = (int(uid_str), int(chat_str))
+            if isinstance(entry, str):  # backward compat
+                user_sessions[key] = entry
+            else:
+                if entry.get("session"):
+                    user_sessions[key] = entry["session"]
+                if entry.get("cwd"):
+                    user_cwd[key] = entry["cwd"]
         tui_log(f"[dim]Loaded {len(data)} session(s) from {SESSIONS_PATH}[/]")
     except Exception as e:
         tui_log(f"[red]Warning: could not load sessions: {escape(str(e))}[/]")
@@ -104,8 +111,18 @@ def load_sessions():
 def save_sessions():
     tmp = SESSIONS_PATH + ".tmp"
     try:
+        all_keys = set(user_sessions) | set(user_cwd)
+        data = {}
+        for key in all_keys:
+            uid, chat_id = key
+            entry = {}
+            if key in user_sessions:
+                entry["session"] = user_sessions[key]
+            if key in user_cwd:
+                entry["cwd"] = user_cwd[key]
+            data[f"{uid}:{chat_id}"] = entry
         with open(tmp, "w") as f:
-            json.dump({f"{uid}:{chat_id}": sid for (uid, chat_id), sid in user_sessions.items()}, f)
+            json.dump(data, f, indent=2)
         os.replace(tmp, SESSIONS_PATH)
     except Exception as e:
         tui_log(f"[red]Warning: could not save sessions: {escape(str(e))}[/]")
