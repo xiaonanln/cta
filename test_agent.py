@@ -429,6 +429,13 @@ class TestBotHandlers(unittest.TestCase):
         self.assertNotIn((123, 123), agent.user_sessions)
         self.bot.reply_to.assert_called_once()
 
+    def test_cd_clears_session(self):
+        agent.user_sessions[(123, 123)] = "old-sess"
+        agent.cmd_cd(make_fake_message(f"/cd {os.getcwd()}"))
+        self.assertNotIn((123, 123), agent.user_sessions)
+        reply = self.bot.reply_to.call_args[0][1]
+        self.assertIn("session cleared", reply)
+
     def test_clear_blocked_unknown_user(self):
         agent.cmd_clear(make_fake_message("/clear", user_id=999))
         self.bot.reply_to.assert_not_called()
