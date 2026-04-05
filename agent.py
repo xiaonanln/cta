@@ -78,6 +78,7 @@ chat_labels: dict[tuple[int, int], str] = {}   # (uid, chat_id) → "DM" or grou
 msg_counts: dict[tuple[int, int], int] = {}    # (uid, chat_id) → messages processed
 claude_lock = threading.Lock()  # serialize Claude CLI calls (Max subscription concurrency limit)
 claude_busy_for = None  # username of user currently calling Claude
+claude_busy_key = None  # (uid, chat_id) of active session
 
 
 def init(config: dict):
@@ -160,7 +161,8 @@ def _status_panel() -> tuple[Panel, int]:
             cwd = escape(user_cwd.get(key, DEFAULT_CWD))
             count = msg_counts.get(key, 0)
             body = f"[bold]session:[/] {sid_str}\n[bold]model:[/]   [cyan]{model}[/]\n[bold]cwd:[/]     [cyan]{cwd}[/]\n[bold]msgs:[/]    [yellow]{count}[/]"
-            cards.append(Panel(body, title=f"[bold green]{label}[/]"))
+            active = key == claude_busy_key
+            cards.append(Panel(body, title=f"[bold {'yellow' if active else 'green'}]{label}[/]", border_style="yellow" if active else "default"))
         content = Columns(cards, equal=True, expand=True)
         try:
             term_width = os.get_terminal_size().columns
@@ -260,7 +262,7 @@ def _typing_loop(chat_id: int, done: threading.Event):
 
 
 def _process_message(uid: int, chat_id: int, message, done: threading.Event):
-    global claude_busy_for
+    global claude_busy_for, claude_busy_key
     key = (uid, chat_id)
     cwd = user_cwd.get(key, DEFAULT_CWD)
     model = user_model.get(key, MODEL)
@@ -278,6 +280,7 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
 
     with claude_lock:
         claude_busy_for = username
+        claude_busy_key = key
         try:
             reply, new_session_id = call_claude(message.text, cwd=cwd, session_id=session_id, model=model)
             if session_id and "No conversation found with session ID" in reply:
@@ -286,6 +289,7 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
                 reply, new_session_id = call_claude(message.text, cwd=cwd, session_id=None, model=model)
         finally:
             claude_busy_for = None
+            claude_busy_key = None
             done.set()
 
     if new_session_id:
