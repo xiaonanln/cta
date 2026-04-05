@@ -52,6 +52,8 @@ def load_config(config_path=None) -> dict:
         config["claude_timeout"] = int(os.environ["CLAUDE_TIMEOUT"])
     if os.environ.get("CLAUDE_MODEL"):
         config["model"] = os.environ["CLAUDE_MODEL"]
+    if os.environ.get("SESSIONS_FILE"):
+        config["sessions_file"] = os.environ["SESSIONS_FILE"]
 
     return config
 

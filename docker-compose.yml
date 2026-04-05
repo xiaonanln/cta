@@ -1,0 +1,9 @@
+services:
+  cta:
+    build: .
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+      - ~/.claude:/root/.claude:ro
+    environment:
+      - SESSIONS_FILE=/app/data/sessions.json

@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+data/
+.git/
+.github/
+*.md
+config.json
+sessions.json
+test_agent.py
+config.example.json
