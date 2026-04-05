@@ -7,30 +7,32 @@ Self-hosted Telegram bot powered by Claude Code CLI. Uses your Max/Pro subscript
 1. Create a Telegram bot via [@BotFather](https://t.me/BotFather)
 2. Install Claude Code CLI: `npm install -g @anthropic-ai/claude-code`
 3. Install Python deps: `pip install -r requirements.txt`
-4. Run:
+4. Configure:
 
 ```bash
-# Option A: config file (default: config.json)
-cp config.example.json config.json   # edit token and allowed_users
-python agent.py
-
-# Option B: CLI args
-python agent.py --token YOUR_BOT_TOKEN --allowed-users 123,456
+mkdir -p ~/.cta
+cp config.example.json ~/.cta/config.json
+# Edit ~/.cta/config.json — set telegram_bot_token and allowed_users
 ```
 
-Note: `-f`/`--config` and `--token` are mutually exclusive.
+5. Run:
+
+```bash
+python agent.py
+```
 
 ## Configuration
 
-Config file (`config.json` by default, override with `-f`) or equivalent CLI args:
+All configuration is in `~/.cta/config.json`:
 
-| Config Key | CLI Flag | Default | Description |
-|---|---|---|---|
-| `telegram_bot_token` | `--token` | — | Bot token from [@BotFather](https://t.me/BotFather) |
-| `allowed_users` | `--allowed-users` | `[]` (all) | Telegram user IDs (comma-separated in CLI) |
-| `claude_timeout` | `--timeout` | `600` | Max seconds per Claude call |
-| `model` | `--model` | `claude-opus-4-6` | Claude model to use |
-| `sessions_file` | `--sessions-file` | `sessions.json` | Path to session persistence file |
+| Key | Default | Description |
+|---|---|---|
+| `telegram_bot_token` | — | Bot token from [@BotFather](https://t.me/BotFather) |
+| `allowed_users` | `[]` (all) | List of Telegram user IDs |
+| `claude_timeout` | `600` | Max seconds per Claude call |
+| `model` | `claude-opus-4-6` | Claude model to use |
+
+Sessions are persisted in `~/.cta/sessions.json` automatically.
 
 ## Bot Commands
 
@@ -51,6 +53,6 @@ You → Telegram → CTA → claude --print --resume <session> → response → 
 
 - Calls `claude --print --dangerously-skip-permissions` with your local Claude Code subscription
 - Full tool access: Claude can read/write files and run commands in the working directory
-- Session persistence: conversations survive restarts via `sessions.json`
-- Per-user message queues: sequential processing per user, concurrent across users
+- Session persistence: conversations survive restarts via `~/.cta/sessions.json`
+- Per-user message queues: sequential processing per user, serialized Claude calls
 - Markdown formatting via `telegramify-markdown`

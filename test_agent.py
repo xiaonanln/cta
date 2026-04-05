@@ -42,13 +42,11 @@ def setup_fake_bot():
 class TestConfig(unittest.TestCase):
 
     def test_default_config_keys(self):
-        with patch.dict(os.environ, {}, clear=True):
-            config = agent.load_config(None)
+        config = agent.DEFAULT_CONFIG
         self.assertEqual(config["telegram_bot_token"], "")
         self.assertEqual(config["allowed_users"], [])
         self.assertEqual(config["claude_timeout"], 600)
         self.assertEqual(config["model"], "claude-opus-4-6")
-        self.assertEqual(config["sessions_file"], "sessions.json")
 
     def test_load_from_file(self):
         cfg = {"telegram_bot_token": "abc:123", "allowed_users": [111]}
@@ -56,8 +54,8 @@ class TestConfig(unittest.TestCase):
             json.dump(cfg, f)
             name = f.name
         try:
-            with patch.dict(os.environ, {}, clear=True):
-                config = agent.load_config(name)
+            with patch.object(agent, "CONFIG_PATH", name):
+                config = agent.load_config()
         finally:
             os.unlink(name)
         self.assertEqual(config["telegram_bot_token"], "abc:123")
@@ -65,26 +63,22 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(config["claude_timeout"], 600)  # default preserved
 
     def test_missing_file_uses_defaults(self):
-        with patch.dict(os.environ, {}, clear=True):
-            config = agent.load_config("/nonexistent/config.json")
+        with patch.object(agent, "CONFIG_PATH", "/nonexistent/config.json"):
+            config = agent.load_config()
         self.assertEqual(config["claude_timeout"], 600)
 
     def test_init_applies_all_fields(self):
-        original_model = agent.MODEL
-        original_timeout = agent.TIMEOUT
         config = {
             "telegram_bot_token": "tok",
             "allowed_users": [1, 2],
             "claude_timeout": 30,
             "model": "claude-haiku-4-5-20251001",
-            "sessions_file": "/tmp/sessions.json",
         }
         agent.init(config)
         self.assertEqual(agent.BOT_TOKEN, "tok")
         self.assertEqual(agent.ALLOWED_USERS, {1, 2})
         self.assertEqual(agent.TIMEOUT, 30)
         self.assertEqual(agent.MODEL, "claude-haiku-4-5-20251001")
-        self.assertEqual(agent.SESSIONS_FILE, "/tmp/sessions.json")
         # Reset
         agent.init(agent.DEFAULT_CONFIG)
 
@@ -94,60 +88,13 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(agent.MODEL, "claude-sonnet-4-6")
         agent.MODEL = original
 
-    def test_init_sets_sessions_file(self):
-        agent.init({**agent.DEFAULT_CONFIG, "sessions_file": "/custom/path.json"})
-        self.assertEqual(agent.SESSIONS_FILE, "/custom/path.json")
-        agent.init(agent.DEFAULT_CONFIG)
+    def test_config_path_is_in_cta_home(self):
+        self.assertTrue(agent.CONFIG_PATH.startswith(agent.CTA_HOME))
+        self.assertTrue(agent.CONFIG_PATH.endswith("config.json"))
 
-    def test_parse_args_config_file(self):
-        args = agent.parse_args(["-f", "my.json"])
-        self.assertEqual(args.config, "my.json")
-        self.assertIsNone(args.token)
-
-    def test_parse_args_token(self):
-        args = agent.parse_args(["--token", "abc:123"])
-        self.assertIsNone(args.config)
-        self.assertEqual(args.token, "abc:123")
-
-    def test_parse_args_config_and_token_exclusive(self):
-        with self.assertRaises(SystemExit):
-            agent.parse_args(["-f", "my.json", "--token", "abc:123"])
-
-    def test_config_from_args_file(self):
-        cfg = {"telegram_bot_token": "from-file", "allowed_users": [1]}
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(cfg, f)
-            name = f.name
-        try:
-            args = agent.parse_args(["-f", name])
-            config = agent.config_from_args(args)
-        finally:
-            os.unlink(name)
-        self.assertEqual(config["telegram_bot_token"], "from-file")
-        self.assertEqual(config["allowed_users"], [1])
-
-    def test_config_from_args_token(self):
-        args = agent.parse_args(["--token", "abc:123", "--allowed-users", "1,2", "--timeout", "30", "--model", "claude-sonnet-4-6", "--sessions-file", "/tmp/s.json"])
-        config = agent.config_from_args(args)
-        self.assertEqual(config["telegram_bot_token"], "abc:123")
-        self.assertEqual(config["allowed_users"], [1, 2])
-        self.assertEqual(config["claude_timeout"], 30)
-        self.assertEqual(config["model"], "claude-sonnet-4-6")
-        self.assertEqual(config["sessions_file"], "/tmp/s.json")
-
-    def test_config_from_args_token_defaults(self):
-        args = agent.parse_args(["--token", "abc:123"])
-        config = agent.config_from_args(args)
-        self.assertEqual(config["telegram_bot_token"], "abc:123")
-        self.assertEqual(config["allowed_users"], [])
-        self.assertEqual(config["claude_timeout"], 600)
-        self.assertEqual(config["model"], "claude-opus-4-6")
-
-    def test_config_from_args_no_flags_uses_default_config(self):
-        args = agent.parse_args([])
-        config = agent.config_from_args(args)
-        # Falls back to loading config.json (default)
-        self.assertIn("telegram_bot_token", config)
+    def test_sessions_path_is_in_cta_home(self):
+        self.assertTrue(agent.SESSIONS_PATH.startswith(agent.CTA_HOME))
+        self.assertTrue(agent.SESSIONS_PATH.endswith("sessions.json"))
 
 
 # ── Session persistence ───────────────────────────────────────────────────────
@@ -158,10 +105,12 @@ class TestSessionPersistence(unittest.TestCase):
         agent.user_sessions.clear()
         self.tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
         self.tmp.close()
-        agent.SESSIONS_FILE = self.tmp.name
+        self._orig_sessions_path = agent.SESSIONS_PATH
+        agent.SESSIONS_PATH = self.tmp.name
 
     def tearDown(self):
         agent.user_sessions.clear()
+        agent.SESSIONS_PATH = self._orig_sessions_path
         agent.init(agent.DEFAULT_CONFIG)
         for path in [self.tmp.name, self.tmp.name + ".tmp"]:
             if os.path.exists(path):
