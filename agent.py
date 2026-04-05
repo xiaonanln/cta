@@ -358,14 +358,12 @@ if __name__ == "__main__":
     create_bot()
     tui_log(f"[dim]CTA starting… model=[cyan]{MODEL}[/] cwd=[cyan]{DEFAULT_CWD}[/] users={ALLOWED_USERS or 'all'}[/]")
 
-    if ALLOWED_USERS:
-        for uid in ALLOWED_USERS:
-            try:
-                bot.send_message(uid, "✅ CTA is ready.")
-            except Exception as e:
-                tui_log(f"[red]Could not notify {uid}: {escape(str(e))}[/]")
-    else:
-        tui_log("[dim]No ALLOWED_USERS set — skipping startup notification[/]")
+    notify_uids = ALLOWED_USERS or set(user_sessions.keys())
+    for uid in notify_uids:
+        try:
+            bot.send_message(uid, "✅ CTA is ready.")
+        except Exception as e:
+            tui_log(f"[red]Could not notify {uid}: {escape(str(e))}[/]")
 
     threading.Thread(target=bot.infinity_polling, daemon=True).start()
     with Live(auto_refresh=False, screen=True) as live:
