@@ -235,6 +235,10 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
         claude_busy_for = username
         try:
             reply, new_session_id = call_claude(message.text, cwd=cwd, session_id=session_id, model=model)
+            if session_id and "No conversation found with session ID" in reply:
+                tui_log(f"[yellow]⚠ stale session for {escape(username)}, retrying fresh[/]")
+                user_sessions.pop((uid, chat_id), None)
+                reply, new_session_id = call_claude(message.text, cwd=cwd, session_id=None, model=model)
         finally:
             claude_busy_for = None
             done.set()
