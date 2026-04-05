@@ -1,2 +1,3 @@
 pyTelegramBotAPI>=4.0
 rich>=13.0
+telegramify-markdown>=0.1.0
