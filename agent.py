@@ -88,6 +88,7 @@ DEFAULT_CONFIG = {
     "allowed_users": [],
     "claude_timeout": 600,
     "sessions_file": "sessions.json",
+    "model": "claude-opus-4-6",
 }
 
 
@@ -110,6 +111,8 @@ def load_config(config_path=None) -> dict:
         ]
     if os.environ.get("CLAUDE_TIMEOUT"):
         config["claude_timeout"] = int(os.environ["CLAUDE_TIMEOUT"])
+    if os.environ.get("CLAUDE_MODEL"):
+        config["model"] = os.environ["CLAUDE_MODEL"]
 
     return config
 
@@ -119,7 +122,7 @@ def load_config(config_path=None) -> dict:
 BOT_TOKEN = ""
 ALLOWED_USERS: set[int] = set()
 TIMEOUT = 120
-MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-5")
+MODEL = "claude-opus-4-6"
 DEFAULT_CWD = os.getcwd()
 SESSIONS_FILE = "sessions.json"
 
@@ -133,11 +136,12 @@ user_queues_lock = threading.Lock()
 
 def init(config: dict):
     """Apply config to module globals."""
-    global BOT_TOKEN, ALLOWED_USERS, TIMEOUT, SESSIONS_FILE
+    global BOT_TOKEN, ALLOWED_USERS, TIMEOUT, SESSIONS_FILE, MODEL
     BOT_TOKEN = config["telegram_bot_token"]
     ALLOWED_USERS = set(config["allowed_users"])
     TIMEOUT = config["claude_timeout"]
     SESSIONS_FILE = config.get("sessions_file", "sessions.json")
+    MODEL = config.get("model", "claude-opus-4-6")
 
 
 def load_sessions():
