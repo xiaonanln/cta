@@ -18,6 +18,7 @@ from collections import deque
 from datetime import datetime
 
 import telebot
+import telegramify_markdown
 from rich.layout import Layout
 from rich.live import Live
 from rich.markup import escape
@@ -260,6 +261,29 @@ def cmd_status(message):
     )
 
 
+def _send_markdown(message, text: str):
+    """Send text with MarkdownV2 formatting, falling back to plain text."""
+    try:
+        converted = telegramify_markdown.markdownify(text)
+        bot.reply_to(message, converted, parse_mode="MarkdownV2")
+    except Exception:
+        bot.reply_to(message, text)
+
+
+def _split_reply(text: str, limit: int = 4096) -> list[str]:
+    """Split reply into Telegram-sized chunks, preferring newline boundaries."""
+    chunks = []
+    while len(text) > limit:
+        split_at = text.rfind("\n", 0, limit)
+        if split_at == -1:
+            split_at = limit
+        chunks.append(text[:split_at])
+        text = text[split_at:].lstrip("\n")
+    if text:
+        chunks.append(text)
+    return chunks
+
+
 def _typing_loop(chat_id: int, done: threading.Event):
     """Send typing action immediately, then every 4s until done."""
     while True:
@@ -287,8 +311,8 @@ def _process_message(uid: int, message, done: threading.Event):
         save_sessions()
     preview = reply[:120].replace("\n", " ")
     tui_log(f"[blue]←[/] [bold]{escape(str(message.from_user.username or uid))}[/] {escape(preview)}{'…' if len(reply) > 120 else ''}")
-    for i in range(0, len(reply), 4096):
-        bot.reply_to(message, reply[i : i + 4096])
+    for chunk in _split_reply(reply):
+        _send_markdown(message, chunk)
 
 
 def _user_worker(uid: int, q: queue.Queue):
