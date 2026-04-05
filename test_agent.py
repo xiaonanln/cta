@@ -36,6 +36,8 @@ def setup_fake_bot():
     agent.user_sessions.clear()
     agent.user_cwd.clear()
     agent.user_model.clear()
+    agent.chat_labels.clear()
+    agent.msg_counts.clear()
     return agent.bot
 
 

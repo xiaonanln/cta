@@ -72,6 +72,8 @@ user_cwd: dict[tuple[int, int], str] = {}  # (uid, chat_id) → working director
 user_model: dict[tuple[int, int], str] = {}  # (uid, chat_id) → model override
 user_queues: dict[tuple[int, int], queue.Queue] = {}
 user_queues_lock = threading.Lock()
+chat_labels: dict[tuple[int, int], str] = {}   # (uid, chat_id) → "DM" or group name
+msg_counts: dict[tuple[int, int], int] = {}    # (uid, chat_id) → messages processed
 claude_lock = threading.Lock()  # serialize Claude CLI calls (Max subscription concurrency limit)
 claude_busy_for = None  # username of user currently calling Claude
 
@@ -126,11 +128,21 @@ class _TuiLogHandler(logging.Handler):
 
 
 def _status_panel() -> tuple[Panel, int]:
-    line1 = f"[bold]model:[/] [cyan]{escape(MODEL)}[/]   [bold]cwd:[/] [cyan]{escape(DEFAULT_CWD)}[/]"
-    if user_sessions:
-        sessions_str = "   ".join(f"[bold]{uid}:{chat_id}:[/] [dim]{sid[:8]}…[/]" for (uid, chat_id), sid in user_sessions.items())
-        info = line1 + "\n[bold]sessions:[/] " + sessions_str
-        size = 5
+    line1 = f"[bold]default model:[/] [cyan]{escape(MODEL)}[/]   [bold]default cwd:[/] [cyan]{escape(DEFAULT_CWD)}[/]"
+    all_keys = set(user_sessions) | set(msg_counts)
+    if all_keys:
+        rows = []
+        for key in sorted(all_keys):
+            uid, chat_id = key
+            label = escape(chat_labels.get(key, f"{uid}:{chat_id}"))
+            sid = user_sessions.get(key, "")
+            sid_str = f"[dim]{sid[:8]}…[/]" if sid else "[dim]no session[/]"
+            model = escape(user_model.get(key, MODEL))
+            cwd = escape(user_cwd.get(key, DEFAULT_CWD))
+            count = msg_counts.get(key, 0)
+            rows.append(f"  [bold]{label}[/] {sid_str}  model=[cyan]{model}[/]  cwd=[cyan]{cwd}[/]  msgs=[yellow]{count}[/]")
+        info = line1 + "\n" + "\n".join(rows)
+        size = 3 + len(rows)
     else:
         info = line1 + "   [bold]sessions:[/] [dim]none[/]"
         size = 3
@@ -221,10 +233,15 @@ def _typing_loop(chat_id: int, done: threading.Event):
 
 def _process_message(uid: int, chat_id: int, message, done: threading.Event):
     global claude_busy_for
-    cwd = user_cwd.get((uid, chat_id), DEFAULT_CWD)
-    model = user_model.get((uid, chat_id), MODEL)
-    session_id = user_sessions.get((uid, chat_id))
+    key = (uid, chat_id)
+    cwd = user_cwd.get(key, DEFAULT_CWD)
+    model = user_model.get(key, MODEL)
+    session_id = user_sessions.get(key)
     username = message.from_user.username or str(uid)
+    if message.chat.type == "private":
+        chat_labels[key] = f"DM:{username}"
+    else:
+        chat_labels[key] = message.chat.title or str(chat_id)
 
     # If Claude is busy with another user, notify and wait
     if claude_lock.locked() and claude_busy_for != username:
@@ -237,15 +254,16 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
             reply, new_session_id = call_claude(message.text, cwd=cwd, session_id=session_id, model=model)
             if session_id and "No conversation found with session ID" in reply:
                 tui_log(f"[yellow]⚠ stale session for {escape(username)}, retrying fresh[/]")
-                user_sessions.pop((uid, chat_id), None)
+                user_sessions.pop(key, None)
                 reply, new_session_id = call_claude(message.text, cwd=cwd, session_id=None, model=model)
         finally:
             claude_busy_for = None
             done.set()
 
     if new_session_id:
-        user_sessions[(uid, chat_id)] = new_session_id
+        user_sessions[key] = new_session_id
         save_sessions()
+    msg_counts[key] = msg_counts.get(key, 0) + 1
     preview = reply[:120].replace("\n", " ")
     tui_log(f"[blue]←[/] [bold]{escape(username)}[/] {escape(preview)}{'…' if len(reply) > 120 else ''}")
     for chunk in _split_reply(reply):
