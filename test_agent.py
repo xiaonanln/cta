@@ -543,6 +543,28 @@ class TestBotHandlers(unittest.TestCase):
         time.sleep(0.5)
         self.assertNotIn((123, 123), agent.user_sessions)
 
+    def test_stale_session_retries_without_session_id(self):
+        stale_reply = "[Error] No conversation found with session ID: abc123"
+        calls = []
+
+        def fake_claude(*args, **kwargs):
+            calls.append(kwargs.get("session_id"))
+            if kwargs.get("session_id"):
+                return stale_reply, ""
+            return "fresh reply", "new-sess"
+
+        agent.user_sessions[(123, 123)] = "abc123"
+        with patch("agent.call_claude", side_effect=fake_claude):
+            agent.handle_message(make_fake_message("hello"))
+            time.sleep(0.5)
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0], "abc123")
+        self.assertIsNone(calls[1])
+        self.assertEqual(agent.user_sessions[(123, 123)], "new-sess")
+        reply_text = self.bot.reply_to.call_args[0][1]
+        self.assertNotIn("No conversation found", str(reply_text))
+
     @patch("agent.call_claude", return_value=("reply", "new-sess"))
     def test_messages_processed_sequentially(self, mock_claude):
         """Second message uses session ID set by first message."""
