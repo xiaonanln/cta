@@ -65,3 +65,4 @@ python -m unittest test_agent -v
 - Keep it simple — single file, no frameworks, no database.
 - All changes must pass `python -m unittest test_agent -v`.
 - Don't hardcode paths or tokens.
+- Always create a PR after completing a task. Commit changes, push to a feature branch, and open a PR against main.

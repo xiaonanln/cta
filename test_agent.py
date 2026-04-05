@@ -19,12 +19,14 @@ agent.init(agent.DEFAULT_CONFIG)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def make_fake_message(text, user_id=123, username="tester"):
+def make_fake_message(text, user_id=123, username="tester", chat_type="private", chat_title=None):
     msg = MagicMock()
     msg.text = text
     msg.from_user.id = user_id
     msg.from_user.username = username
     msg.chat.id = user_id
+    msg.chat.type = chat_type
+    msg.chat.title = chat_title
     msg.message_id = 1
     return msg
 
@@ -400,9 +402,17 @@ class TestBotHandlers(unittest.TestCase):
         self.bot = setup_fake_bot()
         agent.ALLOWED_USERS.clear()
         agent.ALLOWED_USERS.add(123)
+        self._orig_sessions_path = agent.SESSIONS_PATH
+        self._tmp_sessions = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+        self._tmp_sessions.close()
+        agent.SESSIONS_PATH = self._tmp_sessions.name
 
     def tearDown(self):
         agent.ALLOWED_USERS.clear()
+        agent.SESSIONS_PATH = self._orig_sessions_path
+        for path in [self._tmp_sessions.name, self._tmp_sessions.name + ".tmp"]:
+            if os.path.exists(path):
+                os.unlink(path)
 
     def test_start_replies(self):
         agent.cmd_start(make_fake_message("/start"))
@@ -555,10 +565,18 @@ class TestConcurrentUsers(unittest.TestCase):
         self.bot = setup_fake_bot()
         agent.ALLOWED_USERS.clear()
         agent.claude_busy_for = None
+        self._orig_sessions_path = agent.SESSIONS_PATH
+        self._tmp_sessions = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+        self._tmp_sessions.close()
+        agent.SESSIONS_PATH = self._tmp_sessions.name
 
     def tearDown(self):
         agent.ALLOWED_USERS.clear()
         agent.claude_busy_for = None
+        agent.SESSIONS_PATH = self._orig_sessions_path
+        for path in [self._tmp_sessions.name, self._tmp_sessions.name + ".tmp"]:
+            if os.path.exists(path):
+                os.unlink(path)
 
     @patch("agent.call_claude")
     def test_second_user_gets_queue_notification(self, mock_claude):
