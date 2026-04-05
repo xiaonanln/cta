@@ -7,6 +7,7 @@ Uses Max subscription — no API tokens needed.
 
 import argparse
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -159,9 +160,15 @@ def handle_message(message):
     threading.Thread(target=process, daemon=True).start()
 
 
+class _Suppress409(logging.Filter):
+    def filter(self, record):
+        return "409" not in record.getMessage()
+
+
 def create_bot():
     """Create and configure the Telegram bot."""
     global bot
+    logging.getLogger("TeleBot").addFilter(_Suppress409())
     bot = telebot.TeleBot(BOT_TOKEN)
     bot.message_handler(commands=["start"])(cmd_start)
     bot.message_handler(commands=["clear"])(cmd_clear)
