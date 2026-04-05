@@ -75,7 +75,7 @@ def _build_layout() -> Layout:
 DEFAULT_CONFIG = {
     "telegram_bot_token": "",
     "allowed_users": [],
-    "claude_timeout": 300,
+    "claude_timeout": 600,
     "sessions_file": "sessions.json",
 }
 
