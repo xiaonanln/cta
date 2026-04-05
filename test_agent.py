@@ -1,9 +1,12 @@
 """Tests for CTA (Claude Telegram Agent)."""
 
+import json
 import os
 import subprocess
+import tempfile
+import time
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, call
 
 # Initialize with test config before importing
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-token")
@@ -13,8 +16,9 @@ import agent
 agent.init(agent.DEFAULT_CONFIG)
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
 def make_fake_message(text, user_id=123, username="tester"):
-    """Create a fake Telegram message object."""
     msg = MagicMock()
     msg.text = text
     msg.from_user.id = user_id
@@ -25,289 +29,50 @@ def make_fake_message(text, user_id=123, username="tester"):
 
 
 def setup_fake_bot():
-    """Create agent with a fake bot that doesn't hit Telegram API."""
     agent.bot = MagicMock()
     agent.user_sessions.clear()
     agent.user_cwd.clear()
+    agent.user_model.clear()
     return agent.bot
 
 
-class TestCallClaude(unittest.TestCase):
-    """Tests for the call_claude function."""
-
-    @patch("agent.subprocess.run")
-    def test_returns_stdout(self, mock_run):
-        mock_run.return_value = MagicMock(
-            stdout='{"result": "Hello world", "session_id": "abc-123", "is_error": false}',
-            stderr=""
-        )
-        result = agent.call_claude("hi")
-        self.assertEqual(result[0], "Hello world")
-        self.assertEqual(result[1], "abc-123")
-
-    @patch("agent.subprocess.run")
-    def test_passes_cwd(self, mock_run):
-        mock_run.return_value = MagicMock(
-            stdout='{"result": "ok", "session_id": "s1", "is_error": false}',
-            stderr=""
-        )
-        agent.call_claude("hi", cwd="/tmp/test")
-        _, kwargs = mock_run.call_args
-        self.assertEqual(kwargs["cwd"], "/tmp/test")
-
-    @patch("agent.subprocess.run")
-    def test_uses_dangerously_skip_permissions(self, mock_run):
-        mock_run.return_value = MagicMock(
-            stdout='{"result": "ok", "session_id": "s1", "is_error": false}',
-            stderr=""
-        )
-        agent.call_claude("hi")
-        args = mock_run.call_args[0][0]
-        self.assertIn("--dangerously-skip-permissions", args)
-        self.assertIn("--print", args)
-        self.assertIn("--output-format", args)
-        self.assertIn("json", args)
-
-    @patch("agent.subprocess.run")
-    def test_returns_stderr_on_empty_stdout(self, mock_run):
-        mock_run.return_value = MagicMock(stdout="", stderr="some error")
-        result = agent.call_claude("hi")
-        self.assertIn("Error", result[0])
-        self.assertIn("some error", result[0])
-
-    @patch("agent.subprocess.run")
-    def test_returns_empty_response_message(self, mock_run):
-        mock_run.return_value = MagicMock(stdout="", stderr="")
-        result = agent.call_claude("hi")
-        self.assertEqual(result[0], "(empty response)")
-
-    @patch("agent.subprocess.run", side_effect=subprocess.TimeoutExpired("claude", 120))
-    def test_timeout_returns_message(self, mock_run):
-        result = agent.call_claude("hi")
-        self.assertIn("timed out", result[0])
-
-    @patch("agent.subprocess.run", side_effect=FileNotFoundError)
-    def test_cli_not_found(self, mock_run):
-        result = agent.call_claude("hi")
-        self.assertIn("not found", result[0])
-
-    @patch("agent.subprocess.run")
-    def test_strips_whitespace(self, mock_run):
-        mock_run.return_value = MagicMock(
-            stdout='{"result": "  hello  \\n", "session_id": "s1", "is_error": false}',
-            stderr=""
-        )
-        result = agent.call_claude("hi")
-        self.assertEqual(result[0], "hello")
-
-    @patch("agent.subprocess.run")
-    def test_resumes_session(self, mock_run):
-        mock_run.return_value = MagicMock(
-            stdout='{"result": "ok", "session_id": "sess-456", "is_error": false}',
-            stderr=""
-        )
-        agent.call_claude("hi", session_id="sess-456")
-        args = mock_run.call_args[0][0]
-        self.assertIn("--resume", args)
-        self.assertIn("sess-456", args)
-
-    @patch("agent.subprocess.run")
-    def test_returns_session_id(self, mock_run):
-        mock_run.return_value = MagicMock(
-            stdout='{"result": "hello", "session_id": "new-session-789", "is_error": false}',
-            stderr=""
-        )
-        text, session_id = agent.call_claude("hi")
-        self.assertEqual(session_id, "new-session-789")
-
-
-class TestSessionManagement(unittest.TestCase):
-    """Tests for Claude session management."""
-
-    def setUp(self):
-        agent.user_sessions.clear()
-        agent.user_cwd.clear()
-
-    def test_sessions_start_empty(self):
-        self.assertEqual(len(agent.user_sessions), 0)
-
-    def test_clear_removes_session(self):
-        agent.user_sessions[123] = "sess-id"
-        agent.user_sessions.pop(123, None)
-        self.assertNotIn(123, agent.user_sessions)
-
-
-class TestUserCwd(unittest.TestCase):
-    """Tests for working directory management."""
-
-    def setUp(self):
-        agent.user_cwd.clear()
-
-    def test_default_cwd_is_current_dir(self):
-        self.assertEqual(agent.DEFAULT_CWD, os.getcwd())
-
-    def test_user_cwd_override(self):
-        agent.user_cwd[123] = "/tmp"
-        self.assertEqual(agent.user_cwd.get(123, agent.DEFAULT_CWD), "/tmp")
-
-    def test_user_without_cwd_gets_default(self):
-        self.assertEqual(agent.user_cwd.get(999, agent.DEFAULT_CWD), agent.DEFAULT_CWD)
-
-
-class TestAllowedUsers(unittest.TestCase):
-    """Tests for user whitelist."""
-
-    def test_empty_allows_all(self):
-        with patch.dict(os.environ, {"ALLOWED_USERS": ""}):
-            users = set(
-                int(x) for x in os.environ.get("ALLOWED_USERS", "").split(",") if x.strip()
-            )
-            self.assertEqual(users, set())
-
-    def test_parses_comma_separated(self):
-        with patch.dict(os.environ, {"ALLOWED_USERS": "123,456,789"}):
-            users = set(
-                int(x) for x in os.environ.get("ALLOWED_USERS", "").split(",") if x.strip()
-            )
-            self.assertEqual(users, {123, 456, 789})
-
-    def test_single_user(self):
-        with patch.dict(os.environ, {"ALLOWED_USERS": "2018384667"}):
-            users = set(
-                int(x) for x in os.environ.get("ALLOWED_USERS", "").split(",") if x.strip()
-            )
-            self.assertEqual(users, {2018384667})
-
-
-class TestBotHandlers(unittest.TestCase):
-    """Tests using a fake bot to verify handler behavior."""
-
-    def setUp(self):
-        self.bot = setup_fake_bot()
-        agent.ALLOWED_USERS.clear()
-        agent.ALLOWED_USERS.add(123)
-
-    def test_start_command(self):
-        msg = make_fake_message("/start")
-        agent.cmd_start(msg)
-        self.bot.reply_to.assert_called_once()
-        reply = self.bot.reply_to.call_args[0][1]
-        self.assertIn("Hi", reply)
-
-    def test_start_blocked_for_unknown_user(self):
-        msg = make_fake_message("/start", user_id=999)
-        agent.cmd_start(msg)
-        self.bot.reply_to.assert_not_called()
-
-    def test_clear_command(self):
-        agent.user_sessions[123] = "some-session-id"
-        msg = make_fake_message("/clear")
-        agent.cmd_clear(msg)
-        self.assertNotIn(123, agent.user_sessions)
-        self.bot.reply_to.assert_called_once()
-
-    def test_pwd_command(self):
-        msg = make_fake_message("/pwd")
-        agent.cmd_pwd(msg)
-        self.bot.reply_to.assert_called_once()
-        reply = self.bot.reply_to.call_args[0][1]
-        self.assertIn(os.getcwd(), reply)
-
-    def test_cd_to_valid_dir(self):
-        msg = make_fake_message("/cd /tmp")
-        agent.cmd_cd(msg)
-        self.assertEqual(agent.user_cwd[123], "/tmp")
-        self.bot.reply_to.assert_called_once()
-
-    def test_cd_to_invalid_dir(self):
-        msg = make_fake_message("/cd /nonexistent_dir_xyz")
-        agent.cmd_cd(msg)
-        self.assertNotIn(123, agent.user_cwd)
-        reply = self.bot.reply_to.call_args[0][1]
-        self.assertIn("❌", reply)
-
-    def test_cd_no_arg_shows_current(self):
-        agent.user_cwd[123] = "/tmp"
-        msg = make_fake_message("/cd")
-        agent.cmd_cd(msg)
-        reply = self.bot.reply_to.call_args[0][1]
-        self.assertIn("/tmp", reply)
-
-    @patch("agent.call_claude", return_value=("Hello from Claude!", "sess-123"))
-    def test_message_calls_claude_and_replies(self, mock_claude):
-        msg = make_fake_message("what is 1+1")
-        agent.handle_message(msg)
-        # handle_message runs in a thread, wait briefly
-        import time
-        time.sleep(0.5)
-        mock_claude.assert_called_once()
-        self.bot.reply_to.assert_called()
-
-    @patch("agent.call_claude", return_value=("Hello from Claude!", "sess-123"))
-    def test_message_stores_session_id(self, mock_claude):
-        msg = make_fake_message("hello")
-        agent.handle_message(msg)
-        import time
-        time.sleep(0.5)
-        self.assertEqual(agent.user_sessions[123], "sess-123")
-
-    @patch("agent.call_claude", return_value=("ok", "sess-abc"))
-    def test_message_uses_user_cwd(self, mock_claude):
-        agent.user_cwd[123] = "/tmp/test"
-        msg = make_fake_message("hi")
-        agent.handle_message(msg)
-        import time
-        time.sleep(0.5)
-        _, kwargs = mock_claude.call_args
-        self.assertEqual(kwargs["cwd"], "/tmp/test")
-
-    def test_message_blocked_for_unknown_user(self):
-        msg = make_fake_message("hi", user_id=999)
-        agent.handle_message(msg)
-        self.bot.reply_to.assert_not_called()
-
-    @patch("agent.call_claude", return_value=("x" * 5000, "sess-123"))
-    def test_long_reply_split(self, mock_claude):
-        msg = make_fake_message("write a long essay")
-        agent.handle_message(msg)
-        import time
-        time.sleep(0.5)
-        # Should be called twice (5000 / 4096 = 2 chunks)
-        self.assertEqual(self.bot.reply_to.call_count, 2)
-
+# ── Config ────────────────────────────────────────────────────────────────────
 
 class TestConfig(unittest.TestCase):
-    """Tests for config loading."""
 
-    def test_default_config(self):
+    def test_default_config_keys(self):
         with patch.dict(os.environ, {}, clear=True):
             config = agent.load_config(None)
         self.assertEqual(config["telegram_bot_token"], "")
         self.assertEqual(config["allowed_users"], [])
         self.assertEqual(config["claude_timeout"], 600)
+        self.assertEqual(config["model"], "claude-opus-4-6")
+        self.assertEqual(config["sessions_file"], "sessions.json")
 
     def test_load_from_file(self):
-        import tempfile, json
         cfg = {"telegram_bot_token": "abc:123", "allowed_users": [111]}
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump(cfg, f)
-            f.flush()
+            name = f.name
+        try:
             with patch.dict(os.environ, {}, clear=True):
-                config = agent.load_config(f.name)
-        os.unlink(f.name)
+                config = agent.load_config(name)
+        finally:
+            os.unlink(name)
         self.assertEqual(config["telegram_bot_token"], "abc:123")
         self.assertEqual(config["allowed_users"], [111])
         self.assertEqual(config["claude_timeout"], 600)  # default preserved
 
-    def test_env_overrides_file(self):
-        import tempfile, json
+    def test_file_values_overrideable_by_env(self):
         cfg = {"telegram_bot_token": "from-file", "claude_timeout": 60}
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump(cfg, f)
-            f.flush()
+            name = f.name
+        try:
             with patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "from-env"}):
-                config = agent.load_config(f.name)
-        os.unlink(f.name)
+                config = agent.load_config(name)
+        finally:
+            os.unlink(name)
         self.assertEqual(config["telegram_bot_token"], "from-env")
         self.assertEqual(config["claude_timeout"], 60)
 
@@ -316,50 +81,573 @@ class TestConfig(unittest.TestCase):
             config = agent.load_config("/nonexistent/config.json")
         self.assertEqual(config["claude_timeout"], 600)
 
-    def test_init_applies_config(self):
-        config = {"telegram_bot_token": "tok", "allowed_users": [1, 2], "claude_timeout": 30}
+    def test_env_allowed_users_parsed(self):
+        with patch.dict(os.environ, {"ALLOWED_USERS": "1,2,3"}, clear=True):
+            config = agent.load_config(None)
+        self.assertEqual(config["allowed_users"], [1, 2, 3])
+
+    def test_env_allowed_users_single(self):
+        with patch.dict(os.environ, {"ALLOWED_USERS": "42"}, clear=True):
+            config = agent.load_config(None)
+        self.assertEqual(config["allowed_users"], [42])
+
+    def test_env_allowed_users_empty_string(self):
+        with patch.dict(os.environ, {"ALLOWED_USERS": ""}, clear=True):
+            config = agent.load_config(None)
+        self.assertEqual(config["allowed_users"], [])
+
+    def test_env_claude_timeout(self):
+        with patch.dict(os.environ, {"CLAUDE_TIMEOUT": "300"}, clear=True):
+            config = agent.load_config(None)
+        self.assertEqual(config["claude_timeout"], 300)
+
+    def test_env_claude_model(self):
+        with patch.dict(os.environ, {"CLAUDE_MODEL": "claude-sonnet-4-6"}, clear=True):
+            config = agent.load_config(None)
+        self.assertEqual(config["model"], "claude-sonnet-4-6")
+
+    def test_init_applies_all_fields(self):
+        original_model = agent.MODEL
+        original_timeout = agent.TIMEOUT
+        config = {
+            "telegram_bot_token": "tok",
+            "allowed_users": [1, 2],
+            "claude_timeout": 30,
+            "model": "claude-haiku-4-5-20251001",
+            "sessions_file": "/tmp/sessions.json",
+        }
         agent.init(config)
         self.assertEqual(agent.BOT_TOKEN, "tok")
         self.assertEqual(agent.ALLOWED_USERS, {1, 2})
         self.assertEqual(agent.TIMEOUT, 30)
+        self.assertEqual(agent.MODEL, "claude-haiku-4-5-20251001")
+        self.assertEqual(agent.SESSIONS_FILE, "/tmp/sessions.json")
         # Reset
         agent.init(agent.DEFAULT_CONFIG)
 
+    def test_init_sets_model(self):
+        original = agent.MODEL
+        agent.init({**agent.DEFAULT_CONFIG, "model": "claude-sonnet-4-6"})
+        self.assertEqual(agent.MODEL, "claude-sonnet-4-6")
+        agent.MODEL = original
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_init_sets_sessions_file(self):
+        agent.init({**agent.DEFAULT_CONFIG, "sessions_file": "/custom/path.json"})
+        self.assertEqual(agent.SESSIONS_FILE, "/custom/path.json")
+        agent.init(agent.DEFAULT_CONFIG)
 
+
+# ── Session persistence ───────────────────────────────────────────────────────
+
+class TestSessionPersistence(unittest.TestCase):
+
+    def setUp(self):
+        agent.user_sessions.clear()
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+        self.tmp.close()
+        agent.SESSIONS_FILE = self.tmp.name
+
+    def tearDown(self):
+        agent.user_sessions.clear()
+        agent.init(agent.DEFAULT_CONFIG)
+        for path in [self.tmp.name, self.tmp.name + ".tmp"]:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_save_and_reload(self):
+        agent.user_sessions[123] = "sess-abc"
+        agent.user_sessions[456] = "sess-def"
+        agent.save_sessions()
+        agent.user_sessions.clear()
+        agent.load_sessions()
+        self.assertEqual(agent.user_sessions[123], "sess-abc")
+        self.assertEqual(agent.user_sessions[456], "sess-def")
+
+    def test_save_writes_valid_json(self):
+        agent.user_sessions[99] = "my-session"
+        agent.save_sessions()
+        with open(self.tmp.name) as f:
+            data = json.load(f)
+        self.assertEqual(data["99"], "my-session")
+
+    def test_load_missing_file_is_noop(self):
+        os.unlink(self.tmp.name)
+        agent.load_sessions()  # should not raise
+        self.assertEqual(len(agent.user_sessions), 0)
+
+    def test_load_corrupt_file_does_not_crash(self):
+        with open(self.tmp.name, "w") as f:
+            f.write("not valid json{{{")
+        agent.load_sessions()  # should not raise
+        self.assertEqual(len(agent.user_sessions), 0)
+
+    def test_save_is_atomic(self):
+        """save_sessions must not leave a .tmp file behind."""
+        agent.user_sessions[1] = "s"
+        agent.save_sessions()
+        self.assertFalse(os.path.exists(self.tmp.name + ".tmp"))
+        self.assertTrue(os.path.exists(self.tmp.name))
+
+    def test_save_empty_sessions(self):
+        agent.save_sessions()
+        with open(self.tmp.name) as f:
+            data = json.load(f)
+        self.assertEqual(data, {})
+
+
+# ── call_claude ───────────────────────────────────────────────────────────────
+
+class TestCallClaude(unittest.TestCase):
+
+    def _mock_result(self, result="ok", session_id="sid"):
+        return MagicMock(
+            stdout=json.dumps({"result": result, "session_id": session_id, "is_error": False}),
+            stderr="",
+        )
+
+    @patch("agent.subprocess.run")
+    def test_returns_text_and_session_id(self, mock_run):
+        mock_run.return_value = self._mock_result("Hello world", "abc-123")
+        text, sid = agent.call_claude("hi")
+        self.assertEqual(text, "Hello world")
+        self.assertEqual(sid, "abc-123")
+
+    @patch("agent.subprocess.run")
+    def test_passes_cwd(self, mock_run):
+        mock_run.return_value = self._mock_result()
+        agent.call_claude("hi", cwd="/tmp/test")
+        self.assertEqual(mock_run.call_args[1]["cwd"], "/tmp/test")
+
+    @patch("agent.subprocess.run")
+    def test_uses_default_cwd_when_none(self, mock_run):
+        mock_run.return_value = self._mock_result()
+        agent.call_claude("hi")
+        self.assertEqual(mock_run.call_args[1]["cwd"], agent.DEFAULT_CWD)
+
+    @patch("agent.subprocess.run")
+    def test_uses_global_model(self, mock_run):
+        mock_run.return_value = self._mock_result()
+        agent.call_claude("hi")
+        args = mock_run.call_args[0][0]
+        self.assertIn("--model", args)
+        self.assertIn(agent.MODEL, args)
+
+    @patch("agent.subprocess.run")
+    def test_uses_override_model(self, mock_run):
+        mock_run.return_value = self._mock_result()
+        agent.call_claude("hi", model="claude-sonnet-4-6")
+        args = mock_run.call_args[0][0]
+        idx = args.index("--model")
+        self.assertEqual(args[idx + 1], "claude-sonnet-4-6")
+
+    @patch("agent.subprocess.run")
+    def test_includes_required_flags(self, mock_run):
+        mock_run.return_value = self._mock_result()
+        agent.call_claude("hi")
+        args = mock_run.call_args[0][0]
+        self.assertIn("--print", args)
+        self.assertIn("--dangerously-skip-permissions", args)
+        self.assertIn("--output-format", args)
+        self.assertIn("json", args)
+
+    @patch("agent.subprocess.run")
+    def test_resumes_session(self, mock_run):
+        mock_run.return_value = self._mock_result()
+        agent.call_claude("hi", session_id="sess-xyz")
+        args = mock_run.call_args[0][0]
+        self.assertIn("--resume", args)
+        self.assertIn("sess-xyz", args)
+
+    @patch("agent.subprocess.run")
+    def test_no_resume_without_session_id(self, mock_run):
+        mock_run.return_value = self._mock_result()
+        agent.call_claude("hi")
+        args = mock_run.call_args[0][0]
+        self.assertNotIn("--resume", args)
+
+    @patch("agent.subprocess.run")
+    def test_stderr_returned_on_empty_stdout(self, mock_run):
+        mock_run.return_value = MagicMock(stdout="", stderr="something broke")
+        text, sid = agent.call_claude("hi")
+        self.assertIn("Error", text)
+        self.assertIn("something broke", text)
+        self.assertEqual(sid, "")
+
+    @patch("agent.subprocess.run")
+    def test_empty_stdout_and_stderr(self, mock_run):
+        mock_run.return_value = MagicMock(stdout="", stderr="")
+        text, _ = agent.call_claude("hi")
+        self.assertEqual(text, "(empty response)")
+
+    @patch("agent.subprocess.run")
+    def test_strips_whitespace(self, mock_run):
+        mock_run.return_value = self._mock_result("  hello  \n")
+        text, _ = agent.call_claude("hi")
+        self.assertEqual(text, "hello")
+
+    @patch("agent.subprocess.run", side_effect=subprocess.TimeoutExpired("claude", 600))
+    def test_timeout(self, _):
+        text, sid = agent.call_claude("hi")
+        self.assertIn("timed out", text)
+        self.assertEqual(sid, "")
+
+    @patch("agent.subprocess.run", side_effect=FileNotFoundError)
+    def test_cli_not_found(self, _):
+        text, _ = agent.call_claude("hi")
+        self.assertIn("not found", text)
+
+
+# ── _split_reply ──────────────────────────────────────────────────────────────
+
+class TestSplitReply(unittest.TestCase):
+
+    def test_short_text_single_chunk(self):
+        self.assertEqual(agent._split_reply("hello"), ["hello"])
+
+    def test_empty_text(self):
+        self.assertEqual(agent._split_reply(""), [])
+
+    def test_exact_limit_no_split(self):
+        text = "x" * 4096
+        chunks = agent._split_reply(text)
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0], text)
+
+    def test_splits_at_newline(self):
+        line1 = "a" * 100
+        line2 = "b" * 100
+        text = line1 + "\n" + line2
+        chunks = agent._split_reply(text, limit=150)
+        self.assertEqual(chunks[0], line1)
+        self.assertEqual(chunks[1], line2)
+
+    def test_splits_at_limit_when_no_newline(self):
+        text = "x" * 5000
+        chunks = agent._split_reply(text, limit=4096)
+        self.assertEqual(len(chunks), 2)
+        self.assertEqual(len(chunks[0]), 4096)
+
+    def test_multiple_chunks(self):
+        text = ("line\n" * 1000)
+        chunks = agent._split_reply(text, limit=100)
+        self.assertGreater(len(chunks), 1)
+        rejoined = "\n".join(chunks)
+        self.assertIn("line", rejoined)
+
+    def test_strips_leading_newline_from_next_chunk(self):
+        text = "a" * 10 + "\n" + "b" * 10
+        chunks = agent._split_reply(text, limit=11)
+        self.assertFalse(chunks[1].startswith("\n"))
+
+
+# ── _send_markdown ────────────────────────────────────────────────────────────
+
+class TestSendMarkdown(unittest.TestCase):
+
+    def setUp(self):
+        agent.bot = MagicMock()
+
+    def test_sends_with_markdownv2(self):
+        msg = make_fake_message("hi")
+        agent._send_markdown(msg, "**bold**")
+        agent.bot.reply_to.assert_called_once()
+        _, kwargs = agent.bot.reply_to.call_args
+        self.assertEqual(kwargs.get("parse_mode"), "MarkdownV2")
+
+    def test_fallback_to_plain_text_on_error(self):
+        msg = make_fake_message("hi")
+        agent.bot.reply_to.side_effect = [Exception("parse error"), None]
+        agent._send_markdown(msg, "some text")
+        self.assertEqual(agent.bot.reply_to.call_count, 2)
+        # Second call (fallback) has no parse_mode
+        second_call_kwargs = agent.bot.reply_to.call_args_list[1][1]
+        self.assertNotIn("parse_mode", second_call_kwargs)
+
+    def test_passes_text_to_markdownify(self):
+        msg = make_fake_message("hi")
+        with patch("agent.telegramify_markdown.markdownify", return_value="converted") as mock_m:
+            agent._send_markdown(msg, "input text")
+        mock_m.assert_called_once_with("input text")
+
+
+# ── _allowed ──────────────────────────────────────────────────────────────────
+
+class TestAllowed(unittest.TestCase):
+
+    def setUp(self):
+        agent.ALLOWED_USERS.clear()
+
+    def tearDown(self):
+        agent.ALLOWED_USERS.clear()
+
+    def test_no_restrictions_allows_all(self):
+        msg = make_fake_message("hi", user_id=999)
+        self.assertTrue(agent._allowed(msg))
+
+    def test_uid_in_allowlist(self):
+        agent.ALLOWED_USERS.add(123)
+        msg = make_fake_message("hi", user_id=123)
+        self.assertTrue(agent._allowed(msg))
+
+    def test_uid_not_in_allowlist(self):
+        agent.ALLOWED_USERS.add(123)
+        msg = make_fake_message("hi", user_id=456)
+        self.assertFalse(agent._allowed(msg))
+
+    def test_multiple_allowed_users(self):
+        agent.ALLOWED_USERS.update([1, 2, 3])
+        self.assertTrue(agent._allowed(make_fake_message("hi", user_id=2)))
+        self.assertFalse(agent._allowed(make_fake_message("hi", user_id=99)))
+
+
+# ── TUI ───────────────────────────────────────────────────────────────────────
+
+class TestTuiLog(unittest.TestCase):
+
+    def setUp(self):
+        agent._log_entries.clear()
+
+    def test_adds_entry(self):
+        agent.tui_log("hello")
+        self.assertEqual(len(agent._log_entries), 1)
+        self.assertEqual(agent._log_entries[0][1], "hello")
+
+    def test_entry_has_timestamp(self):
+        agent.tui_log("msg")
+        ts = agent._log_entries[0][0]
+        # HH:MM:SS format
+        self.assertRegex(ts, r"^\d{2}:\d{2}:\d{2}$")
+
+    def test_multiple_entries_ordered(self):
+        agent.tui_log("first")
+        agent.tui_log("second")
+        texts = [e[1] for e in agent._log_entries]
+        self.assertEqual(texts, ["first", "second"])
+
+    def test_respects_maxlen(self):
+        for i in range(250):
+            agent.tui_log(f"msg{i}")
+        self.assertLessEqual(len(agent._log_entries), 200)
+
+
+# ── Bot handlers ──────────────────────────────────────────────────────────────
+
+class TestBotHandlers(unittest.TestCase):
+
+    def setUp(self):
+        self.bot = setup_fake_bot()
+        agent.ALLOWED_USERS.clear()
+        agent.ALLOWED_USERS.add(123)
+
+    def tearDown(self):
+        agent.ALLOWED_USERS.clear()
+
+    def test_start_replies(self):
+        agent.cmd_start(make_fake_message("/start"))
+        self.bot.reply_to.assert_called_once()
+        self.assertIn("Hi", self.bot.reply_to.call_args[0][1])
+
+    def test_start_blocked_unknown_user(self):
+        agent.cmd_start(make_fake_message("/start", user_id=999))
+        self.bot.reply_to.assert_not_called()
+
+    def test_clear_removes_session(self):
+        agent.user_sessions[123] = "sess"
+        agent.cmd_clear(make_fake_message("/clear"))
+        self.assertNotIn(123, agent.user_sessions)
+        self.bot.reply_to.assert_called_once()
+
+    def test_clear_blocked_unknown_user(self):
+        agent.cmd_clear(make_fake_message("/clear", user_id=999))
+        self.bot.reply_to.assert_not_called()
+
+    def test_pwd_shows_default_cwd(self):
+        agent.cmd_pwd(make_fake_message("/pwd"))
+        reply = self.bot.reply_to.call_args[0][1]
+        self.assertIn(os.getcwd(), reply)
+
+    def test_pwd_shows_custom_cwd(self):
+        agent.user_cwd[123] = "/tmp"
+        agent.cmd_pwd(make_fake_message("/pwd"))
+        self.assertIn("/tmp", self.bot.reply_to.call_args[0][1])
+
+    def test_cd_valid_dir(self):
+        agent.cmd_cd(make_fake_message("/cd /tmp"))
+        self.assertEqual(agent.user_cwd[123], "/tmp")
+
+    def test_cd_invalid_dir(self):
+        agent.cmd_cd(make_fake_message("/cd /nonexistent_xyz_abc"))
+        self.assertNotIn(123, agent.user_cwd)
+        self.assertIn("❌", self.bot.reply_to.call_args[0][1])
+
+    def test_cd_no_arg_shows_current(self):
+        agent.user_cwd[123] = "/tmp"
+        agent.cmd_cd(make_fake_message("/cd"))
+        self.assertIn("/tmp", self.bot.reply_to.call_args[0][1])
+
+    def test_cd_expands_tilde(self):
+        agent.cmd_cd(make_fake_message("/cd ~"))
+        self.assertEqual(agent.user_cwd[123], os.path.expanduser("~"))
+
+    def test_model_shows_current(self):
+        agent.MODEL = "claude-opus-4-6"
+        agent.cmd_model(make_fake_message("/model"))
+        self.assertIn("claude-opus-4-6", self.bot.reply_to.call_args[0][1])
+
+    def test_model_switches(self):
+        agent.cmd_model(make_fake_message("/model claude-sonnet-4-6"))
+        self.assertEqual(agent.user_model[123], "claude-sonnet-4-6")
+
+    def test_model_clears_session(self):
+        agent.user_sessions[123] = "old-session"
+        agent.cmd_model(make_fake_message("/model claude-sonnet-4-6"))
+        self.assertNotIn(123, agent.user_sessions)
+
+    def test_model_blocked_unknown_user(self):
+        agent.cmd_model(make_fake_message("/model opus", user_id=999))
+        self.bot.reply_to.assert_not_called()
+
+    def test_status_shows_model_cwd_session(self):
+        agent.user_model[123] = "claude-opus-4-6"
+        agent.user_cwd[123] = "/tmp"
+        agent.user_sessions[123] = "sess-id-123"
+        agent.cmd_status(make_fake_message("/status"))
+        reply = self.bot.reply_to.call_args[0][1]
+        self.assertIn("claude-opus-4-6", reply)
+        self.assertIn("/tmp", reply)
+        self.assertIn("sess-id-123", reply)
+
+    def test_status_blocked_unknown_user(self):
+        agent.cmd_status(make_fake_message("/status", user_id=999))
+        self.bot.reply_to.assert_not_called()
+
+    def test_handle_message_blocked(self):
+        agent.handle_message(make_fake_message("hi", user_id=999))
+        self.bot.reply_to.assert_not_called()
+
+    @patch("agent.call_claude", return_value=("Hello!", "sess-123"))
+    def test_handle_message_calls_claude(self, mock_claude):
+        agent.handle_message(make_fake_message("what is 1+1"))
+        time.sleep(0.5)
+        mock_claude.assert_called_once()
+        self.bot.reply_to.assert_called()
+
+    @patch("agent.call_claude", return_value=("reply", "sess-abc"))
+    def test_handle_message_stores_session(self, _):
+        agent.handle_message(make_fake_message("hello"))
+        time.sleep(0.5)
+        self.assertEqual(agent.user_sessions[123], "sess-abc")
+
+    @patch("agent.call_claude", return_value=("ok", "s"))
+    def test_handle_message_uses_user_cwd(self, mock_claude):
+        agent.user_cwd[123] = "/tmp/test"
+        agent.handle_message(make_fake_message("hi"))
+        time.sleep(0.5)
+        self.assertEqual(mock_claude.call_args[1]["cwd"], "/tmp/test")
+
+    @patch("agent.call_claude", return_value=("ok", "s"))
+    def test_handle_message_uses_user_model(self, mock_claude):
+        agent.user_model[123] = "claude-sonnet-4-6"
+        agent.handle_message(make_fake_message("hi"))
+        time.sleep(0.5)
+        self.assertEqual(mock_claude.call_args[1]["model"], "claude-sonnet-4-6")
+
+    @patch("agent.call_claude", return_value=("x" * 5000, "s"))
+    def test_long_reply_splits_into_chunks(self, _):
+        agent.handle_message(make_fake_message("essay"))
+        time.sleep(0.5)
+        self.assertEqual(self.bot.reply_to.call_count, 2)
+
+    @patch("agent.call_claude", return_value=("", ""))
+    def test_empty_session_id_not_stored(self, _):
+        agent.handle_message(make_fake_message("hi"))
+        time.sleep(0.5)
+        self.assertNotIn(123, agent.user_sessions)
+
+    @patch("agent.call_claude", return_value=("reply", "new-sess"))
+    def test_messages_processed_sequentially(self, mock_claude):
+        """Second message uses session ID set by first message."""
+        results = []
+
+        def side_effect(*args, **kwargs):
+            sid = kwargs.get("session_id")
+            results.append(sid)
+            return "reply", "new-sess"
+
+        mock_claude.side_effect = side_effect
+        q = agent._get_user_queue(123)
+        agent.handle_message(make_fake_message("msg1"))
+        agent.handle_message(make_fake_message("msg2"))
+        time.sleep(1.0)
+        # First call: no session yet. Second call: session from first.
+        self.assertIsNone(results[0])
+        self.assertEqual(results[1], "new-sess")
+
+
+# ── User state ────────────────────────────────────────────────────────────────
+
+class TestUserCwd(unittest.TestCase):
+
+    def setUp(self):
+        agent.user_cwd.clear()
+
+    def test_default_is_process_cwd(self):
+        self.assertEqual(agent.DEFAULT_CWD, os.getcwd())
+
+    def test_per_user_override(self):
+        agent.user_cwd[123] = "/tmp"
+        self.assertEqual(agent.user_cwd.get(123, agent.DEFAULT_CWD), "/tmp")
+
+    def test_unknown_user_gets_default(self):
+        self.assertEqual(agent.user_cwd.get(999, agent.DEFAULT_CWD), agent.DEFAULT_CWD)
+
+
+class TestUserModel(unittest.TestCase):
+
+    def setUp(self):
+        agent.user_model.clear()
+
+    def test_no_override_uses_global(self):
+        self.assertEqual(agent.user_model.get(123, agent.MODEL), agent.MODEL)
+
+    def test_per_user_override(self):
+        agent.user_model[123] = "claude-sonnet-4-6"
+        self.assertEqual(agent.user_model.get(123, agent.MODEL), "claude-sonnet-4-6")
+
+    def test_different_users_independent(self):
+        agent.user_model[1] = "model-a"
+        agent.user_model[2] = "model-b"
+        self.assertEqual(agent.user_model[1], "model-a")
+        self.assertEqual(agent.user_model[2], "model-b")
+
+
+# ── Real Claude integration ───────────────────────────────────────────────────
 
 class TestRealClaude(unittest.TestCase):
     """Integration tests that call the real Claude CLI.
 
     These require `claude` to be installed and authenticated.
-    Skip with: python -m unittest test_agent.TestRealClaude --skip
+    Run with: python -m unittest test_agent.TestRealClaude -v
     """
 
     def test_simple_question(self):
-        """Claude can answer a simple math question."""
         result, _ = agent.call_claude("What is 2+2? Reply with just the number.")
         self.assertIn("4", result)
 
     def test_respects_cwd(self):
-        """Claude responds without error when given a valid cwd."""
         result, _ = agent.call_claude(
             "What directory are you working in? Reply briefly.",
             cwd=os.path.dirname(__file__) or ".",
         )
-        # Should get a response, not a crash
         self.assertIsInstance(result, str)
         self.assertNotIn("timed out", result)
         self.assertNotIn("not found", result)
 
     def test_empty_prompt(self):
-        """Empty prompt doesn't crash."""
         result, _ = agent.call_claude("")
         self.assertIsInstance(result, str)
 
     def test_code_generation(self):
-        """Claude can generate code."""
         result, _ = agent.call_claude(
             "Write a Python function that adds two numbers. Only output the code, no explanation."
         )
@@ -367,24 +655,24 @@ class TestRealClaude(unittest.TestCase):
         self.assertIn("return", result)
 
     def test_multi_language(self):
-        """Claude can respond in Chinese."""
         result, _ = agent.call_claude("用中文回答：1+1等于几？只回答数字。")
         self.assertIn("2", result)
 
     def test_file_awareness_with_cwd(self):
-        """Claude can read files in the cwd when using --dangerously-skip-permissions."""
         result, _ = agent.call_claude(
             "Read the file README.md in the current directory and tell me the project name. Reply with just the name.",
             cwd=os.path.dirname(__file__) or ".",
         )
-        # Should mention our project
         self.assertTrue(
-            "telegram" in result.lower() or "claude" in result.lower() or "agent" in result.lower(),
+            any(w in result.lower() for w in ["telegram", "claude", "agent", "cta"]),
             f"Expected project name in: {result}"
         )
 
     def test_long_response(self):
-        """Claude can produce a longer response."""
         result, _ = agent.call_claude("Count from 1 to 20, one number per line.")
         self.assertIn("1", result)
         self.assertIn("20", result)
+
+
+if __name__ == "__main__":
+    unittest.main()
