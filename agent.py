@@ -38,10 +38,19 @@ DEFAULT_CONFIG = {
 
 
 def load_config() -> dict:
-    """Load config from ~/.cta/config.json."""
+    """Load config from ~/.cta/config.json. Creates a template if not found."""
     config = dict(DEFAULT_CONFIG)
 
-    if os.path.exists(CONFIG_PATH):
+    if not os.path.exists(CONFIG_PATH):
+        try:
+            os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+            with open(CONFIG_PATH, "w") as f:
+                json.dump(DEFAULT_CONFIG, f, indent=2)
+                f.write("\n")
+            print(f"Created config template at {CONFIG_PATH} — fill in telegram_bot_token to get started.")
+        except OSError:
+            pass
+    else:
         with open(CONFIG_PATH) as f:
             config.update(json.load(f))
 
@@ -326,7 +335,11 @@ def cmd_status(message):
 
 def handle_message(message):
     uid = message.from_user.id
-    tui_log(f"[green]→[/] [bold]{escape(str(message.from_user.username or uid))}[/] {escape(message.text)}")
+    if message.chat.type == "private":
+        source = "[DM]"
+    else:
+        source = f"[Group: {escape(message.chat.title or str(message.chat.id))}]"
+    tui_log(f"[green]→[/] {source} [bold]{escape(str(message.from_user.username or uid))}[/] {escape(message.text)}")
     if not _allowed(message):
         return
     _get_user_queue(uid).put(message)
@@ -359,8 +372,6 @@ def create_bot():
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    os.makedirs(CTA_HOME, exist_ok=True)
-
     config = load_config()
     init(config)
 
