@@ -9,6 +9,7 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 import threading
 import telebot
 
@@ -128,13 +129,28 @@ def cmd_pwd(message):
 
 def handle_message(message):
     uid = message.from_user.id
+    print(f"[{message.from_user.username or uid}] {message.text}", file=sys.stderr)
     if ALLOWED_USERS and uid not in ALLOWED_USERS:
         return
     cwd = user_cwd.get(uid, DEFAULT_CWD)
     session_id = user_sessions.get(uid)
 
     def process():
-        reply, new_session_id = call_claude(message.text, cwd=cwd, session_id=session_id)
+        done = threading.Event()
+
+        def typing_loop():
+            while not done.wait(timeout=4):
+                try:
+                    bot.send_chat_action(message.chat.id, "typing")
+                except Exception:
+                    pass
+
+        threading.Thread(target=typing_loop, daemon=True).start()
+        try:
+            reply, new_session_id = call_claude(message.text, cwd=cwd, session_id=session_id)
+        finally:
+            done.set()
+
         if new_session_id:
             user_sessions[uid] = new_session_id
         for i in range(0, len(reply), 4096):
