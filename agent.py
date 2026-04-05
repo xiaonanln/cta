@@ -21,6 +21,7 @@ DEFAULT_CONFIG = {
     "telegram_bot_token": "",
     "allowed_users": [],
     "claude_timeout": 120,
+    "sessions_file": "sessions.json",
 }
 
 
@@ -54,6 +55,7 @@ ALLOWED_USERS: set[int] = set()
 TIMEOUT = 120
 MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-5")
 DEFAULT_CWD = os.getcwd()
+SESSIONS_FILE = "sessions.json"
 
 bot = None  # initialized in create_bot()
 user_sessions: dict[int, str] = {}  # per-user Claude session IDs
@@ -65,10 +67,36 @@ user_queues_lock = threading.Lock()
 
 def init(config: dict):
     """Apply config to module globals."""
-    global BOT_TOKEN, ALLOWED_USERS, TIMEOUT
+    global BOT_TOKEN, ALLOWED_USERS, TIMEOUT, SESSIONS_FILE
     BOT_TOKEN = config["telegram_bot_token"]
     ALLOWED_USERS = set(config["allowed_users"])
     TIMEOUT = config["claude_timeout"]
+    SESSIONS_FILE = config.get("sessions_file", "sessions.json")
+
+
+def load_sessions():
+    """Load persisted session IDs from disk into user_sessions."""
+    if not os.path.exists(SESSIONS_FILE):
+        return
+    try:
+        with open(SESSIONS_FILE) as f:
+            data = json.load(f)
+        for uid_str, session_id in data.items():
+            user_sessions[int(uid_str)] = session_id
+        print(f"Loaded {len(data)} session(s) from {SESSIONS_FILE}", file=sys.stderr)
+    except Exception as e:
+        print(f"Warning: could not load sessions: {e}", file=sys.stderr)
+
+
+def save_sessions():
+    """Persist user_sessions to disk atomically."""
+    tmp = SESSIONS_FILE + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump({str(uid): sid for uid, sid in user_sessions.items()}, f)
+        os.replace(tmp, SESSIONS_FILE)
+    except Exception as e:
+        print(f"Warning: could not save sessions: {e}", file=sys.stderr)
 
 
 # ── Claude CLI ────────────────────────────────────────────────────────────────
@@ -106,6 +134,7 @@ def cmd_clear(message):
     if ALLOWED_USERS and message.from_user.id not in ALLOWED_USERS:
         return
     user_sessions.pop(message.from_user.id, None)
+    save_sessions()
     bot.reply_to(message, "🧹 Conversation cleared.")
 
 
@@ -143,6 +172,7 @@ def cmd_model(message):
         return
     user_model[uid] = name
     user_sessions.pop(uid, None)  # new model = fresh session
+    save_sessions()
     bot.reply_to(message, f"🤖 Model → `{name}` (session cleared)", parse_mode="Markdown")
 
 
@@ -183,6 +213,7 @@ def _process_message(uid: int, message):
 
     if new_session_id:
         user_sessions[uid] = new_session_id
+        save_sessions()
     for i in range(0, len(reply), 4096):
         bot.reply_to(message, reply[i : i + 4096])
 
@@ -252,6 +283,7 @@ if __name__ == "__main__":
         print(f"  python agent.py -f config.json")
         exit(1)
 
+    load_sessions()
     create_bot()
     print(f"CTA starting... (cwd: {DEFAULT_CWD}, users: {ALLOWED_USERS or 'all'})")
     bot.infinity_polling()
