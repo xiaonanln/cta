@@ -74,6 +74,7 @@ bot = None  # initialized in create_bot()
 user_sessions: dict[tuple[int, int], str] = {}  # (uid, chat_id) → Claude session ID
 user_cwd: dict[tuple[int, int], str] = {}  # (uid, chat_id) → working directory
 user_model: dict[tuple[int, int], str] = {}  # (uid, chat_id) → model override
+user_timeout: dict[tuple[int, int], int] = {}  # (uid, chat_id) → timeout override (seconds)
 user_queues: dict[tuple[int, int], queue.Queue] = {}
 user_queues_lock = threading.Lock()
 chat_labels: dict[tuple[int, int], str] = {}   # (uid, chat_id) → "DM" or group name
@@ -205,7 +206,7 @@ def _build_layout() -> Layout:
 # ── Claude CLI ────────────────────────────────────────────────────────────────
 
 def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str = None,
-                max_retries: int = 2, retry_delay: float = 2.0) -> tuple[str, str]:
+                max_retries: int = 2, retry_delay: float = 2.0, timeout: int = None) -> tuple[str, str]:
     """Call Claude Code CLI. Returns (text, session_id).
 
     Serialized with claude_lock because Max/Pro subscriptions only allow
@@ -220,7 +221,7 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
     last_error = ""
     for attempt in range(max_retries + 1):
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT, cwd=cwd)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout or TIMEOUT, cwd=cwd)
             if not result.stdout.strip():
                 last_error = result.stderr.strip()
             else:
@@ -277,6 +278,7 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
     key = (uid, chat_id)
     cwd = user_cwd.get(key, DEFAULT_CWD)
     model = user_model.get(key, MODEL)
+    timeout = user_timeout.get(key, TIMEOUT)
     session_id = user_sessions.get(key)
     username = message.from_user.username or str(uid)
     if message.chat.type == "private":
@@ -325,7 +327,7 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
         claude_busy_for = username
         claude_busy_key = key
         try:
-            reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=session_id, model=model)
+            reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=session_id, model=model, timeout=timeout)
             if session_id and "No conversation found with session ID" in reply:
                 tui_log(f"[yellow]⚠ stale session for {escape(username)}, retrying fresh[/]")
                 user_sessions.pop(key, None)
@@ -392,7 +394,8 @@ def cmd_help(message):
         "/cd `<path>` — change working directory (creates it if needed)\n"
         "/pwd — show current working directory\n"
         "/model `<name>` — switch Claude model (clears session)\n"
-        "/status — show model, cwd, and session info"
+        "/timeout `<seconds>` — set per-chat Claude timeout (or `reset`)\n"
+        "/status — show model, cwd, timeout, and session info"
     ), parse_mode="Markdown")
 
 
@@ -444,14 +447,40 @@ def cmd_model(message):
     bot.reply_to(message, f"🤖 Model → `{name}` (session cleared)", parse_mode="Markdown")
 
 
+def cmd_timeout(message):
+    if not _allowed(message): return
+    uid = message.from_user.id
+    key = (uid, message.chat.id)
+    val = message.text.replace("/timeout", "", 1).strip()
+    if not val:
+        current = user_timeout.get(key, TIMEOUT)
+        bot.reply_to(message, f"⏱ Timeout: `{current}s`", parse_mode="Markdown")
+        return
+    if val == "reset":
+        user_timeout.pop(key, None)
+        bot.reply_to(message, f"⏱ Timeout reset to default (`{TIMEOUT}s`)", parse_mode="Markdown")
+        return
+    try:
+        seconds = int(val)
+        if seconds <= 0:
+            raise ValueError
+    except ValueError:
+        bot.reply_to(message, "❌ Usage: `/timeout <seconds>` or `/timeout reset`", parse_mode="Markdown")
+        return
+    user_timeout[key] = seconds
+    bot.reply_to(message, f"⏱ Timeout → `{seconds}s`", parse_mode="Markdown")
+
+
 def cmd_status(message):
     if not _allowed(message): return
     uid = message.from_user.id
+    key = (uid, message.chat.id)
     bot.reply_to(
         message,
-        f"🤖 Model: `{user_model.get((uid, message.chat.id), MODEL)}`\n"
-        f"📂 Cwd: `{user_cwd.get((uid, message.chat.id), DEFAULT_CWD)}`\n"
-        f"🔑 Session: `{user_sessions.get((uid, message.chat.id), 'none')}`",
+        f"🤖 Model: `{user_model.get(key, MODEL)}`\n"
+        f"📂 Cwd: `{user_cwd.get(key, DEFAULT_CWD)}`\n"
+        f"⏱ Timeout: `{user_timeout.get(key, TIMEOUT)}s`\n"
+        f"🔑 Session: `{user_sessions.get(key, 'none')}`",
         parse_mode="Markdown",
     )
 
@@ -501,6 +530,7 @@ def create_bot():
     bot.message_handler(commands=["cd"])(cmd_cd)
     bot.message_handler(commands=["pwd"])(cmd_pwd)
     bot.message_handler(commands=["model"])(cmd_model)
+    bot.message_handler(commands=["timeout"])(cmd_timeout)
     bot.message_handler(commands=["status"])(cmd_status)
     bot.message_handler(func=lambda m: m.text and not m.text.startswith("/"))(handle_message)
     bot.message_handler(content_types=["document"])(handle_document)

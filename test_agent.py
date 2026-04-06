@@ -39,6 +39,7 @@ def setup_fake_bot():
     agent.user_sessions.clear()
     agent.user_cwd.clear()
     agent.user_model.clear()
+    agent.user_timeout.clear()
     agent.chat_labels.clear()
     agent.msg_counts.clear()
     return agent.bot
@@ -568,6 +569,35 @@ class TestBotHandlers(unittest.TestCase):
     def test_model_blocked_unknown_user(self):
         agent.cmd_model(make_fake_message("/model opus", user_id=999))
         self.bot.reply_to.assert_not_called()
+
+    def test_timeout_shows_current(self):
+        agent.TIMEOUT = 600
+        agent.cmd_timeout(make_fake_message("/timeout"))
+        self.assertIn("600", self.bot.reply_to.call_args[0][1])
+
+    def test_timeout_sets_value(self):
+        agent.cmd_timeout(make_fake_message("/timeout 120"))
+        self.assertEqual(agent.user_timeout[(123, 123)], 120)
+
+    def test_timeout_reset(self):
+        agent.user_timeout[(123, 123)] = 120
+        agent.cmd_timeout(make_fake_message("/timeout reset"))
+        self.assertNotIn((123, 123), agent.user_timeout)
+
+    def test_timeout_invalid_value(self):
+        agent.cmd_timeout(make_fake_message("/timeout abc"))
+        self.assertIn("❌", self.bot.reply_to.call_args[0][1])
+
+    def test_timeout_blocked_unknown_user(self):
+        agent.cmd_timeout(make_fake_message("/timeout 60", user_id=999))
+        self.bot.reply_to.assert_not_called()
+
+    @patch("agent.call_claude", return_value=("ok", "s"))
+    def test_timeout_used_in_call_claude(self, mock_claude):
+        agent.user_timeout[(123, 123)] = 999
+        agent.handle_message(make_fake_message("hi"))
+        time.sleep(0.5)
+        self.assertEqual(mock_claude.call_args[1]["timeout"], 999)
 
     def test_status_shows_model_cwd_session(self):
         agent.user_model[(123, 123)] = "claude-opus-4-6"
