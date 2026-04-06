@@ -251,7 +251,7 @@ class TestCallClaude(unittest.TestCase):
     @patch("agent.subprocess.run")
     def test_stderr_returned_on_empty_stdout(self, mock_run):
         mock_run.return_value = MagicMock(stdout="", stderr="something broke")
-        text, sid = agent.call_claude("hi")
+        text, sid = agent.call_claude("hi", max_retries=0)
         self.assertIn("Error", text)
         self.assertIn("something broke", text)
         self.assertEqual(sid, "")
@@ -259,7 +259,7 @@ class TestCallClaude(unittest.TestCase):
     @patch("agent.subprocess.run")
     def test_empty_stdout_and_stderr(self, mock_run):
         mock_run.return_value = MagicMock(stdout="", stderr="")
-        text, _ = agent.call_claude("hi")
+        text, _ = agent.call_claude("hi", max_retries=0)
         self.assertEqual(text, "(empty response)")
 
     @patch("agent.subprocess.run")
@@ -278,6 +278,37 @@ class TestCallClaude(unittest.TestCase):
     def test_cli_not_found(self, _):
         text, _ = agent.call_claude("hi")
         self.assertIn("not found", text)
+
+    @patch("agent.time.sleep")
+    @patch("agent.subprocess.run")
+    def test_retries_on_empty_response(self, mock_run, mock_sleep):
+        ok = self._mock_result("recovered", "sid-ok")
+        mock_run.side_effect = [MagicMock(stdout="", stderr=""), ok]
+        text, sid = agent.call_claude("hi", max_retries=1, retry_delay=0)
+        self.assertEqual(text, "recovered")
+        self.assertEqual(sid, "sid-ok")
+        self.assertEqual(mock_run.call_count, 2)
+
+    @patch("agent.time.sleep")
+    @patch("agent.subprocess.run")
+    def test_returns_error_after_all_retries_exhausted(self, mock_run, mock_sleep):
+        mock_run.return_value = MagicMock(stdout="", stderr="transient error")
+        text, sid = agent.call_claude("hi", max_retries=2, retry_delay=0)
+        self.assertIn("transient error", text)
+        self.assertEqual(sid, "")
+        self.assertEqual(mock_run.call_count, 3)
+
+    @patch("agent.subprocess.run", side_effect=subprocess.TimeoutExpired("claude", 600))
+    def test_no_retry_on_timeout(self, mock_run):
+        text, _ = agent.call_claude("hi", max_retries=2)
+        self.assertIn("timed out", text)
+        self.assertEqual(mock_run.call_count, 1)
+
+    @patch("agent.subprocess.run", side_effect=FileNotFoundError)
+    def test_no_retry_on_file_not_found(self, mock_run):
+        text, _ = agent.call_claude("hi", max_retries=2)
+        self.assertIn("not found", text)
+        self.assertEqual(mock_run.call_count, 1)
 
 
 # ── _split_reply ──────────────────────────────────────────────────────────────
