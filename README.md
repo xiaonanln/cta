@@ -29,7 +29,7 @@ All configuration is in `~/.cta/config.json`:
 | `telegram_bot_token` | — | Bot token from [@BotFather](https://t.me/BotFather) |
 | `allowed_users` | `[]` (all) | List of Telegram user IDs |
 | `claude_timeout` | `600` | Max seconds per Claude call |
-| `model` | `claude-opus-4-6` | Claude model to use |
+| `model` | `claude-sonnet-4-6` | Claude model to use |
 
 Sessions and working directories are persisted in `~/.cta/sessions.json` automatically — both are restored on restart.
 
