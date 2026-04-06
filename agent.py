@@ -292,15 +292,21 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
     prompt = message.text or caption
     tmp_photo = None
     if message.photo:
-        file_info = bot.get_file(message.photo[-1].file_id)
-        data = bot.download_file(file_info.file_path)
-        ext = os.path.splitext(file_info.file_path)[1] or ".jpg"
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext, dir=cwd)
-        tmp.write(data)
-        tmp.close()
-        tmp_photo = tmp.name
-        user_instruction = f"\n\nUser's question: {caption}" if caption else ""
-        prompt = f"Use the Read tool to read and analyze the image at: {tmp_photo}{user_instruction}"
+        try:
+            file_info = bot.get_file(message.photo[-1].file_id)
+            data = bot.download_file(file_info.file_path)
+            ext = os.path.splitext(file_info.file_path)[1] or ".jpg"
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext, dir=cwd)
+            tmp.write(data)
+            tmp.close()
+            tmp_photo = tmp.name
+            user_instruction = f"\n\nUser's question: {caption}" if caption else ""
+            prompt = f"Use the Read tool to read and analyze the image at: {tmp_photo}{user_instruction}"
+        except Exception as e:
+            tui_log(f"[red]⚠ photo download failed: {escape(str(e))}[/]")
+            bot.reply_to(message, f"❌ Could not download photo: {e}")
+            done.set()
+            return
 
     with claude_lock:
         claude_busy_for = username
