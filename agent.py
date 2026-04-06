@@ -360,13 +360,19 @@ def cmd_cd(message):
         bot.reply_to(message, f"📂 Current: `{user_cwd.get((uid, message.chat.id), DEFAULT_CWD)}`", parse_mode="Markdown")
         return
     expanded = os.path.expanduser(path)
-    if os.path.isdir(expanded):
-        user_cwd[(uid, message.chat.id)] = expanded
-        user_sessions.pop((uid, message.chat.id), None)
-        save_sessions()
-        bot.reply_to(message, f"📂 → `{expanded}` (session cleared)", parse_mode="Markdown")
-    else:
-        bot.reply_to(message, f"❌ Not a directory: `{path}`", parse_mode="Markdown")
+    created = False
+    if not os.path.isdir(expanded):
+        try:
+            os.makedirs(expanded, exist_ok=True)
+            created = True
+        except OSError as e:
+            bot.reply_to(message, f"❌ Could not create directory: `{e}`", parse_mode="Markdown")
+            return
+    user_cwd[(uid, message.chat.id)] = expanded
+    user_sessions.pop((uid, message.chat.id), None)
+    save_sessions()
+    suffix = " (created)" if created else ""
+    bot.reply_to(message, f"📂 → `{expanded}`{suffix} (session cleared)", parse_mode="Markdown")
 
 
 def cmd_pwd(message):

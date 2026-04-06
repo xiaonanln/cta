@@ -504,7 +504,20 @@ class TestBotHandlers(unittest.TestCase):
         agent.cmd_cd(make_fake_message("/cd /tmp"))
         self.assertEqual(agent.user_cwd[(123, 123)], "/tmp")
 
-    def test_cd_invalid_dir(self):
+    def test_cd_creates_dir_if_not_exists(self):
+        import tempfile, shutil
+        base = tempfile.mkdtemp()
+        new_dir = os.path.join(base, "new_subdir")
+        try:
+            agent.cmd_cd(make_fake_message(f"/cd {new_dir}"))
+            self.assertTrue(os.path.isdir(new_dir))
+            self.assertEqual(agent.user_cwd[(123, 123)], new_dir)
+            self.assertIn("created", self.bot.reply_to.call_args[0][1])
+        finally:
+            shutil.rmtree(base)
+
+    @patch("agent.os.makedirs", side_effect=OSError("permission denied"))
+    def test_cd_creation_failure(self, _):
         agent.cmd_cd(make_fake_message("/cd /nonexistent_xyz_abc"))
         self.assertNotIn((123, 123), agent.user_cwd)
         self.assertIn("❌", self.bot.reply_to.call_args[0][1])
