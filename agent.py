@@ -201,29 +201,37 @@ def _build_layout() -> Layout:
 
 # ── Claude CLI ────────────────────────────────────────────────────────────────
 
-def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str = None) -> tuple[str, str]:
+def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str = None,
+                max_retries: int = 2, retry_delay: float = 2.0) -> tuple[str, str]:
     """Call Claude Code CLI. Returns (text, session_id).
 
     Serialized with claude_lock because Max/Pro subscriptions only allow
     one concurrent CLI session — a second call would hang or error.
+    Retries up to max_retries times on transient failures (empty/error response).
     """
     cwd = cwd or DEFAULT_CWD
     cmd = ["claude", "--print", "--dangerously-skip-permissions",
            "--model", model or MODEL, "--output-format", "json", "-p", prompt]
     if session_id:
         cmd += ["--resume", session_id]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT, cwd=cwd)
-        if not result.stdout.strip():
-            err = result.stderr.strip()
-            return (f"[Error] {err}" if err else "(empty response)"), ""
-        data = json.loads(result.stdout)
-        text = (data.get("result") or "").strip() or "(empty response)"
-        return text, data.get("session_id", "")
-    except subprocess.TimeoutExpired:
-        return "(Claude timed out)", ""
-    except FileNotFoundError:
-        return "(claude CLI not found — install @anthropic-ai/claude-code)", ""
+    last_error = ""
+    for attempt in range(max_retries + 1):
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT, cwd=cwd)
+            if not result.stdout.strip():
+                last_error = result.stderr.strip()
+            else:
+                data = json.loads(result.stdout)
+                text = (data.get("result") or "").strip() or "(empty response)"
+                return text, data.get("session_id", "")
+        except subprocess.TimeoutExpired:
+            return "(Claude timed out)", ""
+        except FileNotFoundError:
+            return "(claude CLI not found — install @anthropic-ai/claude-code)", ""
+        if attempt < max_retries:
+            tui_log(f"[yellow]⚠ empty response, retrying ({attempt + 1}/{max_retries})…[/]")
+            time.sleep(retry_delay)
+    return (f"[Error] {last_error}" if last_error else "(empty response)"), ""
 
 
 # ── Message processing ────────────────────────────────────────────────────────
