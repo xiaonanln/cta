@@ -288,17 +288,19 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
         tui_log(f"[yellow]⏳[/] [bold]{escape(username)}[/] queued (busy: {escape(claude_busy_for or '?')})")
 
     # Build prompt — download photo to temp file if present
-    prompt = message.text or message.caption or ""
+    caption = message.caption or ""
+    prompt = message.text or caption
     tmp_photo = None
     if message.photo:
         file_info = bot.get_file(message.photo[-1].file_id)
         data = bot.download_file(file_info.file_path)
         ext = os.path.splitext(file_info.file_path)[1] or ".jpg"
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext, dir=cwd)
         tmp.write(data)
         tmp.close()
         tmp_photo = tmp.name
-        prompt = f"Image file: {tmp_photo}\n\n{prompt}".strip()
+        user_instruction = f"\n\nUser's question: {caption}" if caption else ""
+        prompt = f"Use the Read tool to read and analyze the image at: {tmp_photo}{user_instruction}"
 
     with claude_lock:
         claude_busy_for = username

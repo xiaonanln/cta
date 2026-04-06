@@ -606,7 +606,7 @@ class TestBotHandlers(unittest.TestCase):
         agent.handle_photo(msg)
         time.sleep(0.5)
         prompt = mock_claude.call_args[0][0]
-        self.assertIn("Image file:", prompt)
+        self.assertIn("Read tool", prompt)
         self.assertIn("what's in this?", prompt)
 
     def test_handle_photo_blocked_unknown_user(self):
@@ -623,7 +623,7 @@ class TestBotHandlers(unittest.TestCase):
         agent.handle_photo(msg)
         time.sleep(0.5)
         prompt = mock_claude.call_args[0][0]
-        self.assertIn("Image file:", prompt)
+        self.assertIn("Read tool", prompt)
 
     @patch("agent.call_claude", return_value=("ok", "sess-photo"))
     def test_handle_photo_stores_session(self, _):
@@ -648,7 +648,7 @@ class TestBotHandlers(unittest.TestCase):
         agent.handle_photo(msg)
         time.sleep(0.5)
         prompt = _.call_args[0][0]
-        path = prompt.split("Image file: ")[1].split("\n")[0].strip()
+        path = prompt.split("analyze the image at: ")[1].split("\n")[0].strip()
         self.assertFalse(os.path.exists(path))
 
     @patch("agent.call_claude", side_effect=Exception("boom"))
