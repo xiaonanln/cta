@@ -287,24 +287,34 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
         bot.reply_to(message, f"⏳ Waiting for @{claude_busy_for} to finish...")
         tui_log(f"[yellow]⏳[/] [bold]{escape(username)}[/] queued (busy: {escape(claude_busy_for or '?')})")
 
-    # Build prompt — download photo to temp file if present
+    # Build prompt — download photo/document to temp file if present
     caption = message.caption or ""
     prompt = message.text or caption
     tmp_photo = None
+    file_id = None
+    file_ext = ".jpg"
     if message.photo:
+        file_id = message.photo[-1].file_id
+    elif message.document:
+        file_id = message.document.file_id
+        mime = message.document.mime_type or ""
+        file_ext = os.path.splitext(message.document.file_name or "")[1] or (
+            "." + mime.split("/")[-1] if mime else ".bin"
+        )
+    if file_id:
         try:
-            file_info = bot.get_file(message.photo[-1].file_id)
+            file_info = bot.get_file(file_id)
             data = bot.download_file(file_info.file_path)
-            ext = os.path.splitext(file_info.file_path)[1] or ".jpg"
+            ext = os.path.splitext(file_info.file_path)[1] or file_ext
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext, dir=cwd)
             tmp.write(data)
             tmp.close()
             tmp_photo = tmp.name
             user_instruction = f"\n\nUser's question: {caption}" if caption else ""
-            prompt = f"Use the Read tool to read and analyze the image at: {tmp_photo}{user_instruction}"
+            prompt = f"Use the Read tool to read and analyze the file at: {tmp_photo}{user_instruction}"
         except Exception as e:
-            tui_log(f"[red]⚠ photo download failed: {escape(str(e))}[/]")
-            bot.reply_to(message, f"❌ Could not download photo: {e}")
+            tui_log(f"[red]⚠ file download failed: {escape(str(e))}[/]")
+            bot.reply_to(message, f"❌ Could not download file: {e}")
             done.set()
             return
 
@@ -468,6 +478,19 @@ def handle_photo(message):
     _get_user_queue(uid, message.chat.id).put(message)
 
 
+def handle_document(message):
+    uid = message.from_user.id
+    if message.chat.type == "private":
+        source = "[DM]"
+    else:
+        source = f"[Group: {escape(message.chat.title or str(message.chat.id))}]"
+    fname = (message.document and message.document.file_name) or "(no filename)"
+    tui_log(f"[green]→[/] {source} [bold]{escape(str(message.from_user.username or uid))}[/] [dim]📎 {escape(fname)}[/]")
+    if not _allowed(message):
+        return
+    _get_user_queue(uid, message.chat.id).put(message)
+
+
 # ── Bot setup ─────────────────────────────────────────────────────────────────
 
 class _Suppress409(logging.Filter):
@@ -491,6 +514,7 @@ def create_bot():
     bot.message_handler(commands=["status"])(cmd_status)
     bot.message_handler(func=lambda m: m.text and not m.text.startswith("/"))(handle_message)
     bot.message_handler(content_types=["photo"])(handle_photo)
+    bot.message_handler(content_types=["document"])(handle_document)
     return bot
 
 

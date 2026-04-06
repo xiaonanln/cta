@@ -24,6 +24,7 @@ def make_fake_message(text, user_id=123, username="tester", chat_type="private",
     msg.text = text
     msg.caption = None
     msg.photo = None
+    msg.document = None
     msg.from_user.id = user_id
     msg.from_user.username = username
     msg.chat.id = user_id
@@ -648,7 +649,7 @@ class TestBotHandlers(unittest.TestCase):
         agent.handle_photo(msg)
         time.sleep(0.5)
         prompt = _.call_args[0][0]
-        path = prompt.split("analyze the image at: ")[1].split("\n")[0].strip()
+        path = prompt.split("analyze the file at: ")[1].split("\n")[0].strip()
         self.assertFalse(os.path.exists(path))
 
     @patch("agent.call_claude", side_effect=Exception("boom"))
@@ -670,6 +671,46 @@ class TestBotHandlers(unittest.TestCase):
         # Even though Claude raised, no temp file should linger
         # (we can't easily get the path here, but we verify no crash occurred)
         self.bot.reply_to.assert_not_called()  # exception swallowed in thread
+
+    def _make_document_msg(self, filename="image.png", mime_type="image/png", caption="check this"):
+        msg = make_fake_message(None)
+        msg.text = None
+        msg.caption = caption
+        doc = MagicMock()
+        doc.file_id = "doc_fid"
+        doc.file_name = filename
+        doc.mime_type = mime_type
+        msg.document = doc
+        file_info = MagicMock()
+        file_info.file_path = f"documents/{filename}"
+        self.bot.get_file.return_value = file_info
+        self.bot.download_file.return_value = b"\x89PNG\r\n"
+        return msg
+
+    @patch("agent.call_claude", return_value=("looks good", "sess-doc"))
+    def test_handle_document_passes_file_to_claude(self, mock_claude):
+        msg = self._make_document_msg()
+        agent.handle_document(msg)
+        time.sleep(0.5)
+        prompt = mock_claude.call_args[0][0]
+        self.assertIn("Read tool", prompt)
+        self.assertIn("check this", prompt)
+
+    def test_handle_document_blocked_unknown_user(self):
+        msg = self._make_document_msg()
+        msg.from_user.id = 999
+        msg.chat.id = 999
+        agent.handle_document(msg)
+        self.bot.reply_to.assert_not_called()
+
+    @patch("agent.call_claude", return_value=("ok", "s"))
+    def test_handle_document_temp_file_cleaned_up(self, _):
+        msg = self._make_document_msg()
+        agent.handle_document(msg)
+        time.sleep(0.5)
+        prompt = _.call_args[0][0]
+        path = prompt.split("analyze the file at: ")[1].split("\n")[0].strip()
+        self.assertFalse(os.path.exists(path))
 
     @patch("agent.call_claude", return_value=("reply", "sess-abc"))
     def test_handle_message_stores_session(self, _):
