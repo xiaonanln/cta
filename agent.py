@@ -68,6 +68,7 @@ TIMEOUT = 600
 MODEL = "claude-sonnet-4-6"
 DEFAULT_CWD = os.getcwd()
 SESSIONS_PATH = os.path.join(CTA_HOME, "sessions.json")
+MEMORY_DIR = os.path.join(CTA_HOME, "memory")
 
 bot = None  # initialized in create_bot()
 user_sessions: dict[tuple[int, int], str] = {}  # (uid, chat_id) → Claude session ID
@@ -88,6 +89,7 @@ def init(config: dict):
     ALLOWED_USERS = set(config["allowed_users"])
     TIMEOUT = config["claude_timeout"]
     MODEL = config.get("model", "claude-sonnet-4-6")
+    os.makedirs(MEMORY_DIR, exist_ok=True)
 
 
 def load_sessions():
@@ -287,9 +289,16 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
         bot.reply_to(message, f"⏳ Waiting for @{claude_busy_for} to finish...")
         tui_log(f"[yellow]⏳[/] [bold]{escape(username)}[/] queued (busy: {escape(claude_busy_for or '?')})")
 
+    # Prepend memory file instruction
+    memory_path = os.path.join(MEMORY_DIR, f"{uid}:{chat_id}.md")
+    memory_prefix = (
+        f"Memory file: {memory_path}\n"
+        f"Read it at the start for context. Append new facts worth remembering after responding.\n\n"
+    )
+
     # Build prompt — download document to temp file if present
     caption = message.caption or ""
-    prompt = message.text or caption
+    prompt = memory_prefix + (message.text or caption)
     tmp_photo = None
     if message.document:
         try:
@@ -305,7 +314,7 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
             tmp.close()
             tmp_photo = tmp.name
             user_instruction = f"\n\nUser's question: {caption}" if caption else ""
-            prompt = f"Use the Read tool to read and analyze the file at: {tmp_photo}{user_instruction}"
+            prompt = memory_prefix + f"Use the Read tool to read and analyze the file at: {tmp_photo}{user_instruction}"
         except Exception as e:
             tui_log(f"[red]⚠ file download failed: {escape(str(e))}[/]")
             bot.reply_to(message, f"❌ Could not download file: {e}")
