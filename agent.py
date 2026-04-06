@@ -345,6 +345,20 @@ def cmd_start(message):
     bot.reply_to(message, "👋 Hi! I'm powered by Claude Code CLI. Just send me a message.")
 
 
+def cmd_help(message):
+    if not _allowed(message): return
+    bot.reply_to(message, (
+        "*Commands*\n"
+        "/help — show this message\n"
+        "/start — hello message\n"
+        "/clear — reset conversation session\n"
+        "/cd `<path>` — change working directory (creates it if needed)\n"
+        "/pwd — show current working directory\n"
+        "/model `<name>` — switch Claude model (clears session)\n"
+        "/status — show model, cwd, and session info"
+    ), parse_mode="Markdown")
+
+
 def cmd_clear(message):
     if not _allowed(message): return
     user_sessions.pop((message.from_user.id, message.chat.id), None)
@@ -432,6 +446,7 @@ def create_bot():
     telebot_log.propagate = False
     bot = telebot.TeleBot(BOT_TOKEN, num_threads=8)
     bot.message_handler(commands=["start"])(cmd_start)
+    bot.message_handler(commands=["help"])(cmd_help)
     bot.message_handler(commands=["clear"])(cmd_clear)
     bot.message_handler(commands=["cd"])(cmd_cd)
     bot.message_handler(commands=["pwd"])(cmd_pwd)
