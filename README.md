@@ -33,6 +33,8 @@ All configuration is in `~/.cta/config.json`:
 
 Sessions and working directories are persisted in `~/.cta/sessions.json` automatically — both are restored on restart.
 
+Each chat has a memory file at `~/.cta/memory/<uid>:<chat_id>.md`. Claude reads it at the start of every message for context and appends new facts worth remembering — no setup required.
+
 ## Bot Commands
 
 | Command | Description |
@@ -57,6 +59,7 @@ You → Telegram → CTA → claude --print --resume <session> → response → 
 - Session persistence: conversations survive restarts via `~/.cta/sessions.json`
 - Per-user message queues: sequential processing per user, serialized Claude calls
 - Automatic retry on transient Claude failures (up to 2 retries)
-- File/image support: send any document and Claude will read and analyze it
+- File/image support: send any document or image and Claude will read and analyze it
+- Per-chat memory: Claude maintains a memory file per chat, persisting context across sessions automatically
 - Rich TUI status panel: each active chat shown as a card with label, model, cwd, and message count; active session highlighted in yellow
 - Markdown formatting via `telegramify-markdown`
