@@ -459,13 +459,19 @@ class TestBotHandlers(unittest.TestCase):
         self._tmp_sessions = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
         self._tmp_sessions.close()
         agent.SESSIONS_PATH = self._tmp_sessions.name
+        self._orig_memory_dir = agent.MEMORY_DIR
+        self._tmp_memory_dir = tempfile.mkdtemp()
+        agent.MEMORY_DIR = self._tmp_memory_dir
 
     def tearDown(self):
+        import shutil
         agent.ALLOWED_USERS.clear()
         agent.SESSIONS_PATH = self._orig_sessions_path
+        agent.MEMORY_DIR = self._orig_memory_dir
         for path in [self._tmp_sessions.name, self._tmp_sessions.name + ".tmp"]:
             if os.path.exists(path):
                 os.unlink(path)
+        shutil.rmtree(self._tmp_memory_dir, ignore_errors=True)
 
     def test_start_replies(self):
         agent.cmd_start(make_fake_message("/start"))
@@ -587,6 +593,18 @@ class TestBotHandlers(unittest.TestCase):
         time.sleep(0.5)
         mock_claude.assert_called_once()
         self.bot.reply_to.assert_called()
+
+    @patch("agent.call_claude", return_value=("ok", "s"))
+    def test_prompt_includes_memory_path(self, mock_claude):
+        agent.handle_message(make_fake_message("hello"))
+        time.sleep(0.5)
+        prompt = mock_claude.call_args[0][0]
+        self.assertIn("Memory file:", prompt)
+        self.assertIn("123:123.md", prompt)
+
+    @patch("agent.call_claude", return_value=("ok", "s"))
+    def test_memory_dir_created_on_load(self, _):
+        self.assertTrue(os.path.isdir(agent.MEMORY_DIR))
 
     def _make_document_msg(self, filename="image.png", mime_type="image/png", caption="check this"):
         msg = make_fake_message(None)
