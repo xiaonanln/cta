@@ -22,6 +22,8 @@ agent.init(agent.DEFAULT_CONFIG)
 def make_fake_message(text, user_id=123, username="tester", chat_type="private", chat_title=None):
     msg = MagicMock()
     msg.text = text
+    msg.caption = None
+    msg.photo = None
     msg.from_user.id = user_id
     msg.from_user.username = username
     msg.chat.id = user_id
@@ -584,6 +586,49 @@ class TestBotHandlers(unittest.TestCase):
         time.sleep(0.5)
         mock_claude.assert_called_once()
         self.bot.reply_to.assert_called()
+
+    @patch("agent.call_claude", return_value=("looks nice", "sess-photo"))
+    def test_handle_photo_passes_image_path_to_claude(self, mock_claude):
+        msg = make_fake_message(None)
+        msg.text = None
+        msg.caption = "what's in this?"
+        photo = MagicMock()
+        photo.file_id = "fid123"
+        msg.photo = [photo]
+        file_info = MagicMock()
+        file_info.file_path = "photos/file.jpg"
+        self.bot.get_file.return_value = file_info
+        self.bot.download_file.return_value = b"\xff\xd8\xff"  # minimal JPEG bytes
+        agent.handle_photo(msg)
+        time.sleep(0.5)
+        prompt = mock_claude.call_args[0][0]
+        self.assertIn("Image file:", prompt)
+        self.assertIn("what's in this?", prompt)
+
+    def test_handle_photo_blocked_unknown_user(self):
+        msg = make_fake_message(None, user_id=999)
+        msg.text = None
+        msg.caption = "hi"
+        msg.photo = [MagicMock()]
+        agent.handle_photo(msg)
+        self.bot.reply_to.assert_not_called()
+
+    @patch("agent.call_claude", return_value=("ok", "s"))
+    def test_handle_photo_no_caption_uses_empty_prompt(self, mock_claude):
+        msg = make_fake_message(None)
+        msg.text = None
+        msg.caption = None
+        photo = MagicMock()
+        photo.file_id = "fid456"
+        msg.photo = [photo]
+        file_info = MagicMock()
+        file_info.file_path = "photos/img.png"
+        self.bot.get_file.return_value = file_info
+        self.bot.download_file.return_value = b"\x89PNG"
+        agent.handle_photo(msg)
+        time.sleep(0.5)
+        prompt = mock_claude.call_args[0][0]
+        self.assertIn("Image file:", prompt)
 
     @patch("agent.call_claude", return_value=("reply", "sess-abc"))
     def test_handle_message_stores_session(self, _):

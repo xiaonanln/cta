@@ -12,6 +12,7 @@ import os
 import queue
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections import deque
@@ -286,19 +287,34 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
         bot.reply_to(message, f"⏳ Waiting for @{claude_busy_for} to finish...")
         tui_log(f"[yellow]⏳[/] [bold]{escape(username)}[/] queued (busy: {escape(claude_busy_for or '?')})")
 
+    # Build prompt — download photo to temp file if present
+    prompt = message.text or message.caption or ""
+    tmp_photo = None
+    if message.photo:
+        file_info = bot.get_file(message.photo[-1].file_id)
+        data = bot.download_file(file_info.file_path)
+        ext = os.path.splitext(file_info.file_path)[1] or ".jpg"
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+        tmp.write(data)
+        tmp.close()
+        tmp_photo = tmp.name
+        prompt = f"Image file: {tmp_photo}\n\n{prompt}".strip()
+
     with claude_lock:
         claude_busy_for = username
         claude_busy_key = key
         try:
-            reply, new_session_id = call_claude(message.text, cwd=cwd, session_id=session_id, model=model)
+            reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=session_id, model=model)
             if session_id and "No conversation found with session ID" in reply:
                 tui_log(f"[yellow]⚠ stale session for {escape(username)}, retrying fresh[/]")
                 user_sessions.pop(key, None)
-                reply, new_session_id = call_claude(message.text, cwd=cwd, session_id=None, model=model)
+                reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=None, model=model)
         finally:
             claude_busy_for = None
             claude_busy_key = None
             done.set()
+            if tmp_photo:
+                os.unlink(tmp_photo)
 
     if new_session_id:
         user_sessions[key] = new_session_id
@@ -431,6 +447,19 @@ def handle_message(message):
     _get_user_queue(uid, message.chat.id).put(message)
 
 
+def handle_photo(message):
+    uid = message.from_user.id
+    if message.chat.type == "private":
+        source = "[DM]"
+    else:
+        source = f"[Group: {escape(message.chat.title or str(message.chat.id))}]"
+    caption = message.caption or "(no caption)"
+    tui_log(f"[green]→[/] {source} [bold]{escape(str(message.from_user.username or uid))}[/] [dim]📷 {escape(caption)}[/]")
+    if not _allowed(message):
+        return
+    _get_user_queue(uid, message.chat.id).put(message)
+
+
 # ── Bot setup ─────────────────────────────────────────────────────────────────
 
 class _Suppress409(logging.Filter):
@@ -453,6 +482,7 @@ def create_bot():
     bot.message_handler(commands=["model"])(cmd_model)
     bot.message_handler(commands=["status"])(cmd_status)
     bot.message_handler(func=lambda m: m.text and not m.text.startswith("/"))(handle_message)
+    bot.message_handler(content_types=["photo"])(handle_photo)
     return bot
 
 
