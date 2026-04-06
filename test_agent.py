@@ -469,6 +469,17 @@ class TestBotHandlers(unittest.TestCase):
         self.bot.reply_to.assert_called_once()
         self.assertIn("Hi", self.bot.reply_to.call_args[0][1])
 
+    def test_help_lists_all_commands(self):
+        agent.cmd_help(make_fake_message("/help"))
+        self.bot.reply_to.assert_called_once()
+        reply = self.bot.reply_to.call_args[0][1]
+        for cmd in ["/help", "/start", "/clear", "/cd", "/pwd", "/model", "/status"]:
+            self.assertIn(cmd, reply)
+
+    def test_help_blocked_unknown_user(self):
+        agent.cmd_help(make_fake_message("/help", user_id=999))
+        self.bot.reply_to.assert_not_called()
+
     def test_start_blocked_unknown_user(self):
         agent.cmd_start(make_fake_message("/start", user_id=999))
         self.bot.reply_to.assert_not_called()
