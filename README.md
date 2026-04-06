@@ -37,9 +37,10 @@ Sessions and working directories are persisted in `~/.cta/sessions.json` automat
 
 | Command | Description |
 |---|---|
+| `/help` | List all commands |
 | `/start` | Hello message |
 | `/clear` | Clear conversation (reset session) |
-| `/cd <path>` | Change Claude's working directory |
+| `/cd <path>` | Change Claude's working directory (creates it if needed) |
 | `/pwd` | Show current working directory |
 | `/model <name>` | Switch Claude model (clears session) |
 | `/status` | Show model, cwd, and session info |
@@ -55,5 +56,7 @@ You → Telegram → CTA → claude --print --resume <session> → response → 
 - **Separate sessions per context**: DMs and each group chat maintain independent Claude conversations — switching between them never bleeds context
 - Session persistence: conversations survive restarts via `~/.cta/sessions.json`
 - Per-user message queues: sequential processing per user, serialized Claude calls
-- Rich TUI status panel: each active chat shown as a card with label, model, cwd, and message count
+- Automatic retry on transient Claude failures (up to 2 retries)
+- File/image support: send any document and Claude will read and analyze it
+- Rich TUI status panel: each active chat shown as a card with label, model, cwd, and message count; active session highlighted in yellow
 - Markdown formatting via `telegramify-markdown`
