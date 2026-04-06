@@ -467,19 +467,6 @@ class TestBotHandlers(unittest.TestCase):
             if os.path.exists(path):
                 os.unlink(path)
 
-    def _make_photo_msg(self, caption="describe this"):
-        msg = make_fake_message(None)
-        msg.text = None
-        msg.caption = caption
-        photo = MagicMock()
-        photo.file_id = "fid_test"
-        msg.photo = [photo]
-        file_info = MagicMock()
-        file_info.file_path = "photos/test.jpg"
-        self.bot.get_file.return_value = file_info
-        self.bot.download_file.return_value = b"\xff\xd8\xff"
-        return msg
-
     def test_start_replies(self):
         agent.cmd_start(make_fake_message("/start"))
         self.bot.reply_to.assert_called_once()
@@ -600,77 +587,6 @@ class TestBotHandlers(unittest.TestCase):
         time.sleep(0.5)
         mock_claude.assert_called_once()
         self.bot.reply_to.assert_called()
-
-    @patch("agent.call_claude", return_value=("looks nice", "sess-photo"))
-    def test_handle_photo_passes_image_path_to_claude(self, mock_claude):
-        msg = self._make_photo_msg(caption="what's in this?")
-        agent.handle_photo(msg)
-        time.sleep(0.5)
-        prompt = mock_claude.call_args[0][0]
-        self.assertIn("Read tool", prompt)
-        self.assertIn("what's in this?", prompt)
-
-    def test_handle_photo_blocked_unknown_user(self):
-        msg = make_fake_message(None, user_id=999)
-        msg.text = None
-        msg.caption = "hi"
-        msg.photo = [MagicMock()]
-        agent.handle_photo(msg)
-        self.bot.reply_to.assert_not_called()
-
-    @patch("agent.call_claude", return_value=("ok", "s"))
-    def test_handle_photo_no_caption_uses_empty_prompt(self, mock_claude):
-        msg = self._make_photo_msg(caption=None)
-        agent.handle_photo(msg)
-        time.sleep(0.5)
-        prompt = mock_claude.call_args[0][0]
-        self.assertIn("Read tool", prompt)
-
-    @patch("agent.call_claude", return_value=("ok", "sess-photo"))
-    def test_handle_photo_stores_session(self, _):
-        msg = self._make_photo_msg()
-        agent.handle_photo(msg)
-        time.sleep(0.5)
-        self.assertEqual(agent.user_sessions[(123, 123)], "sess-photo")
-
-    @patch("agent.call_claude", return_value=("ok", "s"))
-    def test_handle_photo_uses_highest_res(self, mock_claude):
-        msg = self._make_photo_msg()
-        lo = MagicMock(file_id="lo")
-        hi = MagicMock(file_id="hi")
-        msg.photo = [lo, hi]
-        agent.handle_photo(msg)
-        time.sleep(0.5)
-        self.bot.get_file.assert_called_with("hi")
-
-    @patch("agent.call_claude", return_value=("ok", "s"))
-    def test_handle_photo_temp_file_cleaned_up(self, _):
-        msg = self._make_photo_msg()
-        agent.handle_photo(msg)
-        time.sleep(0.5)
-        prompt = _.call_args[0][0]
-        path = prompt.split("analyze the file at: ")[1].split("\n")[0].strip()
-        self.assertFalse(os.path.exists(path))
-
-    @patch("agent.call_claude", side_effect=Exception("boom"))
-    def test_handle_photo_temp_file_cleaned_up_on_error(self, _):
-        msg = self._make_photo_msg()
-        # Capture temp path via get_file side effect
-        captured = {}
-        orig_get_file = self.bot.get_file.side_effect
-
-        def capture_and_download(file_id):
-            fi = MagicMock()
-            fi.file_path = "photos/err.jpg"
-            captured["fi"] = fi
-            return fi
-
-        self.bot.get_file.side_effect = capture_and_download
-        agent.handle_photo(msg)
-        time.sleep(0.5)
-        # Even though Claude raised, no temp file should linger
-        # (we can't easily get the path here, but we verify no crash occurred)
-        self.bot.reply_to.assert_not_called()  # exception swallowed in thread
 
     def _make_document_msg(self, filename="image.png", mime_type="image/png", caption="check this"):
         msg = make_fake_message(None)

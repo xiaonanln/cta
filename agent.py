@@ -287,23 +287,17 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
         bot.reply_to(message, f"⏳ Waiting for @{claude_busy_for} to finish...")
         tui_log(f"[yellow]⏳[/] [bold]{escape(username)}[/] queued (busy: {escape(claude_busy_for or '?')})")
 
-    # Build prompt — download photo/document to temp file if present
+    # Build prompt — download document to temp file if present
     caption = message.caption or ""
     prompt = message.text or caption
     tmp_photo = None
-    file_id = None
-    file_ext = ".jpg"
-    if message.photo:
-        file_id = message.photo[-1].file_id
-    elif message.document:
-        file_id = message.document.file_id
-        mime = message.document.mime_type or ""
-        file_ext = os.path.splitext(message.document.file_name or "")[1] or (
-            "." + mime.split("/")[-1] if mime else ".bin"
-        )
-    if file_id:
+    if message.document:
         try:
-            file_info = bot.get_file(file_id)
+            mime = message.document.mime_type or ""
+            file_ext = os.path.splitext(message.document.file_name or "")[1] or (
+                "." + mime.split("/")[-1] if mime else ".bin"
+            )
+            file_info = bot.get_file(message.document.file_id)
             data = bot.download_file(file_info.file_path)
             ext = os.path.splitext(file_info.file_path)[1] or file_ext
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext, dir=cwd)
@@ -465,19 +459,6 @@ def handle_message(message):
     _get_user_queue(uid, message.chat.id).put(message)
 
 
-def handle_photo(message):
-    uid = message.from_user.id
-    if message.chat.type == "private":
-        source = "[DM]"
-    else:
-        source = f"[Group: {escape(message.chat.title or str(message.chat.id))}]"
-    caption = message.caption or "(no caption)"
-    tui_log(f"[green]→[/] {source} [bold]{escape(str(message.from_user.username or uid))}[/] [dim]📷 {escape(caption)}[/]")
-    if not _allowed(message):
-        return
-    _get_user_queue(uid, message.chat.id).put(message)
-
-
 def handle_document(message):
     uid = message.from_user.id
     if message.chat.type == "private":
@@ -513,7 +494,6 @@ def create_bot():
     bot.message_handler(commands=["model"])(cmd_model)
     bot.message_handler(commands=["status"])(cmd_status)
     bot.message_handler(func=lambda m: m.text and not m.text.startswith("/"))(handle_message)
-    bot.message_handler(content_types=["photo"])(handle_photo)
     bot.message_handler(content_types=["document"])(handle_document)
     return bot
 
