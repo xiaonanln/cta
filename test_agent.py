@@ -629,7 +629,7 @@ class TestBotHandlers(unittest.TestCase):
         agent.handle_message(make_fake_message("hello"))
         time.sleep(0.5)
         prompt = mock_claude.call_args[0][0]
-        self.assertIn("Memory file:", prompt)
+        self.assertIn("Memory:", prompt)
         self.assertIn("123:123.md", prompt)
 
     @patch("agent.call_claude", return_value=("ok", "s"))
@@ -933,6 +933,114 @@ class TestUserModel(unittest.TestCase):
         agent.user_model[(2, 2)] = "model-b"
         self.assertEqual(agent.user_model[(1, 1)], "model-a")
         self.assertEqual(agent.user_model[(2, 2)], "model-b")
+
+
+# ── Cron scheduler ───────────────────────────────────────────────────────────
+
+class TestCronScheduler(unittest.TestCase):
+
+    def setUp(self):
+        self.bot = setup_fake_bot()
+        agent.ALLOWED_USERS.clear()
+        agent.ALLOWED_USERS.add(123)
+        self._orig_crons_dir = agent.CRONS_DIR
+        self._orig_memory_dir = agent.MEMORY_DIR
+        self._orig_sessions_path = agent.SESSIONS_PATH
+        self._tmp_crons = tempfile.mkdtemp()
+        self._tmp_memory = tempfile.mkdtemp()
+        self._tmp_sessions = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+        self._tmp_sessions.close()
+        agent.CRONS_DIR = self._tmp_crons
+        agent.MEMORY_DIR = self._tmp_memory
+        agent.SESSIONS_PATH = self._tmp_sessions.name
+
+    def tearDown(self):
+        import shutil
+        agent.CRONS_DIR = self._orig_crons_dir
+        agent.MEMORY_DIR = self._orig_memory_dir
+        agent.SESSIONS_PATH = self._orig_sessions_path
+        shutil.rmtree(self._tmp_crons, ignore_errors=True)
+        shutil.rmtree(self._tmp_memory, ignore_errors=True)
+        for p in [self._tmp_sessions.name, self._tmp_sessions.name + ".tmp"]:
+            if os.path.exists(p):
+                os.unlink(p)
+
+    def _write_cron_file(self, uid, chat_id, jobs):
+        path = os.path.join(self._tmp_crons, f"{uid}:{chat_id}.json")
+        with open(path, "w") as f:
+            json.dump(jobs, f)
+
+    def test_load_cron_jobs_missing_file(self):
+        jobs = agent._load_cron_jobs(999, 999)
+        self.assertEqual(jobs, [])
+
+    def test_save_and_load_cron_jobs(self):
+        jobs = [{"id": "a1b2", "schedule": "0 9 * * *", "prompt": "test", "next_run": "2026-04-08T09:00:00"}]
+        agent._save_cron_jobs(123, 456, jobs)
+        loaded = agent._load_cron_jobs(123, 456)
+        self.assertEqual(loaded[0]["id"], "a1b2")
+
+    @patch("agent.call_claude", return_value=("cron result", "sess-cron"))
+    def test_process_cron_sends_message(self, mock_claude):
+        done = threading.Event()
+        task = {"_type": "cron", "uid": 123, "chat_id": 123, "job_id": "x1", "prompt": "do something"}
+        agent._process_cron(123, 123, task, done)
+        self.bot.send_message.assert_called()
+        args = self.bot.send_message.call_args[0]
+        self.assertEqual(args[0], 123)  # chat_id
+
+    @patch("agent.call_claude", return_value=("ok", "s"))
+    def test_process_cron_prompt_includes_preamble(self, mock_claude):
+        done = threading.Event()
+        task = {"_type": "cron", "uid": 123, "chat_id": 456, "job_id": "ab12", "prompt": "my task"}
+        agent._process_cron(123, 456, task, done)
+        prompt = mock_claude.call_args[0][0]
+        self.assertIn("persistent agent", prompt)
+        self.assertIn("123:456", prompt)
+        self.assertIn("my task", prompt)
+
+    @patch("agent.call_claude", return_value=("result", "sess"))
+    def test_cron_scheduler_fires_due_jobs(self, mock_claude):
+        past = "2000-01-01T00:00:00"
+        jobs = [{"id": "j1", "schedule": "0 9 * * *", "prompt": "hello", "next_run": past}]
+        self._write_cron_file(123, 456, jobs)
+        # Run one scheduler tick manually
+        from croniter import croniter
+        from datetime import datetime
+        now = datetime.now()
+        changed = False
+        for fname in os.listdir(agent.CRONS_DIR):
+            if not fname.endswith(".json"):
+                continue
+            uid_str, chat_str = fname[:-5].split(":", 1)
+            uid, chat_id = int(uid_str), int(chat_str)
+            loaded = agent._load_cron_jobs(uid, chat_id)
+            for job in loaded:
+                next_run = datetime.fromisoformat(job["next_run"])
+                if next_run <= now:
+                    agent._get_user_queue(uid, chat_id).put({
+                        "_type": "cron", "uid": uid, "chat_id": chat_id,
+                        "job_id": job["id"], "prompt": job["prompt"],
+                    })
+                    cron = croniter(job["schedule"], now)
+                    job["next_run"] = cron.get_next(datetime).isoformat()
+                    changed = True
+            if changed:
+                agent._save_cron_jobs(uid, chat_id, loaded)
+        time.sleep(0.5)
+        mock_claude.assert_called()
+        # next_run should be advanced
+        reloaded = agent._load_cron_jobs(123, 456)
+        self.assertGreater(datetime.fromisoformat(reloaded[0]["next_run"]), now)
+
+    @patch("agent.call_claude", return_value=("ok", "s"))
+    def test_prompt_includes_crons_path(self, mock_claude):
+        """Regular messages should reference the crons file path."""
+        agent.handle_message(make_fake_message("hello"))
+        time.sleep(0.5)
+        prompt = mock_claude.call_args[0][0]
+        self.assertIn("Crons:", prompt)
+        self.assertIn(".json", prompt)
 
 
 # ── Real Claude integration ───────────────────────────────────────────────────
