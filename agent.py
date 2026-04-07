@@ -69,6 +69,7 @@ MODEL = "claude-sonnet-4-6"
 DEFAULT_CWD = os.getcwd()
 SESSIONS_PATH = os.path.join(CTA_HOME, "sessions.json")
 MEMORY_DIR = os.path.join(CTA_HOME, "memory")
+CRONS_DIR = os.path.join(CTA_HOME, "crons")
 
 bot = None  # initialized in create_bot()
 user_sessions: dict[tuple[int, int], str] = {}  # (uid, chat_id) → Claude session ID
@@ -91,6 +92,7 @@ def init(config: dict):
     TIMEOUT = config["claude_timeout"]
     MODEL = config.get("model", "claude-sonnet-4-6")
     os.makedirs(MEMORY_DIR, exist_ok=True)
+    os.makedirs(CRONS_DIR, exist_ok=True)
 
 
 def load_sessions():
@@ -132,6 +134,71 @@ def save_sessions():
         os.replace(tmp, SESSIONS_PATH)
     except Exception as e:
         tui_log(f"[red]Warning: could not save sessions: {escape(str(e))}[/]")
+
+
+# ── Cron scheduler ────────────────────────────────────────────────────────────
+
+def _cron_path(uid: int, chat_id: int) -> str:
+    return os.path.join(CRONS_DIR, f"{uid}:{chat_id}.json")
+
+
+def _load_cron_jobs(uid: int, chat_id: int) -> list:
+    path = _cron_path(uid, chat_id)
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def _save_cron_jobs(uid: int, chat_id: int, jobs: list):
+    path = _cron_path(uid, chat_id)
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(jobs, f, indent=2)
+        os.replace(tmp, path)
+    except Exception as e:
+        tui_log(f"[red]Warning: could not save crons for {uid}:{chat_id}: {escape(str(e))}[/]")
+
+
+def _cron_scheduler():
+    """Background thread: fires due cron jobs into user queues every 60s."""
+    from croniter import croniter
+    while True:
+        time.sleep(60)
+        now = datetime.now()
+        if not os.path.isdir(CRONS_DIR):
+            continue
+        for fname in os.listdir(CRONS_DIR):
+            if not fname.endswith(".json"):
+                continue
+            try:
+                uid_str, chat_str = fname[:-5].split(":", 1)
+                uid, chat_id = int(uid_str), int(chat_str)
+            except ValueError:
+                continue
+            jobs = _load_cron_jobs(uid, chat_id)
+            changed = False
+            for job in jobs:
+                try:
+                    next_run = datetime.fromisoformat(job["next_run"])
+                    if next_run <= now:
+                        _get_user_queue(uid, chat_id).put({
+                            "_type": "cron",
+                            "uid": uid,
+                            "chat_id": chat_id,
+                            "job_id": job["id"],
+                            "prompt": job["prompt"],
+                        })
+                        tui_log(f"[magenta]⏰ cron[/] {uid}:{chat_id} job={job['id']}")
+                        cron = croniter(job["schedule"], now)
+                        job["next_run"] = cron.get_next(datetime).isoformat()
+                        changed = True
+                except Exception as e:
+                    tui_log(f"[red]cron error {uid}:{chat_id} job={job.get('id')}: {escape(str(e))}[/]")
+            if changed:
+                _save_cron_jobs(uid, chat_id, jobs)
 
 
 # ── TUI ───────────────────────────────────────────────────────────────────────
@@ -291,11 +358,13 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
         bot.reply_to(message, f"⏳ Waiting for @{claude_busy_for} to finish...")
         tui_log(f"[yellow]⏳[/] [bold]{escape(username)}[/] queued (busy: {escape(claude_busy_for or '?')})")
 
-    # Prepend memory file instruction
+    # Build preamble with agent identity and context files
     memory_path = os.path.join(MEMORY_DIR, f"{uid}:{chat_id}.md")
+    crons_path = os.path.join(CRONS_DIR, f"{uid}:{chat_id}.json")
     memory_prefix = (
-        f"Memory file: {memory_path}\n"
-        f"Read it at the start for context. Append new facts worth remembering after responding.\n\n"
+        f"You are a persistent agent. Chat: {uid}:{chat_id}\n"
+        f"- Memory: {memory_path} — read for context, append facts worth keeping\n"
+        f"- Crons: {crons_path} — read/edit to manage scheduled tasks (5-field cron)\n\n"
     )
 
     # Build prompt — download document to temp file if present
@@ -349,13 +418,57 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
         _send_markdown(message, chunk)
 
 
+def _process_cron(uid: int, chat_id: int, task: dict, done: threading.Event):
+    global claude_busy_for, claude_busy_key
+    key = (uid, chat_id)
+    cwd = user_cwd.get(key, DEFAULT_CWD)
+    model = user_model.get(key, MODEL)
+    timeout = user_timeout.get(key, TIMEOUT)
+    session_id = user_sessions.get(key)
+    job_id = task["job_id"]
+
+    memory_path = os.path.join(MEMORY_DIR, f"{uid}:{chat_id}.md")
+    crons_path = os.path.join(CRONS_DIR, f"{uid}:{chat_id}.json")
+    preamble = (
+        f"You are a persistent agent. Chat: {uid}:{chat_id}\n"
+        f"- Memory: {memory_path} — read for context, append facts worth keeping\n"
+        f"- Crons: {crons_path} — read/edit to manage scheduled tasks (5-field cron)\n\n"
+    )
+    prompt = preamble + f"[Scheduled task {job_id}]\n{task['prompt']}"
+
+    with claude_lock:
+        claude_busy_for = f"cron:{job_id}"
+        claude_busy_key = key
+        try:
+            reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=session_id, model=model, timeout=timeout)
+            if session_id and "No conversation found with session ID" in reply:
+                user_sessions.pop(key, None)
+                reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=None, model=model, timeout=timeout)
+        finally:
+            claude_busy_for = None
+            claude_busy_key = None
+            done.set()
+
+    if new_session_id:
+        user_sessions[key] = new_session_id
+        save_sessions()
+    msg_counts[key] = msg_counts.get(key, 0) + 1
+    preview = reply[:120].replace("\n", " ")
+    tui_log(f"[magenta]←[/] [bold]cron:{job_id}[/] {escape(preview)}{'…' if len(reply) > 120 else ''}")
+    for chunk in _split_reply(reply):
+        bot.send_message(chat_id, telegramify_markdown.markdownify(chunk), parse_mode="MarkdownV2")
+
+
 def _user_worker(uid: int, chat_id: int, q: queue.Queue):
     while True:
-        message = q.get()
+        item = q.get()
         done = threading.Event()
         threading.Thread(target=_typing_loop, args=(chat_id, done), daemon=True).start()
         try:
-            _process_message(uid, chat_id, message, done)
+            if isinstance(item, dict) and item.get("_type") == "cron":
+                _process_cron(uid, chat_id, item, done)
+            else:
+                _process_message(uid, chat_id, item, done)
         except Exception as e:
             done.set()
             tui_log(f"[red][worker:{uid}:{chat_id}] error: {escape(str(e))}[/]")
@@ -558,6 +671,7 @@ if __name__ == "__main__":
             tui_log(f"[red]Could not notify {uid}: {escape(str(e))}[/]")
 
     threading.Thread(target=bot.infinity_polling, daemon=True).start()
+    threading.Thread(target=_cron_scheduler, daemon=True).start()
     with Live(auto_refresh=False, screen=True) as live:
         while True:
             live.update(_build_layout())
