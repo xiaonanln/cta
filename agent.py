@@ -7,9 +7,9 @@ Uses Max subscription — no API tokens needed.
 
 import json
 import logging
-import math
 import os
 import queue
+import re
 import subprocess
 import sys
 import tempfile
@@ -20,12 +20,8 @@ from datetime import datetime
 
 import telebot
 import telegramify_markdown
-from rich.columns import Columns
-from rich.layout import Layout
-from rich.live import Live
+from flask import Flask, Response, stream_with_context
 from rich.markup import escape
-from rich.panel import Panel
-from rich.table import Table
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -37,6 +33,7 @@ DEFAULT_CONFIG = {
     "allowed_users": [],
     "claude_timeout": 600,
     "model": "claude-sonnet-4-6",
+    "web_port": 8080,
 }
 
 
@@ -66,6 +63,7 @@ BOT_TOKEN = ""
 ALLOWED_USERS: set[int] = set()
 TIMEOUT = 600
 MODEL = "claude-sonnet-4-6"
+WEB_PORT = 8080
 DEFAULT_CWD = os.getcwd()
 SESSIONS_PATH = os.path.join(CTA_HOME, "sessions.json")
 MEMORY_DIR = os.path.join(CTA_HOME, "memory")
@@ -86,11 +84,12 @@ claude_busy_key = None  # (uid, chat_id) of active session
 
 
 def init(config: dict):
-    global BOT_TOKEN, ALLOWED_USERS, TIMEOUT, MODEL
+    global BOT_TOKEN, ALLOWED_USERS, TIMEOUT, MODEL, WEB_PORT
     BOT_TOKEN = config["telegram_bot_token"]
     ALLOWED_USERS = set(config["allowed_users"])
     TIMEOUT = config["claude_timeout"]
     MODEL = config.get("model", "claude-sonnet-4-6")
+    WEB_PORT = config.get("web_port", 8080)
     os.makedirs(MEMORY_DIR, exist_ok=True)
     os.makedirs(CRONS_DIR, exist_ok=True)
 
@@ -201,16 +200,35 @@ def _cron_scheduler():
                 _save_cron_jobs(uid, chat_id, jobs)
 
 
-# ── TUI ───────────────────────────────────────────────────────────────────────
+# ── Web interface ─────────────────────────────────────────────────────────────
 
 _log_entries: deque[tuple[str, str]] = deque(maxlen=200)
 _tui_lock = threading.Lock()
+_sse_subscribers: list[queue.Queue] = []
+_sse_lock = threading.Lock()
+_RICH_TAG = re.compile(r"\[/?[^\]]*\]")
+
+app = Flask(__name__)
+app.logger.disabled = True
+logging.getLogger("werkzeug").setLevel(logging.ERROR)
+
+
+def _strip_rich(text: str) -> str:
+    """Strip Rich markup tags for plain-text display."""
+    return _RICH_TAG.sub("", text).replace("\\[", "[")
 
 
 def tui_log(text: str) -> None:
     ts = datetime.now().strftime("%H:%M:%S")
     with _tui_lock:
         _log_entries.append((ts, text))
+    event = {"ts": ts, "text": _strip_rich(text)}
+    with _sse_lock:
+        dead = [q for q in _sse_subscribers if q.full()]
+        for q in dead:
+            _sse_subscribers.remove(q)
+        for q in _sse_subscribers:
+            q.put_nowait(event)
 
 
 class _TuiLogHandler(logging.Handler):
@@ -218,56 +236,116 @@ class _TuiLogHandler(logging.Handler):
         tui_log(f"[dim]{escape(self.format(record))}[/]")
 
 
-def _status_panel() -> tuple[Panel, int]:
-    header = f"[bold]model:[/] [cyan]{escape(MODEL)}[/]   [bold]cwd:[/] [cyan]{escape(DEFAULT_CWD)}[/]"
-    all_keys = set(user_sessions) | set(msg_counts)
-    if all_keys:
-        cards = []
-        for key in sorted(all_keys):
-            uid, chat_id = key
-            label = escape(chat_labels.get(key, f"{uid}:{chat_id}"))
-            sid = user_sessions.get(key, "")
-            sid_str = f"[dim]{sid[:8]}…[/]" if sid else "[dim]no session[/]"
-            model = escape(user_model.get(key, MODEL))
-            cwd = escape(user_cwd.get(key, DEFAULT_CWD).replace(os.path.expanduser("~"), "~", 1))
-            count = msg_counts.get(key, 0)
-            body = f"[bold]session:[/] {sid_str}\n[bold]model:[/]   [cyan]{model}[/]\n[bold]cwd:[/]     [cyan]{cwd}[/]\n[bold]msgs:[/]    [yellow]{count}[/]"
-            active = key == claude_busy_key
-            cards.append(Panel(body, title=f"[bold {'yellow' if active else 'green'}]{label}[/]", border_style="yellow" if active else "default"))
-        content = Columns(cards, equal=True, expand=True)
+_WEB_HTML = """<!DOCTYPE html>
+<html>
+<head>
+  <title>CTA</title>
+  <meta charset="utf-8">
+  <style>
+    * { box-sizing: border-box; }
+    body { background:#1a1a1a; color:#d4d4d4; font-family:monospace; margin:0; padding:.75rem 1rem; }
+    h1 { color:#569cd6; margin:0 0 .5rem; font-size:1rem; }
+    #cards { display:flex; flex-wrap:wrap; gap:.5rem; margin-bottom:.75rem; min-height:1rem; }
+    .card { border:1px solid #444; padding:.4rem .6rem; min-width:180px; border-radius:3px; font-size:.82rem; }
+    .card.active { border-color:#f1c40f; }
+    .lbl { font-weight:bold; color:#4ec9b0; margin-bottom:.15rem; }
+    .lbl.active { color:#f1c40f; }
+    .det { color:#888; }
+    #log { background:#111; border:1px solid #333; padding:.5rem .75rem;
+           height:calc(100vh - 130px); overflow-y:auto; font-size:.82rem; }
+    .row { white-space:pre-wrap; word-break:break-all; line-height:1.4; }
+    .ts  { color:#555; margin-right:.4rem; user-select:none; }
+  </style>
+</head>
+<body>
+  <h1>CTA — Claude Telegram Agent</h1>
+  <div id="cards"></div>
+  <div id="log"></div>
+  <script>
+    const log = document.getElementById('log');
+    let pin = true;
+    log.addEventListener('scroll', () => {
+      pin = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
+    });
+    function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+    function addLine(ts, text) {
+      const d = document.createElement('div');
+      d.className = 'row';
+      d.innerHTML = '<span class="ts">'+ts+'</span>'+esc(text);
+      log.appendChild(d);
+      if (pin) log.scrollTop = log.scrollHeight;
+    }
+    const es = new EventSource('/stream');
+    es.onmessage = e => {
+      const d = JSON.parse(e.data);
+      if (!d.ping) addLine(d.ts, d.text);
+    };
+    async function tick() {
+      try {
+        const r = await fetch('/status');
+        const d = await r.json();
+        const el = document.getElementById('cards');
+        if (!d.sessions.length) { el.innerHTML = ''; return; }
+        el.innerHTML = d.sessions.map(s => `<div class="card${s.active?' active':''}">
+          <div class="lbl${s.active?' active':''}">${esc(s.label)}${s.active?' ⚡':''}</div>
+          <div class="det">model: ${esc(s.model)}</div>
+          <div class="det">cwd: ${esc(s.cwd)}</div>
+          <div class="det">msgs: ${s.msgs}</div></div>`).join('');
+      } catch {}
+    }
+    tick(); setInterval(tick, 2000);
+  </script>
+</body>
+</html>"""
+
+
+@app.route("/")
+def _web_index():
+    return _WEB_HTML, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
+@app.route("/stream")
+def _web_stream():
+    q = queue.Queue(maxsize=500)
+    with _sse_lock:
+        _sse_subscribers.append(q)
+
+    @stream_with_context
+    def generate():
+        with _tui_lock:
+            history = list(_log_entries)
+        for ts, text in history:
+            yield f"data: {json.dumps({'ts': ts, 'text': _strip_rich(text)})}\n\n"
         try:
-            term_width = os.get_terminal_size().columns
-        except OSError:
-            term_width = 80
-        card_width = 40  # approximate min card width
-        cols = max(1, term_width // card_width)
-        rows = math.ceil(len(cards) / cols)
-        card_height = 6  # 4 content lines + 2 border lines
-        size = 3 + rows * card_height
-    else:
-        content = header + "   [bold]sessions:[/] [dim]none[/]"
-        size = 3
-    return Panel(content, title=f"[bold green]CTA[/]  {header}"), size
+            while True:
+                try:
+                    event = q.get(timeout=25)
+                    yield f"data: {json.dumps(event)}\n\n"
+                except queue.Empty:
+                    yield 'data: {"ping":true}\n\n'
+        finally:
+            with _sse_lock:
+                if q in _sse_subscribers:
+                    _sse_subscribers.remove(q)
+
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-def _log_panel() -> Panel:
-    table = Table(box=None, show_header=False, padding=(0, 1), expand=True)
-    table.add_column("time", style="dim", width=8, no_wrap=True)
-    table.add_column("text")
-    with _tui_lock:
-        entries = list(_log_entries)
-    for ts, text in entries:
-        table.add_row(ts, text)
-    return Panel(table, title="[bold]Log[/]")
-
-
-def _build_layout() -> Layout:
-    panel, size = _status_panel()
-    layout = Layout()
-    layout.split_column(Layout(name="status", size=size), Layout(name="log"))
-    layout["status"].update(panel)
-    layout["log"].update(_log_panel())
-    return layout
+@app.route("/status")
+def _web_status():
+    all_keys = set(user_sessions) | set(msg_counts)
+    sessions = []
+    for key in sorted(all_keys):
+        uid, chat_id = key
+        sessions.append({
+            "label": chat_labels.get(key, f"{uid}:{chat_id}"),
+            "model": user_model.get(key, MODEL),
+            "cwd": user_cwd.get(key, DEFAULT_CWD).replace(os.path.expanduser("~"), "~", 1),
+            "msgs": msg_counts.get(key, 0),
+            "active": key == claude_busy_key,
+        })
+    return {"model": MODEL, "cwd": DEFAULT_CWD, "sessions": sessions}
 
 
 # ── Claude CLI ────────────────────────────────────────────────────────────────
@@ -670,8 +748,5 @@ if __name__ == "__main__":
 
     threading.Thread(target=bot.infinity_polling, daemon=True).start()
     threading.Thread(target=_cron_scheduler, daemon=True).start()
-    with Live(auto_refresh=False, screen=True) as live:
-        while True:
-            live.update(_build_layout())
-            live.refresh()
-            time.sleep(0.25)
+    tui_log(f"[dim]Web UI → http://localhost:{WEB_PORT}/[/]")
+    app.run(host="0.0.0.0", port=WEB_PORT, threaded=True, use_reloader=False)
