@@ -247,171 +247,249 @@ _WEB_HTML = """<!DOCTYPE html>
            font-family: system-ui, -apple-system, sans-serif;
            display: flex; height: 100vh; overflow: hidden; }
 
-    /* ── Nav bar ── */
+    /* ── Left nav bar ── */
     #nav { width: 220px; flex-shrink: 0; background: #181825;
            border-right: 1px solid #313244;
            display: flex; flex-direction: column; }
 
-    #nav-logo { padding: .9rem 1rem .7rem;
-                font-size: .88rem; font-weight: 700;
+    #nav-logo { padding: .9rem 1rem;
+                font-size: .9rem; font-weight: 700;
                 color: #89b4fa; letter-spacing: .04em;
-                border-bottom: 1px solid #313244; }
+                border-bottom: 1px solid #313244; flex-shrink: 0; }
+    #nav-logo span { font-weight: 400; color: #6c7086; font-size: .72rem;
+                     display: block; margin-top: .15rem; }
 
-    /* tab strip */
-    #tabs { display: flex; border-bottom: 1px solid #313244; }
-    .tab { flex: 1; padding: .45rem 0; text-align: center;
-           font-size: .72rem; font-weight: 600; color: #6c7086;
-           cursor: pointer; border-bottom: 2px solid transparent;
-           transition: color .15s; user-select: none; }
-    .tab:hover { color: #cdd6f4; }
-    .tab.sel { color: #89b4fa; border-bottom-color: #89b4fa; }
+    #nav-items { padding: .5rem; flex-shrink: 0; }
+    .nav-item { display: flex; align-items: center; gap: .55rem;
+                padding: .5rem .65rem; border-radius: 6px;
+                font-size: .82rem; font-weight: 500; color: #6c7086;
+                cursor: pointer; transition: background .12s, color .12s;
+                user-select: none; }
+    .nav-item:hover { background: #313244; color: #cdd6f4; }
+    .nav-item.sel { background: #313244; color: #89b4fa; }
+    .nav-icon { font-size: .9rem; width: 1.1rem; text-align: center; flex-shrink: 0; }
 
-    /* tab panels */
-    .panel { flex: 1; overflow-y: auto; display: none; }
-    .panel.sel { display: block; }
+    .nav-section { padding: .6rem .65rem .25rem;
+                   font-size: .65rem; font-weight: 700; letter-spacing: .08em;
+                   color: #45475a; text-transform: uppercase; }
 
-    /* chats panel */
-    #p-chats { padding: .4rem; }
-    .chat-item { padding: .55rem .65rem; border-radius: 6px;
-                 margin-bottom: .25rem; cursor: pointer;
-                 border-left: 3px solid transparent;
-                 transition: background .12s; }
-    .chat-item:hover { background: #313244; }
-    .chat-item.busy { border-left-color: #a6e3a1; }
-    .chat-name { font-size: .82rem; font-weight: 600;
-                 display: flex; align-items: center; gap: .4rem; }
-    .chat-meta { font-size: .7rem; color: #6c7086;
-                 margin-top: .2rem; line-height: 1.55; }
-    .pulse { width: 7px; height: 7px; border-radius: 50%;
-             background: #a6e3a1; flex-shrink: 0;
+    /* chat nav items */
+    #nav-chats { flex: 1; overflow-y: auto; padding: .25rem .5rem .5rem; }
+    .chat-nav { display: flex; align-items: flex-start; gap: .5rem;
+                padding: .45rem .55rem; border-radius: 6px;
+                margin-bottom: .2rem; cursor: pointer;
+                font-size: .8rem; font-weight: 500; color: #6c7086;
+                transition: background .12s, color .12s; user-select: none; }
+    .chat-nav:hover { background: #313244; color: #cdd6f4; }
+    .chat-nav.sel { background: #313244; color: #cdd6f4; }
+    .chat-nav.busy { color: #a6e3a1; }
+    .chat-nav.busy.sel { color: #a6e3a1; }
+    .chat-nav-label { flex: 1; min-width: 0;
+                      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pulse { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+             background: #a6e3a1; margin-top: .3rem;
              animation: blink 1.2s ease-in-out infinite; }
     @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.15} }
-    #no-chats { padding: .9rem .6rem; font-size: .78rem; color: #45475a; }
+    #no-chats { padding: .5rem .55rem; font-size: .75rem; color: #45475a; }
 
-    /* status panel */
-    #p-status { padding: .75rem; }
+    /* ── Right main content ── */
+    #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+    /* shared topbar */
+    .topbar { padding: .5rem 1rem; border-bottom: 1px solid #313244;
+              font-size: .8rem; font-weight: 600; color: #cdd6f4;
+              flex-shrink: 0; display: flex; align-items: center; gap: .6rem; }
+    .topbar-sub { font-weight: 400; color: #6c7086; font-size: .72rem; }
+
+    /* views */
+    .view { flex: 1; overflow-y: auto; display: none; }
+    .view.sel { display: flex; flex-direction: column; }
+
+    /* log view */
+    #v-log { padding: .65rem 1rem;
+             font-family: "SF Mono", "Fira Code", "Consolas", monospace;
+             font-size: .78rem; line-height: 1.55; }
+    .log-row { display: flex; gap: .55rem; }
+    .ts { color: #45475a; flex-shrink: 0; width: 5.5rem; user-select: none; }
+    .txt { flex: 1; white-space: pre-wrap; word-break: break-word; }
+
+    /* chats view */
+    #v-chats { padding: 1.25rem; gap: .75rem; flex-wrap: wrap;
+               align-content: flex-start; }
+    .chat-card { background: #181825; border: 1px solid #313244;
+                 border-radius: 8px; padding: .85rem 1rem; width: 260px; }
+    .chat-card.busy { border-color: #a6e3a1; }
+    .cc-name { font-size: .9rem; font-weight: 600;
+               display: flex; align-items: center; gap: .45rem; margin-bottom: .5rem; }
+    .cc-row { display: flex; justify-content: space-between;
+              font-size: .75rem; padding: .2rem 0; }
+    .cc-key { color: #6c7086; }
+    .cc-val { color: #cdd6f4; font-family: monospace; font-size: .72rem;
+              max-width: 160px; overflow: hidden;
+              text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+    #no-cards { padding: 1rem; font-size: .82rem; color: #45475a; }
+
+    /* status view */
+    #v-status { padding: 1.25rem; align-content: flex-start; }
+    .stat-block { background: #181825; border: 1px solid #313244;
+                  border-radius: 8px; padding: .85rem 1rem;
+                  max-width: 400px; width: 100%; }
     .stat-row { display: flex; justify-content: space-between;
-                font-size: .78rem; padding: .3rem 0;
+                font-size: .8rem; padding: .3rem 0;
                 border-bottom: 1px solid #313244; }
     .stat-row:last-child { border-bottom: none; }
     .stat-key { color: #6c7086; }
     .stat-val { color: #cdd6f4; font-family: monospace; font-size: .75rem;
-                text-align: right; max-width: 130px;
+                text-align: right; max-width: 250px;
                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-    /* ── Main ── */
-    #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-    #topbar { padding: .45rem 1rem; border-bottom: 1px solid #313244;
-              font-size: .72rem; color: #6c7086; flex-shrink: 0;
-              display: flex; align-items: center; gap: .75rem; }
-    #topbar strong { color: #cdd6f4; font-size: .8rem; }
-    #log { flex: 1; overflow-y: auto; padding: .65rem 1rem;
-           font-family: "SF Mono", "Fira Code", "Consolas", monospace;
-           font-size: .78rem; line-height: 1.55; }
-    .row { display: flex; gap: .55rem; }
-    .ts  { color: #45475a; flex-shrink: 0; width: 5.5rem; user-select: none; }
-    .txt { flex: 1; white-space: pre-wrap; word-break: break-word; }
   </style>
 </head>
 <body>
-  <div id="nav">
-    <div id="nav-logo">CTA</div>
 
-    <div id="tabs">
-      <div class="tab sel" data-tab="chats">Chats</div>
-      <div class="tab"     data-tab="status">Status</div>
+<div id="nav">
+  <div id="nav-logo">CTA<span id="gmodel">—</span></div>
+
+  <div id="nav-items">
+    <div class="nav-item sel" data-view="log">
+      <span class="nav-icon">📋</span> Log
     </div>
-
-    <div id="p-chats" class="panel sel">
-      <div id="no-chats">No active chats yet</div>
+    <div class="nav-item" data-view="chats">
+      <span class="nav-icon">💬</span> Chats
     </div>
-
-    <div id="p-status" class="panel">
-      <div id="stat-rows"></div>
+    <div class="nav-item" data-view="status">
+      <span class="nav-icon">⚙️</span> Status
     </div>
   </div>
 
-  <div id="main">
-    <div id="topbar"><strong>Live log</strong></div>
-    <div id="log"></div>
+  <div class="nav-section">Sessions</div>
+  <div id="nav-chats"><div id="no-chats">None yet</div></div>
+</div>
+
+<div id="main">
+  <div class="topbar" id="topbar-label">
+    <span>Log</span>
+    <span class="topbar-sub" id="topbar-sub"></span>
   </div>
 
-  <script>
-    // ── Tab switching ──
-    document.querySelectorAll('.tab').forEach(t => {
-      t.addEventListener('click', () => {
-        document.querySelectorAll('.tab, .panel').forEach(el => el.classList.remove('sel'));
-        t.classList.add('sel');
-        document.getElementById('p-' + t.dataset.tab).classList.add('sel');
-      });
+  <!-- Log view -->
+  <div class="view sel" id="view-log">
+    <div id="v-log"></div>
+  </div>
+
+  <!-- Chats view -->
+  <div class="view" id="view-chats">
+    <div id="v-chats"><div id="no-cards">No active chats yet</div></div>
+  </div>
+
+  <!-- Status view -->
+  <div class="view" id="view-status">
+    <div id="v-status">
+      <div class="stat-block" id="stat-block"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  function esc(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  // ── Nav switching ──
+  let currentView = 'log';
+  const VIEW_LABELS = { log: 'Log', chats: 'Chats', status: 'Status' };
+
+  function selectView(name) {
+    currentView = name;
+    document.querySelectorAll('.nav-item').forEach(el => {
+      el.classList.toggle('sel', el.dataset.view === name);
     });
-
-    // ── Log ──
-    const log = document.getElementById('log');
-    let pin = true;
-    log.addEventListener('scroll', () => {
-      pin = log.scrollTop + log.clientHeight >= log.scrollHeight - 40;
+    document.querySelectorAll('.view').forEach(el => {
+      el.classList.toggle('sel', el.id === 'view-' + name);
     });
+    document.getElementById('topbar-label').firstElementChild.textContent = VIEW_LABELS[name] || name;
+    document.getElementById('topbar-sub').textContent = '';
+  }
 
-    function esc(s) {
-      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    }
+  document.querySelectorAll('.nav-item').forEach(el => {
+    el.addEventListener('click', () => selectView(el.dataset.view));
+  });
 
-    function addLine(ts, text) {
-      const row = document.createElement('div');
-      row.className = 'row';
-      row.innerHTML = `<span class="ts">${esc(ts)}</span><span class="txt">${esc(text)}</span>`;
-      log.appendChild(row);
-      if (pin) log.scrollTop = log.scrollHeight;
-    }
+  // ── Live log ──
+  const logEl = document.getElementById('v-log');
+  let pin = true;
+  document.getElementById('view-log').addEventListener('scroll', e => {
+    pin = e.target.scrollTop + e.target.clientHeight >= e.target.scrollHeight - 40;
+  });
 
-    const es = new EventSource('/stream');
-    es.onmessage = e => {
-      const d = JSON.parse(e.data);
-      if (!d.ping) addLine(d.ts, d.text);
-    };
+  function addLine(ts, text) {
+    const row = document.createElement('div');
+    row.className = 'log-row';
+    row.innerHTML = `<span class="ts">${esc(ts)}</span><span class="txt">${esc(text)}</span>`;
+    logEl.appendChild(row);
+    const logView = document.getElementById('view-log');
+    if (pin) logView.scrollTop = logView.scrollHeight;
+  }
 
-    // ── Status polling ──
-    async function tick() {
-      try {
-        const r = await fetch('/status');
-        const d = await r.json();
+  const es = new EventSource('/stream');
+  es.onmessage = e => {
+    const d = JSON.parse(e.data);
+    if (!d.ping) addLine(d.ts, d.text);
+  };
 
-        // Chats tab
-        const chats = document.getElementById('p-chats');
-        if (!d.sessions.length) {
-          chats.innerHTML = '<div id="no-chats">No active chats yet</div>';
-        } else {
-          chats.innerHTML = d.sessions.map(s => `
-            <div class="chat-item${s.active ? ' busy' : ''}">
-              <div class="chat-name">
-                ${s.active ? '<span class="pulse"></span>' : ''}
-                ${esc(s.label)}
-              </div>
-              <div class="chat-meta">
-                ${esc(s.model)}<br>
-                ${esc(s.cwd)}<br>
-                ${s.msgs} msg${s.msgs !== 1 ? 's' : ''}
-              </div>
-            </div>`).join('');
-        }
+  // ── Status polling ──
+  async function tick() {
+    try {
+      const r = await fetch('/status');
+      const d = await r.json();
 
-        // Status tab
-        document.getElementById('stat-rows').innerHTML = [
-          ['Model',   d.model],
-          ['Cwd',     d.cwd],
-          ['Chats',   d.sessions.length],
-          ['Active',  d.sessions.filter(s=>s.active).map(s=>s.label).join(', ') || '—'],
-        ].map(([k,v]) => `
-          <div class="stat-row">
-            <span class="stat-key">${k}</span>
-            <span class="stat-val" title="${esc(String(v))}">${esc(String(v))}</span>
+      document.getElementById('gmodel').textContent = d.model;
+
+      // Sidebar session list
+      const navChats = document.getElementById('nav-chats');
+      if (!d.sessions.length) {
+        navChats.innerHTML = '<div id="no-chats">None yet</div>';
+      } else {
+        navChats.innerHTML = d.sessions.map(s => `
+          <div class="chat-nav${s.active ? ' busy' : ''}">
+            ${s.active ? '<span class="pulse"></span>' : ''}
+            <span class="chat-nav-label" title="${esc(s.label)}">${esc(s.label)}</span>
           </div>`).join('');
-      } catch {}
-    }
-    tick();
-    setInterval(tick, 2000);
-  </script>
+      }
+
+      // Chats view — cards
+      const chatsEl = document.getElementById('v-chats');
+      if (!d.sessions.length) {
+        chatsEl.innerHTML = '<div id="no-cards">No active chats yet</div>';
+      } else {
+        chatsEl.innerHTML = d.sessions.map(s => `
+          <div class="chat-card${s.active ? ' busy' : ''}">
+            <div class="cc-name">
+              ${s.active ? '<span class="pulse"></span>' : ''}
+              ${esc(s.label)}
+            </div>
+            <div class="cc-row"><span class="cc-key">model</span><span class="cc-val" title="${esc(s.model)}">${esc(s.model)}</span></div>
+            <div class="cc-row"><span class="cc-key">cwd</span><span class="cc-val" title="${esc(s.cwd)}">${esc(s.cwd)}</span></div>
+            <div class="cc-row"><span class="cc-key">msgs</span><span class="cc-val">${s.msgs}</span></div>
+          </div>`).join('');
+      }
+
+      // Status view
+      document.getElementById('stat-block').innerHTML = [
+        ['Model',    d.model],
+        ['Default cwd', d.cwd],
+        ['Sessions', d.sessions.length],
+        ['Active',   d.sessions.filter(s => s.active).map(s => s.label).join(', ') || '—'],
+      ].map(([k, v]) => `
+        <div class="stat-row">
+          <span class="stat-key">${k}</span>
+          <span class="stat-val" title="${esc(String(v))}">${esc(String(v))}</span>
+        </div>`).join('');
+
+    } catch {}
+  }
+  tick();
+  setInterval(tick, 2000);
+</script>
 </body>
 </html>"""
 
