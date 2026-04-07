@@ -629,7 +629,7 @@ class TestBotHandlers(unittest.TestCase):
         agent.handle_message(make_fake_message("hello"))
         time.sleep(0.5)
         prompt = mock_claude.call_args[0][0]
-        self.assertIn("Memory:", prompt)
+        self.assertIn("memory:", prompt)
         self.assertIn("123:123.md", prompt)
 
     @patch("agent.call_claude", return_value=("ok", "s"))
@@ -995,7 +995,7 @@ class TestCronScheduler(unittest.TestCase):
         task = {"_type": "cron", "uid": 123, "chat_id": 456, "job_id": "ab12", "prompt": "my task"}
         agent._process_cron(123, 456, task, done)
         prompt = mock_claude.call_args[0][0]
-        self.assertIn("persistent agent", prompt)
+        self.assertIn("Agent chat:", prompt)
         self.assertIn("123:456", prompt)
         self.assertIn("my task", prompt)
 
@@ -1039,7 +1039,7 @@ class TestCronScheduler(unittest.TestCase):
         agent.handle_message(make_fake_message("hello"))
         time.sleep(0.5)
         prompt = mock_claude.call_args[0][0]
-        self.assertIn("Crons:", prompt)
+        self.assertIn("crons:", prompt)
         self.assertIn(".json", prompt)
 
 
