@@ -242,58 +242,107 @@ _WEB_HTML = """<!DOCTYPE html>
   <title>CTA</title>
   <meta charset="utf-8">
   <style>
-    * { box-sizing: border-box; }
-    body { background:#1a1a1a; color:#d4d4d4; font-family:monospace; margin:0; padding:.75rem 1rem; }
-    h1 { color:#569cd6; margin:0 0 .5rem; font-size:1rem; }
-    #cards { display:flex; flex-wrap:wrap; gap:.5rem; margin-bottom:.75rem; min-height:1rem; }
-    .card { border:1px solid #444; padding:.4rem .6rem; min-width:180px; border-radius:3px; font-size:.82rem; }
-    .card.active { border-color:#f1c40f; }
-    .lbl { font-weight:bold; color:#4ec9b0; margin-bottom:.15rem; }
-    .lbl.active { color:#f1c40f; }
-    .det { color:#888; }
-    #log { background:#111; border:1px solid #333; padding:.5rem .75rem;
-           height:calc(100vh - 130px); overflow-y:auto; font-size:.82rem; }
-    .row { white-space:pre-wrap; word-break:break-all; line-height:1.4; }
-    .ts  { color:#555; margin-right:.4rem; user-select:none; }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #1e1e2e; color: #cdd6f4;
+           font-family: system-ui, -apple-system, sans-serif;
+           display: flex; height: 100vh; overflow: hidden; }
+
+    /* ── Sidebar ── */
+    #sidebar { width: 240px; flex-shrink: 0; background: #181825;
+               border-right: 1px solid #313244;
+               display: flex; flex-direction: column; }
+    #sidebar-head { padding: .85rem 1rem; border-bottom: 1px solid #313244; }
+    #sidebar-head h1 { font-size: .9rem; font-weight: 700; color: #89b4fa; letter-spacing: .03em; }
+    #sidebar-head .model { font-size: .72rem; color: #6c7086; margin-top: .2rem; }
+    #chats { flex: 1; overflow-y: auto; padding: .5rem; }
+    .chat { padding: .55rem .7rem; border-radius: 6px; margin-bottom: .3rem;
+            border: 1px solid transparent; }
+    .chat.active { border-color: #f9e2af; background: #1e1e2e; }
+    .chat-name { font-size: .82rem; font-weight: 600; color: #cdd6f4;
+                 display: flex; align-items: center; gap: .35rem; }
+    .chat.active .chat-name { color: #f9e2af; }
+    .pulse { width: 6px; height: 6px; border-radius: 50%; background: #a6e3a1;
+             flex-shrink: 0; animation: blink 1s ease-in-out infinite; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.2} }
+    .chat-meta { font-size: .7rem; color: #6c7086; margin-top: .25rem; line-height: 1.6; }
+    #no-chats { padding: .8rem .5rem; font-size: .78rem; color: #45475a; }
+
+    /* ── Main ── */
+    #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    #log-head { padding: .5rem 1rem; border-bottom: 1px solid #313244;
+                font-size: .72rem; color: #6c7086; flex-shrink: 0; }
+    #log { flex: 1; overflow-y: auto; padding: .6rem 1rem;
+           font-family: "SF Mono", "Fira Code", "Consolas", monospace; font-size: .78rem; }
+    .row { display: flex; gap: .6rem; line-height: 1.55; }
+    .ts  { color: #45475a; flex-shrink: 0; width: 5.5rem; user-select: none; }
+    .txt { flex: 1; white-space: pre-wrap; word-break: break-word; }
   </style>
 </head>
 <body>
-  <h1>CTA — Claude Telegram Agent</h1>
-  <div id="cards"></div>
-  <div id="log"></div>
+  <div id="sidebar">
+    <div id="sidebar-head">
+      <h1>CTA</h1>
+      <div class="model" id="gmodel">—</div>
+    </div>
+    <div id="chats"><div id="no-chats">No active chats yet</div></div>
+  </div>
+
+  <div id="main">
+    <div id="log-head">Live log</div>
+    <div id="log"></div>
+  </div>
+
   <script>
     const log = document.getElementById('log');
     let pin = true;
     log.addEventListener('scroll', () => {
-      pin = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
+      pin = log.scrollTop + log.clientHeight >= log.scrollHeight - 40;
     });
-    function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+    function esc(s) {
+      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
     function addLine(ts, text) {
-      const d = document.createElement('div');
-      d.className = 'row';
-      d.innerHTML = '<span class="ts">'+ts+'</span>'+esc(text);
-      log.appendChild(d);
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.innerHTML = `<span class="ts">${esc(ts)}</span><span class="txt">${esc(text)}</span>`;
+      log.appendChild(row);
       if (pin) log.scrollTop = log.scrollHeight;
     }
+
     const es = new EventSource('/stream');
     es.onmessage = e => {
       const d = JSON.parse(e.data);
       if (!d.ping) addLine(d.ts, d.text);
     };
+
     async function tick() {
       try {
         const r = await fetch('/status');
         const d = await r.json();
-        const el = document.getElementById('cards');
-        if (!d.sessions.length) { el.innerHTML = ''; return; }
-        el.innerHTML = d.sessions.map(s => `<div class="card${s.active?' active':''}">
-          <div class="lbl${s.active?' active':''}">${esc(s.label)}${s.active?' ⚡':''}</div>
-          <div class="det">model: ${esc(s.model)}</div>
-          <div class="det">cwd: ${esc(s.cwd)}</div>
-          <div class="det">msgs: ${s.msgs}</div></div>`).join('');
+        document.getElementById('gmodel').textContent = d.model;
+        const el = document.getElementById('chats');
+        if (!d.sessions.length) {
+          el.innerHTML = '<div id="no-chats">No active chats yet</div>';
+          return;
+        }
+        el.innerHTML = d.sessions.map(s => `
+          <div class="chat${s.active ? ' active' : ''}">
+            <div class="chat-name">
+              ${s.active ? '<span class="pulse"></span>' : ''}
+              ${esc(s.label)}
+            </div>
+            <div class="chat-meta">
+              ${esc(s.model)}<br>
+              ${esc(s.cwd)}<br>
+              ${s.msgs} msg${s.msgs !== 1 ? 's' : ''}
+            </div>
+          </div>`).join('');
       } catch {}
     }
-    tick(); setInterval(tick, 2000);
+    tick();
+    setInterval(tick, 2000);
   </script>
 </body>
 </html>"""
