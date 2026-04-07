@@ -269,28 +269,10 @@ _WEB_HTML = """<!DOCTYPE html>
     .nav-item.sel { background: #313244; color: #89b4fa; }
     .nav-icon { font-size: .9rem; width: 1.1rem; text-align: center; flex-shrink: 0; }
 
-    .nav-section { padding: .6rem .65rem .25rem;
-                   font-size: .65rem; font-weight: 700; letter-spacing: .08em;
-                   color: #45475a; text-transform: uppercase; }
-
-    /* chat nav items */
-    #nav-chats { flex: 1; overflow-y: auto; padding: .25rem .5rem .5rem; }
-    .chat-nav { display: flex; align-items: flex-start; gap: .5rem;
-                padding: .45rem .55rem; border-radius: 6px;
-                margin-bottom: .2rem; cursor: pointer;
-                font-size: .8rem; font-weight: 500; color: #6c7086;
-                transition: background .12s, color .12s; user-select: none; }
-    .chat-nav:hover { background: #313244; color: #cdd6f4; }
-    .chat-nav.sel { background: #313244; color: #cdd6f4; }
-    .chat-nav.busy { color: #a6e3a1; }
-    .chat-nav.busy.sel { color: #a6e3a1; }
-    .chat-nav-label { flex: 1; min-width: 0;
-                      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .pulse { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
              background: #a6e3a1; margin-top: .3rem;
              animation: blink 1.2s ease-in-out infinite; }
     @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.15} }
-    #no-chats { padding: .5rem .55rem; font-size: .75rem; color: #45475a; }
 
     /* ── Right main content ── */
     #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
@@ -361,8 +343,6 @@ _WEB_HTML = """<!DOCTYPE html>
     </div>
   </div>
 
-  <div class="nav-section">Sessions</div>
-  <div id="nav-chats"><div id="no-chats">None yet</div></div>
 </div>
 
 <div id="main">
@@ -443,18 +423,6 @@ _WEB_HTML = """<!DOCTYPE html>
       const d = await r.json();
 
       document.getElementById('gmodel').textContent = d.model;
-
-      // Sidebar session list
-      const navChats = document.getElementById('nav-chats');
-      if (!d.sessions.length) {
-        navChats.innerHTML = '<div id="no-chats">None yet</div>';
-      } else {
-        navChats.innerHTML = d.sessions.map(s => `
-          <div class="chat-nav${s.active ? ' busy' : ''}">
-            ${s.active ? '<span class="pulse"></span>' : ''}
-            <span class="chat-nav-label" title="${esc(s.label)}">${esc(s.label)}</span>
-          </div>`).join('');
-      }
 
       // Chats view — cards
       const chatsEl = document.getElementById('v-chats');
