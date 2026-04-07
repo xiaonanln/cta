@@ -248,26 +248,26 @@ _WEB_HTML = """<!DOCTYPE html>
            display: flex; height: 100vh; overflow: hidden; }
 
     /* ── Left nav bar ── */
-    #nav { width: 220px; flex-shrink: 0; background: #181825;
+    #nav { width: 260px; flex-shrink: 0; background: #181825;
            border-right: 1px solid #313244;
            display: flex; flex-direction: column; }
 
-    #nav-logo { padding: .9rem 1rem;
-                font-size: .9rem; font-weight: 700;
+    #nav-logo { padding: 1.1rem 1.25rem;
+                font-size: 1.1rem; font-weight: 700;
                 color: #89b4fa; letter-spacing: .04em;
                 border-bottom: 1px solid #313244; flex-shrink: 0; }
-    #nav-logo span { font-weight: 400; color: #6c7086; font-size: .72rem;
-                     display: block; margin-top: .15rem; }
+    #nav-logo span { font-weight: 400; color: #6c7086; font-size: .8rem;
+                     display: block; margin-top: .2rem; }
 
-    #nav-items { padding: .5rem; flex-shrink: 0; }
-    .nav-item { display: flex; align-items: center; gap: .55rem;
-                padding: .5rem .65rem; border-radius: 6px;
-                font-size: .82rem; font-weight: 500; color: #6c7086;
+    #nav-items { padding: .6rem; flex-shrink: 0; }
+    .nav-item { display: flex; align-items: center; gap: .7rem;
+                padding: .7rem .85rem; border-radius: 7px;
+                font-size: .95rem; font-weight: 500; color: #6c7086;
                 cursor: pointer; transition: background .12s, color .12s;
                 user-select: none; }
     .nav-item:hover { background: #313244; color: #cdd6f4; }
     .nav-item.sel { background: #313244; color: #89b4fa; }
-    .nav-icon { font-size: .9rem; width: 1.1rem; text-align: center; flex-shrink: 0; }
+    .nav-icon { font-size: 1.05rem; width: 1.3rem; text-align: center; flex-shrink: 0; }
 
     .pulse { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
              background: #a6e3a1; margin-top: .3rem;
