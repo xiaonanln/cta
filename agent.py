@@ -364,7 +364,8 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
     memory_prefix = (
         f"You are a persistent agent. Chat: {uid}:{chat_id}\n"
         f"- Memory: {memory_path} — read for context, append facts worth keeping\n"
-        f"- Crons: {crons_path} — read/edit to manage scheduled tasks (5-field cron)\n\n"
+        f"- Crons: {crons_path} — read/edit to manage scheduled tasks (5-field cron)\n"
+        f"Always reply to the user after completing any tool use.\n\n"
     )
 
     # Build prompt — download document to temp file if present
@@ -432,7 +433,8 @@ def _process_cron(uid: int, chat_id: int, task: dict, done: threading.Event):
     preamble = (
         f"You are a persistent agent. Chat: {uid}:{chat_id}\n"
         f"- Memory: {memory_path} — read for context, append facts worth keeping\n"
-        f"- Crons: {crons_path} — read/edit to manage scheduled tasks (5-field cron)\n\n"
+        f"- Crons: {crons_path} — read/edit to manage scheduled tasks (5-field cron)\n"
+        f"Always reply to the user after completing any tool use.\n\n"
     )
     prompt = preamble + f"[Scheduled task {job_id}]\n{task['prompt']}"
 
