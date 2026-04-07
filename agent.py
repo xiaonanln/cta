@@ -33,7 +33,7 @@ DEFAULT_CONFIG = {
     "allowed_users": [],
     "claude_timeout": 600,
     "model": "claude-sonnet-4-6",
-    "web_port": 8080,
+    "web_port": 17488,
 }
 
 
@@ -63,7 +63,7 @@ BOT_TOKEN = ""
 ALLOWED_USERS: set[int] = set()
 TIMEOUT = 600
 MODEL = "claude-sonnet-4-6"
-WEB_PORT = 8080
+WEB_PORT = 17488
 DEFAULT_CWD = os.getcwd()
 SESSIONS_PATH = os.path.join(CTA_HOME, "sessions.json")
 MEMORY_DIR = os.path.join(CTA_HOME, "memory")
@@ -89,7 +89,7 @@ def init(config: dict):
     ALLOWED_USERS = set(config["allowed_users"])
     TIMEOUT = config["claude_timeout"]
     MODEL = config.get("model", "claude-sonnet-4-6")
-    WEB_PORT = config.get("web_port", 8080)
+    WEB_PORT = config.get("web_port", 17488)
     os.makedirs(MEMORY_DIR, exist_ok=True)
     os.makedirs(CRONS_DIR, exist_ok=True)
 
