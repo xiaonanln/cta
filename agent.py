@@ -332,11 +332,11 @@ _WEB_HTML = """<!DOCTYPE html>
   <div id="nav-logo">CTA<span id="gmodel">—</span></div>
 
   <div id="nav-items">
-    <div class="nav-item sel" data-view="log">
-      <span class="nav-icon">📋</span> Log
-    </div>
-    <div class="nav-item" data-view="chats">
+    <div class="nav-item sel" data-view="chats">
       <span class="nav-icon">💬</span> Chats
+    </div>
+    <div class="nav-item" data-view="log">
+      <span class="nav-icon">📋</span> Log
     </div>
     <div class="nav-item" data-view="status">
       <span class="nav-icon">⚙️</span> Status
@@ -351,14 +351,14 @@ _WEB_HTML = """<!DOCTYPE html>
     <span class="topbar-sub" id="topbar-sub"></span>
   </div>
 
-  <!-- Log view -->
-  <div class="view sel" id="view-log">
-    <div id="v-log"></div>
+  <!-- Chats view -->
+  <div class="view sel" id="view-chats">
+    <div id="v-chats"><div id="no-cards">No active chats yet</div></div>
   </div>
 
-  <!-- Chats view -->
-  <div class="view" id="view-chats">
-    <div id="v-chats"><div id="no-cards">No active chats yet</div></div>
+  <!-- Log view -->
+  <div class="view" id="view-log">
+    <div id="v-log"></div>
   </div>
 
   <!-- Status view -->
@@ -375,8 +375,8 @@ _WEB_HTML = """<!DOCTYPE html>
   }
 
   // ── Nav switching ──
-  let currentView = 'log';
-  const VIEW_LABELS = { log: 'Log', chats: 'Chats', status: 'Status' };
+  let currentView = 'chats';
+  const VIEW_LABELS = { chats: 'Chats', log: 'Log', status: 'Status' };
 
   function selectView(name) {
     currentView = name;
