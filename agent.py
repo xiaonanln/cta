@@ -247,52 +247,106 @@ _WEB_HTML = """<!DOCTYPE html>
            font-family: system-ui, -apple-system, sans-serif;
            display: flex; height: 100vh; overflow: hidden; }
 
-    /* ── Sidebar ── */
-    #sidebar { width: 240px; flex-shrink: 0; background: #181825;
-               border-right: 1px solid #313244;
-               display: flex; flex-direction: column; }
-    #sidebar-head { padding: .85rem 1rem; border-bottom: 1px solid #313244; }
-    #sidebar-head h1 { font-size: .9rem; font-weight: 700; color: #89b4fa; letter-spacing: .03em; }
-    #sidebar-head .model { font-size: .72rem; color: #6c7086; margin-top: .2rem; }
-    #chats { flex: 1; overflow-y: auto; padding: .5rem; }
-    .chat { padding: .55rem .7rem; border-radius: 6px; margin-bottom: .3rem;
-            border: 1px solid transparent; }
-    .chat.active { border-color: #f9e2af; background: #1e1e2e; }
-    .chat-name { font-size: .82rem; font-weight: 600; color: #cdd6f4;
-                 display: flex; align-items: center; gap: .35rem; }
-    .chat.active .chat-name { color: #f9e2af; }
-    .pulse { width: 6px; height: 6px; border-radius: 50%; background: #a6e3a1;
-             flex-shrink: 0; animation: blink 1s ease-in-out infinite; }
-    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.2} }
-    .chat-meta { font-size: .7rem; color: #6c7086; margin-top: .25rem; line-height: 1.6; }
-    #no-chats { padding: .8rem .5rem; font-size: .78rem; color: #45475a; }
+    /* ── Nav bar ── */
+    #nav { width: 220px; flex-shrink: 0; background: #181825;
+           border-right: 1px solid #313244;
+           display: flex; flex-direction: column; }
+
+    #nav-logo { padding: .9rem 1rem .7rem;
+                font-size: .88rem; font-weight: 700;
+                color: #89b4fa; letter-spacing: .04em;
+                border-bottom: 1px solid #313244; }
+
+    /* tab strip */
+    #tabs { display: flex; border-bottom: 1px solid #313244; }
+    .tab { flex: 1; padding: .45rem 0; text-align: center;
+           font-size: .72rem; font-weight: 600; color: #6c7086;
+           cursor: pointer; border-bottom: 2px solid transparent;
+           transition: color .15s; user-select: none; }
+    .tab:hover { color: #cdd6f4; }
+    .tab.sel { color: #89b4fa; border-bottom-color: #89b4fa; }
+
+    /* tab panels */
+    .panel { flex: 1; overflow-y: auto; display: none; }
+    .panel.sel { display: block; }
+
+    /* chats panel */
+    #p-chats { padding: .4rem; }
+    .chat-item { padding: .55rem .65rem; border-radius: 6px;
+                 margin-bottom: .25rem; cursor: pointer;
+                 border-left: 3px solid transparent;
+                 transition: background .12s; }
+    .chat-item:hover { background: #313244; }
+    .chat-item.busy { border-left-color: #a6e3a1; }
+    .chat-name { font-size: .82rem; font-weight: 600;
+                 display: flex; align-items: center; gap: .4rem; }
+    .chat-meta { font-size: .7rem; color: #6c7086;
+                 margin-top: .2rem; line-height: 1.55; }
+    .pulse { width: 7px; height: 7px; border-radius: 50%;
+             background: #a6e3a1; flex-shrink: 0;
+             animation: blink 1.2s ease-in-out infinite; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.15} }
+    #no-chats { padding: .9rem .6rem; font-size: .78rem; color: #45475a; }
+
+    /* status panel */
+    #p-status { padding: .75rem; }
+    .stat-row { display: flex; justify-content: space-between;
+                font-size: .78rem; padding: .3rem 0;
+                border-bottom: 1px solid #313244; }
+    .stat-row:last-child { border-bottom: none; }
+    .stat-key { color: #6c7086; }
+    .stat-val { color: #cdd6f4; font-family: monospace; font-size: .75rem;
+                text-align: right; max-width: 130px;
+                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
     /* ── Main ── */
     #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-    #log-head { padding: .5rem 1rem; border-bottom: 1px solid #313244;
-                font-size: .72rem; color: #6c7086; flex-shrink: 0; }
-    #log { flex: 1; overflow-y: auto; padding: .6rem 1rem;
-           font-family: "SF Mono", "Fira Code", "Consolas", monospace; font-size: .78rem; }
-    .row { display: flex; gap: .6rem; line-height: 1.55; }
+    #topbar { padding: .45rem 1rem; border-bottom: 1px solid #313244;
+              font-size: .72rem; color: #6c7086; flex-shrink: 0;
+              display: flex; align-items: center; gap: .75rem; }
+    #topbar strong { color: #cdd6f4; font-size: .8rem; }
+    #log { flex: 1; overflow-y: auto; padding: .65rem 1rem;
+           font-family: "SF Mono", "Fira Code", "Consolas", monospace;
+           font-size: .78rem; line-height: 1.55; }
+    .row { display: flex; gap: .55rem; }
     .ts  { color: #45475a; flex-shrink: 0; width: 5.5rem; user-select: none; }
     .txt { flex: 1; white-space: pre-wrap; word-break: break-word; }
   </style>
 </head>
 <body>
-  <div id="sidebar">
-    <div id="sidebar-head">
-      <h1>CTA</h1>
-      <div class="model" id="gmodel">—</div>
+  <div id="nav">
+    <div id="nav-logo">CTA</div>
+
+    <div id="tabs">
+      <div class="tab sel" data-tab="chats">Chats</div>
+      <div class="tab"     data-tab="status">Status</div>
     </div>
-    <div id="chats"><div id="no-chats">No active chats yet</div></div>
+
+    <div id="p-chats" class="panel sel">
+      <div id="no-chats">No active chats yet</div>
+    </div>
+
+    <div id="p-status" class="panel">
+      <div id="stat-rows"></div>
+    </div>
   </div>
 
   <div id="main">
-    <div id="log-head">Live log</div>
+    <div id="topbar"><strong>Live log</strong></div>
     <div id="log"></div>
   </div>
 
   <script>
+    // ── Tab switching ──
+    document.querySelectorAll('.tab').forEach(t => {
+      t.addEventListener('click', () => {
+        document.querySelectorAll('.tab, .panel').forEach(el => el.classList.remove('sel'));
+        t.classList.add('sel');
+        document.getElementById('p-' + t.dataset.tab).classList.add('sel');
+      });
+    });
+
+    // ── Log ──
     const log = document.getElementById('log');
     let pin = true;
     log.addEventListener('scroll', () => {
@@ -300,7 +354,7 @@ _WEB_HTML = """<!DOCTYPE html>
     });
 
     function esc(s) {
-      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     }
 
     function addLine(ts, text) {
@@ -317,27 +371,41 @@ _WEB_HTML = """<!DOCTYPE html>
       if (!d.ping) addLine(d.ts, d.text);
     };
 
+    // ── Status polling ──
     async function tick() {
       try {
         const r = await fetch('/status');
         const d = await r.json();
-        document.getElementById('gmodel').textContent = d.model;
-        const el = document.getElementById('chats');
+
+        // Chats tab
+        const chats = document.getElementById('p-chats');
         if (!d.sessions.length) {
-          el.innerHTML = '<div id="no-chats">No active chats yet</div>';
-          return;
+          chats.innerHTML = '<div id="no-chats">No active chats yet</div>';
+        } else {
+          chats.innerHTML = d.sessions.map(s => `
+            <div class="chat-item${s.active ? ' busy' : ''}">
+              <div class="chat-name">
+                ${s.active ? '<span class="pulse"></span>' : ''}
+                ${esc(s.label)}
+              </div>
+              <div class="chat-meta">
+                ${esc(s.model)}<br>
+                ${esc(s.cwd)}<br>
+                ${s.msgs} msg${s.msgs !== 1 ? 's' : ''}
+              </div>
+            </div>`).join('');
         }
-        el.innerHTML = d.sessions.map(s => `
-          <div class="chat${s.active ? ' active' : ''}">
-            <div class="chat-name">
-              ${s.active ? '<span class="pulse"></span>' : ''}
-              ${esc(s.label)}
-            </div>
-            <div class="chat-meta">
-              ${esc(s.model)}<br>
-              ${esc(s.cwd)}<br>
-              ${s.msgs} msg${s.msgs !== 1 ? 's' : ''}
-            </div>
+
+        // Status tab
+        document.getElementById('stat-rows').innerHTML = [
+          ['Model',   d.model],
+          ['Cwd',     d.cwd],
+          ['Chats',   d.sessions.length],
+          ['Active',  d.sessions.filter(s=>s.active).map(s=>s.label).join(', ') || '—'],
+        ].map(([k,v]) => `
+          <div class="stat-row">
+            <span class="stat-key">${k}</span>
+            <span class="stat-val" title="${esc(String(v))}">${esc(String(v))}</span>
           </div>`).join('');
       } catch {}
     }
