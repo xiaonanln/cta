@@ -221,20 +221,19 @@ def _strip_rich(text: str) -> str:
 
 def tui_log(text: str) -> None:
     ts = datetime.now().strftime("%H:%M:%S")
+    stripped = _strip_rich(text)
     with _tui_lock:
-        _log_entries.append((ts, text))
-    event = {"ts": ts, "text": _strip_rich(text)}
+        _log_entries.append((ts, stripped))
+    event = {"ts": ts, "text": stripped}
     with _sse_lock:
-        dead = [q for q in _sse_subscribers if q.full()]
-        for q in dead:
-            _sse_subscribers.remove(q)
+        _sse_subscribers[:] = [q for q in _sse_subscribers if not q.full()]
         for q in _sse_subscribers:
             q.put_nowait(event)
 
 
-class _TuiLogHandler(logging.Handler):
+class _LogHandler(logging.Handler):
     def emit(self, record):
-        tui_log(f"[dim]{escape(self.format(record))}[/]")
+        tui_log(self.format(record))
 
 
 _WEB_HTML = """<!DOCTYPE html>
@@ -485,7 +484,7 @@ def _web_stream():
         with _tui_lock:
             history = list(_log_entries)
         for ts, text in history:
-            yield f"data: {json.dumps({'ts': ts, 'text': _strip_rich(text)})}\n\n"
+            yield f"data: {json.dumps({'ts': ts, 'text': text})}\n\n"
         try:
             while True:
                 try:
@@ -883,7 +882,7 @@ def create_bot():
     global bot
     telebot_log = logging.getLogger("TeleBot")
     telebot_log.addFilter(_Suppress409())
-    telebot_log.addHandler(_TuiLogHandler())
+    telebot_log.addHandler(_LogHandler())
     telebot_log.propagate = False
     bot = telebot.TeleBot(BOT_TOKEN, num_threads=8)
     bot.message_handler(commands=["start"])(cmd_start)
