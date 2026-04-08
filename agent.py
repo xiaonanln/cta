@@ -113,6 +113,8 @@ def load_sessions():
                     user_sessions[key] = entry["session"]
                 if entry.get("cwd"):
                     user_cwd[key] = entry["cwd"]
+                if entry.get("model"):
+                    user_model[key] = entry["model"]
         tui_log(f"[dim]Loaded {len(data)} session(s) from {SESSIONS_PATH}[/]")
     except Exception as e:
         tui_log(f"[red]Warning: could not load sessions: {escape(str(e))}[/]")
@@ -121,7 +123,7 @@ def load_sessions():
 def save_sessions():
     tmp = SESSIONS_PATH + ".tmp"
     try:
-        all_keys = set(user_sessions) | set(user_cwd)
+        all_keys = set(user_sessions) | set(user_cwd) | set(user_model)
         data = {}
         for key in all_keys:
             uid, chat_id = key
@@ -130,6 +132,8 @@ def save_sessions():
                 entry["session"] = user_sessions[key]
             if key in user_cwd:
                 entry["cwd"] = user_cwd[key]
+            if key in user_model:
+                entry["model"] = user_model[key]
             data[f"{uid}:{chat_id}"] = entry
         with open(tmp, "w") as f:
             json.dump(data, f, indent=2)
