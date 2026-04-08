@@ -30,6 +30,7 @@ All configuration is in `~/.cta/config.json`:
 | `allowed_users` | `[]` (all) | List of Telegram user IDs |
 | `claude_timeout` | `600` | Max seconds per Claude call |
 | `model` | `claude-sonnet-4-6` | Claude model to use |
+| `web_port` | `17488` | Port for the web dashboard |
 
 Sessions and working directories are persisted in `~/.cta/sessions.json` automatically — both are restored on restart.
 
@@ -61,5 +62,16 @@ You → Telegram → CTA → claude --print --resume <session> → response → 
 - Automatic retry on transient Claude failures (up to 2 retries)
 - File/image support: send any document or image and Claude will read and analyze it
 - Per-chat memory: Claude maintains a memory file per chat, persisting context across sessions automatically
-- Rich TUI status panel: each active chat shown as a card with label, model, cwd, and message count; active session highlighted in yellow
+- Web dashboard at `http://localhost:17488/` — no TTY required, works headless
 - Markdown formatting via `telegramify-markdown`
+
+## Web Dashboard
+
+Open `http://localhost:<web_port>/` while the agent is running.
+
+**Nav bar (left):**
+- **Chats** — a card per active chat showing model, working directory, message count, and a preview of the last Claude reply
+- **Log** — live-streaming event log via SSE; auto-scrolls and replays recent history on connect
+- **Status** — summary of the current model, default cwd, and active session
+
+The active chat card is highlighted with a green pulse. Port defaults to `17488` and is configurable via `web_port` in `config.json`.
