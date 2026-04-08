@@ -42,6 +42,7 @@ def setup_fake_bot():
     agent.user_timeout.clear()
     agent.chat_labels.clear()
     agent.msg_counts.clear()
+    agent.last_reply.clear()
     return agent.bot
 
 

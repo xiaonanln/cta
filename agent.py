@@ -78,6 +78,7 @@ user_queues: dict[tuple[int, int], queue.Queue] = {}
 user_queues_lock = threading.Lock()
 chat_labels: dict[tuple[int, int], str] = {}   # (uid, chat_id) → "DM" or group name
 msg_counts: dict[tuple[int, int], int] = {}    # (uid, chat_id) → messages processed
+last_reply: dict[tuple[int, int], str] = {}    # (uid, chat_id) → last reply snippet
 claude_lock = threading.Lock()  # serialize Claude CLI calls (Max subscription concurrency limit)
 claude_busy_for = None  # username of user currently calling Claude
 claude_busy_key = None  # (uid, chat_id) of active session
@@ -296,19 +297,24 @@ _WEB_HTML = """<!DOCTYPE html>
     .txt { flex: 1; white-space: pre-wrap; word-break: break-word; }
 
     /* chats view */
-    #v-chats { padding: 1.25rem; gap: .75rem; flex-wrap: wrap;
+    #v-chats { padding: 1.25rem; gap: 1rem; flex-wrap: wrap;
                align-content: flex-start; }
     .chat-card { background: #181825; border: 1px solid #313244;
-                 border-radius: 8px; padding: .85rem 1rem; width: 260px; }
+                 border-radius: 8px; padding: 1rem 1.1rem; width: 300px; }
     .chat-card.busy { border-color: #a6e3a1; }
-    .cc-name { font-size: .9rem; font-weight: 600;
-               display: flex; align-items: center; gap: .45rem; margin-bottom: .5rem; }
+    .cc-name { font-size: .95rem; font-weight: 600;
+               display: flex; align-items: center; gap: .45rem; margin-bottom: .6rem; }
     .cc-row { display: flex; justify-content: space-between;
               font-size: .75rem; padding: .2rem 0; }
     .cc-key { color: #6c7086; }
     .cc-val { color: #cdd6f4; font-family: monospace; font-size: .72rem;
-              max-width: 160px; overflow: hidden;
+              max-width: 180px; overflow: hidden;
               text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+    .cc-preview { margin-top: .65rem; padding-top: .6rem;
+                  border-top: 1px solid #313244;
+                  font-size: .75rem; color: #a6adc8; line-height: 1.55;
+                  display: -webkit-box; -webkit-line-clamp: 4;
+                  -webkit-box-orient: vertical; overflow: hidden; }
     #no-cards { padding: 1rem; font-size: .82rem; color: #45475a; }
 
     /* status view */
@@ -438,6 +444,7 @@ _WEB_HTML = """<!DOCTYPE html>
             <div class="cc-row"><span class="cc-key">model</span><span class="cc-val" title="${esc(s.model)}">${esc(s.model)}</span></div>
             <div class="cc-row"><span class="cc-key">cwd</span><span class="cc-val" title="${esc(s.cwd)}">${esc(s.cwd)}</span></div>
             <div class="cc-row"><span class="cc-key">msgs</span><span class="cc-val">${s.msgs}</span></div>
+            ${s.last_reply ? `<div class="cc-preview">${esc(s.last_reply)}</div>` : ''}
           </div>`).join('');
       }
 
@@ -507,6 +514,7 @@ def _web_status():
             "cwd": user_cwd.get(key, DEFAULT_CWD).replace(os.path.expanduser("~"), "~", 1),
             "msgs": msg_counts.get(key, 0),
             "active": key == claude_busy_key,
+            "last_reply": last_reply.get(key, ""),
         })
     return {"model": MODEL, "cwd": DEFAULT_CWD, "sessions": sessions}
 
@@ -652,6 +660,7 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
         user_sessions[key] = new_session_id
         save_sessions()
     msg_counts[key] = msg_counts.get(key, 0) + 1
+    last_reply[key] = reply[:300]
     preview = reply[:120].replace("\n", " ")
     tui_log(f"[blue]←[/] [bold]{escape(username)}[/] {escape(preview)}{'…' if len(reply) > 120 else ''}")
     for chunk in _split_reply(reply):
@@ -692,6 +701,7 @@ def _process_cron(uid: int, chat_id: int, task: dict, done: threading.Event):
         user_sessions[key] = new_session_id
         save_sessions()
     msg_counts[key] = msg_counts.get(key, 0) + 1
+    last_reply[key] = reply[:300]
     preview = reply[:120].replace("\n", " ")
     tui_log(f"[magenta]←[/] [bold]cron:{job_id}[/] {escape(preview)}{'…' if len(reply) > 120 else ''}")
     for chunk in _split_reply(reply):
