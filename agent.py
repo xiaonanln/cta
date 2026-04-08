@@ -922,4 +922,4 @@ if __name__ == "__main__":
     threading.Thread(target=bot.infinity_polling, daemon=True).start()
     threading.Thread(target=_cron_scheduler, daemon=True).start()
     tui_log(f"[dim]Web UI → http://localhost:{WEB_PORT}/[/]")
-    app.run(host="0.0.0.0", port=WEB_PORT, threaded=True, use_reloader=False)
+    app.run(host="0.0.0.0", port=WEB_PORT, threaded=True, debug=False, use_reloader=False)
