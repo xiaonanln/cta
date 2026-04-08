@@ -464,16 +464,21 @@ class TestBotHandlers(unittest.TestCase):
         self._orig_memory_dir = agent.MEMORY_DIR
         self._tmp_memory_dir = tempfile.mkdtemp()
         agent.MEMORY_DIR = self._tmp_memory_dir
+        self._orig_preamble_dir = agent.PREAMBLE_DIR
+        self._tmp_preamble_dir = tempfile.mkdtemp()
+        agent.PREAMBLE_DIR = self._tmp_preamble_dir
 
     def tearDown(self):
         import shutil
         agent.ALLOWED_USERS.clear()
         agent.SESSIONS_PATH = self._orig_sessions_path
         agent.MEMORY_DIR = self._orig_memory_dir
+        agent.PREAMBLE_DIR = self._orig_preamble_dir
         for path in [self._tmp_sessions.name, self._tmp_sessions.name + ".tmp"]:
             if os.path.exists(path):
                 os.unlink(path)
         shutil.rmtree(self._tmp_memory_dir, ignore_errors=True)
+        shutil.rmtree(self._tmp_preamble_dir, ignore_errors=True)
 
     def test_start_replies(self):
         agent.cmd_start(make_fake_message("/start"))
@@ -636,6 +641,25 @@ class TestBotHandlers(unittest.TestCase):
     @patch("agent.call_claude", return_value=("ok", "s"))
     def test_memory_dir_created_on_load(self, _):
         self.assertTrue(os.path.isdir(agent.MEMORY_DIR))
+
+    @patch("agent.call_claude", return_value=("ok", "s"))
+    def test_custom_preamble_injected(self, mock_claude):
+        preamble_path = os.path.join(agent.PREAMBLE_DIR, "123:123.md")
+        with open(preamble_path, "w") as f:
+            f.write("Always reply in Chinese.")
+        agent.handle_message(make_fake_message("hello"))
+        time.sleep(0.5)
+        prompt = mock_claude.call_args[0][0]
+        self.assertIn("Always reply in Chinese.", prompt)
+
+    @patch("agent.call_claude", return_value=("ok", "s"))
+    def test_no_preamble_file_no_injection(self, mock_claude):
+        agent.handle_message(make_fake_message("hello"))
+        time.sleep(0.5)
+        prompt = mock_claude.call_args[0][0]
+        # system preamble present, no extra blank sections
+        self.assertIn("Agent chat:", prompt)
+        self.assertNotIn("Always reply in Chinese.", prompt)
 
     def _make_document_msg(self, filename="image.png", mime_type="image/png", caption="check this"):
         msg = make_fake_message(None)
