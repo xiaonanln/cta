@@ -707,7 +707,7 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
     crons_path = os.path.join(CRONS_DIR, f"{uid}:{chat_id}.json")
     custom_preamble = _read_preamble(uid, chat_id)
     memory_prefix = (
-        f"[Agent chat:{uid}:{chat_id} | memory:{memory_path} | crons:{crons_path}]\n"
+        f"[Agent chat:{uid}:{chat_id} | memory:{memory_path} | crons:{crons_path} | preamble:{_preamble_path(uid, chat_id)}]\n"
         f"Always reply after tool use.\n\n"
         + (f"{custom_preamble}\n\n" if custom_preamble else "")
     )
@@ -777,7 +777,7 @@ def _process_cron(uid: int, chat_id: int, task: dict, done: threading.Event):
     crons_path = os.path.join(CRONS_DIR, f"{uid}:{chat_id}.json")
     custom_preamble = _read_preamble(uid, chat_id)
     preamble = (
-        f"[Agent chat:{uid}:{chat_id} | memory:{memory_path} | crons:{crons_path}]\n"
+        f"[Agent chat:{uid}:{chat_id} | memory:{memory_path} | crons:{crons_path} | preamble:{_preamble_path(uid, chat_id)}]\n"
         f"Always reply after tool use.\n\n"
         + (f"{custom_preamble}\n\n" if custom_preamble else "")
     )
