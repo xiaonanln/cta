@@ -310,7 +310,7 @@ _WEB_HTML = """<!DOCTYPE html>
     .txt { flex: 1; white-space: pre-wrap; word-break: break-word; }
 
     /* chats view */
-    #v-chats { padding: 1.25rem; gap: 1rem; flex-wrap: wrap;
+    #v-chats { display: flex; flex-wrap: wrap; padding: 1.25rem; gap: 1rem;
                align-content: flex-start; }
     .chat-card { background: #181825; border: 1px solid #313244;
                  border-radius: 8px; padding: 1rem 1.1rem; width: 300px; }
