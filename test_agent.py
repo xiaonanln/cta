@@ -120,6 +120,7 @@ class TestSessionPersistence(unittest.TestCase):
     def tearDown(self):
         agent.user_sessions.clear()
         agent.user_cwd.clear()
+        agent.user_model.clear()
         agent.SESSIONS_PATH = self._orig_sessions_path
         agent.init(agent.DEFAULT_CONFIG)
         for path in [self.tmp.name, self.tmp.name + ".tmp"]:
@@ -144,6 +145,23 @@ class TestSessionPersistence(unittest.TestCase):
         agent.load_sessions()
         self.assertEqual(agent.user_sessions[(123, 123)], "sess-abc")
         self.assertEqual(agent.user_cwd[(123, 123)], "/tmp/myproject")
+
+    def test_model_persisted_and_restored(self):
+        agent.user_sessions[(123, 123)] = "sess-abc"
+        agent.user_model[(123, 123)] = "claude-haiku-4-5-20251001"
+        agent.save_sessions()
+        agent.user_sessions.clear()
+        agent.user_model.clear()
+        agent.load_sessions()
+        self.assertEqual(agent.user_sessions[(123, 123)], "sess-abc")
+        self.assertEqual(agent.user_model[(123, 123)], "claude-haiku-4-5-20251001")
+
+    def test_model_only_persisted_without_session(self):
+        agent.user_model[(99, 99)] = "claude-opus-4-6"
+        agent.save_sessions()
+        agent.user_model.clear()
+        agent.load_sessions()
+        self.assertEqual(agent.user_model[(99, 99)], "claude-opus-4-6")
 
     def test_backward_compat_string_format(self):
         with open(self.tmp.name, "w") as f:

@@ -113,6 +113,8 @@ def load_sessions():
                     user_sessions[key] = entry["session"]
                 if entry.get("cwd"):
                     user_cwd[key] = entry["cwd"]
+                if entry.get("model"):
+                    user_model[key] = entry["model"]
         tui_log(f"[dim]Loaded {len(data)} session(s) from {SESSIONS_PATH}[/]")
     except Exception as e:
         tui_log(f"[red]Warning: could not load sessions: {escape(str(e))}[/]")
@@ -121,7 +123,7 @@ def load_sessions():
 def save_sessions():
     tmp = SESSIONS_PATH + ".tmp"
     try:
-        all_keys = set(user_sessions) | set(user_cwd)
+        all_keys = set(user_sessions) | set(user_cwd) | set(user_model)
         data = {}
         for key in all_keys:
             uid, chat_id = key
@@ -130,6 +132,8 @@ def save_sessions():
                 entry["session"] = user_sessions[key]
             if key in user_cwd:
                 entry["cwd"] = user_cwd[key]
+            if key in user_model:
+                entry["model"] = user_model[key]
             data[f"{uid}:{chat_id}"] = entry
         with open(tmp, "w") as f:
             json.dump(data, f, indent=2)
@@ -450,22 +454,13 @@ _WEB_HTML = """<!DOCTYPE html>
   };
 
   // ── Preamble ──
-  let _focusedPreamble = null; // {uid, chat_id, selStart, selEnd}
+  // Track user edits locally so tick() rebuilds don't overwrite in-progress typing
+  const localPreambles = new Map(); // "uid:chat_id" -> current textarea value
 
-  function restoreFocus() {
-    if (!_focusedPreamble) return;
-    const {uid, chat_id, selStart, selEnd} = _focusedPreamble;
-    const ta = document.querySelector(`.cc-preamble[data-uid="${uid}"][data-chat="${chat_id}"]`);
-    if (ta) { ta.focus(); ta.setSelectionRange(selStart, selEnd); }
-    _focusedPreamble = null;
-  }
-
-  document.addEventListener('focusin', e => {
+  document.addEventListener('input', e => {
     if (e.target.classList.contains('cc-preamble')) {
-      _focusedPreamble = {
-        uid: e.target.dataset.uid, chat_id: e.target.dataset.chat,
-        selStart: e.target.selectionStart, selEnd: e.target.selectionEnd,
-      };
+      const key = `${e.target.dataset.uid}:${e.target.dataset.chat}`;
+      localPreambles.set(key, e.target.value);
     }
   });
 
@@ -474,11 +469,13 @@ _WEB_HTML = """<!DOCTYPE html>
     const ta = card.querySelector('.cc-preamble');
     const saved = card.querySelector('.cc-saved');
     const uid = ta.dataset.uid, chat_id = ta.dataset.chat;
+    const key = `${uid}:${chat_id}`;
     await fetch(`/preamble/${uid}/${chat_id}`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({preamble: ta.value}),
     });
+    localPreambles.delete(key); // synced with server, no longer need local copy
     saved.style.opacity = 1;
     setTimeout(() => saved.style.opacity = 0, 1500);
   }
@@ -496,7 +493,10 @@ _WEB_HTML = """<!DOCTYPE html>
       if (!d.sessions.length) {
         chatsEl.innerHTML = '<div id="no-cards">No active chats yet</div>';
       } else {
-        chatsEl.innerHTML = d.sessions.map(s => `
+        chatsEl.innerHTML = d.sessions.map(s => {
+          const key = `${s.uid}:${s.chat_id}`;
+          const preambleVal = localPreambles.has(key) ? localPreambles.get(key) : s.preamble;
+          return `
           <div class="chat-card${s.active ? ' busy' : ''}">
             <div class="cc-name">
               ${s.active ? '<span class="pulse"></span>' : ''}
@@ -507,14 +507,13 @@ _WEB_HTML = """<!DOCTYPE html>
             <div class="cc-row"><span class="cc-key">msgs</span><span class="cc-val">${s.msgs}</span></div>
             ${s.last_reply ? `<div class="cc-preview">${esc(s.last_reply)}</div>` : ''}
             <div class="cc-preamble-label">Custom preamble</div>
-            <textarea class="cc-preamble" data-uid="${s.uid}" data-chat="${s.chat_id}">${esc(s.preamble)}</textarea>
+            <textarea class="cc-preamble" data-uid="${s.uid}" data-chat="${s.chat_id}">${esc(preambleVal)}</textarea>
             <div>
               <button class="cc-save" onclick="savePreamble(this)">Save</button>
               <span class="cc-saved">Saved ✓</span>
             </div>
-          </div>`).join('');
-        // restore focus if textarea was being edited
-        restoreFocus();
+          </div>`;
+        }).join('');
       }
 
       // Status view
@@ -707,7 +706,7 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
     crons_path = os.path.join(CRONS_DIR, f"{uid}:{chat_id}.json")
     custom_preamble = _read_preamble(uid, chat_id)
     memory_prefix = (
-        f"[Agent chat:{uid}:{chat_id} | memory:{memory_path} | crons:{crons_path}]\n"
+        f"[Agent chat:{uid}:{chat_id} | memory:{memory_path} | crons:{crons_path} | preamble:{_preamble_path(uid, chat_id)}]\n"
         f"Always reply after tool use.\n\n"
         + (f"{custom_preamble}\n\n" if custom_preamble else "")
     )
@@ -777,7 +776,7 @@ def _process_cron(uid: int, chat_id: int, task: dict, done: threading.Event):
     crons_path = os.path.join(CRONS_DIR, f"{uid}:{chat_id}.json")
     custom_preamble = _read_preamble(uid, chat_id)
     preamble = (
-        f"[Agent chat:{uid}:{chat_id} | memory:{memory_path} | crons:{crons_path}]\n"
+        f"[Agent chat:{uid}:{chat_id} | memory:{memory_path} | crons:{crons_path} | preamble:{_preamble_path(uid, chat_id)}]\n"
         f"Always reply after tool use.\n\n"
         + (f"{custom_preamble}\n\n" if custom_preamble else "")
     )
