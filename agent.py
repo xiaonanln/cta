@@ -68,6 +68,7 @@ DEFAULT_CWD = os.getcwd()
 SESSIONS_PATH = os.path.join(CTA_HOME, "sessions.json")
 MEMORY_DIR = os.path.join(CTA_HOME, "memory")
 CRONS_DIR = os.path.join(CTA_HOME, "crons")
+PREAMBLE_DIR = os.path.join(CTA_HOME, "preamble")
 
 bot = None  # initialized in create_bot()
 user_sessions: dict[tuple[int, int], str] = {}  # (uid, chat_id) → Claude session ID
@@ -93,6 +94,7 @@ def init(config: dict):
     WEB_PORT = config.get("web_port", 17488)
     os.makedirs(MEMORY_DIR, exist_ok=True)
     os.makedirs(CRONS_DIR, exist_ok=True)
+    os.makedirs(PREAMBLE_DIR, exist_ok=True)
 
 
 def load_sessions():
@@ -140,6 +142,18 @@ def save_sessions():
 
 def _cron_path(uid: int, chat_id: int) -> str:
     return os.path.join(CRONS_DIR, f"{uid}:{chat_id}.json")
+
+
+def _preamble_path(uid: int, chat_id: int) -> str:
+    return os.path.join(PREAMBLE_DIR, f"{uid}:{chat_id}.md")
+
+
+def _read_preamble(uid: int, chat_id: int) -> str:
+    try:
+        with open(_preamble_path(uid, chat_id)) as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return ""
 
 
 def _load_cron_jobs(uid: int, chat_id: int) -> list:
@@ -314,6 +328,20 @@ _WEB_HTML = """<!DOCTYPE html>
                   font-size: .75rem; color: #a6adc8; line-height: 1.55;
                   display: -webkit-box; -webkit-line-clamp: 4;
                   -webkit-box-orient: vertical; overflow: hidden; }
+    .cc-preamble-label { margin-top: .75rem; padding-top: .6rem;
+                         border-top: 1px solid #313244;
+                         font-size: .7rem; color: #6c7086; margin-bottom: .3rem; }
+    .cc-preamble { width: 100%; background: #1e1e2e; border: 1px solid #313244;
+                   border-radius: 4px; color: #cdd6f4; font-family: inherit;
+                   font-size: .75rem; padding: .4rem .5rem; resize: vertical;
+                   min-height: 60px; outline: none; }
+    .cc-preamble:focus { border-color: #89b4fa; }
+    .cc-save { margin-top: .35rem; padding: .3rem .7rem;
+               background: #313244; border: none; border-radius: 4px;
+               color: #cdd6f4; font-size: .72rem; cursor: pointer; }
+    .cc-save:hover { background: #45475a; }
+    .cc-saved { color: #a6e3a1; font-size: .7rem; margin-left: .4rem;
+                opacity: 0; transition: opacity .3s; }
     #no-cards { padding: 1rem; font-size: .82rem; color: #45475a; }
 
     /* status view */
@@ -421,6 +449,40 @@ _WEB_HTML = """<!DOCTYPE html>
     if (!d.ping) addLine(d.ts, d.text);
   };
 
+  // ── Preamble ──
+  let _focusedPreamble = null; // {uid, chat_id, selStart, selEnd}
+
+  function restoreFocus() {
+    if (!_focusedPreamble) return;
+    const {uid, chat_id, selStart, selEnd} = _focusedPreamble;
+    const ta = document.querySelector(`.cc-preamble[data-uid="${uid}"][data-chat="${chat_id}"]`);
+    if (ta) { ta.focus(); ta.setSelectionRange(selStart, selEnd); }
+    _focusedPreamble = null;
+  }
+
+  document.addEventListener('focusin', e => {
+    if (e.target.classList.contains('cc-preamble')) {
+      _focusedPreamble = {
+        uid: e.target.dataset.uid, chat_id: e.target.dataset.chat,
+        selStart: e.target.selectionStart, selEnd: e.target.selectionEnd,
+      };
+    }
+  });
+
+  async function savePreamble(btn) {
+    const card = btn.closest('.chat-card');
+    const ta = card.querySelector('.cc-preamble');
+    const saved = card.querySelector('.cc-saved');
+    const uid = ta.dataset.uid, chat_id = ta.dataset.chat;
+    await fetch(`/preamble/${uid}/${chat_id}`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({preamble: ta.value}),
+    });
+    saved.style.opacity = 1;
+    setTimeout(() => saved.style.opacity = 0, 1500);
+  }
+
   // ── Status polling ──
   async function tick() {
     try {
@@ -444,7 +506,15 @@ _WEB_HTML = """<!DOCTYPE html>
             <div class="cc-row"><span class="cc-key">cwd</span><span class="cc-val" title="${esc(s.cwd)}">${esc(s.cwd)}</span></div>
             <div class="cc-row"><span class="cc-key">msgs</span><span class="cc-val">${s.msgs}</span></div>
             ${s.last_reply ? `<div class="cc-preview">${esc(s.last_reply)}</div>` : ''}
+            <div class="cc-preamble-label">Custom preamble</div>
+            <textarea class="cc-preamble" data-uid="${s.uid}" data-chat="${s.chat_id}">${esc(s.preamble)}</textarea>
+            <div>
+              <button class="cc-save" onclick="savePreamble(this)">Save</button>
+              <span class="cc-saved">Saved ✓</span>
+            </div>
           </div>`).join('');
+        // restore focus if textarea was being edited
+        restoreFocus();
       }
 
       // Status view
@@ -509,13 +579,39 @@ def _web_status():
         uid, chat_id = key
         sessions.append({
             "label": chat_labels.get(key, f"{uid}:{chat_id}"),
+            "uid": uid,
+            "chat_id": chat_id,
             "model": user_model.get(key, MODEL),
             "cwd": user_cwd.get(key, DEFAULT_CWD).replace(os.path.expanduser("~"), "~", 1),
             "msgs": msg_counts.get(key, 0),
             "active": key == claude_busy_key,
             "last_reply": last_reply.get(key, ""),
+            "preamble": _read_preamble(uid, chat_id),
         })
     return {"model": MODEL, "cwd": DEFAULT_CWD, "sessions": sessions}
+
+
+@app.route("/preamble/<int:uid>/<int:chat_id>", methods=["GET"])
+def _web_get_preamble(uid, chat_id):
+    return {"preamble": _read_preamble(uid, chat_id)}
+
+
+@app.route("/preamble/<int:uid>/<int:chat_id>", methods=["POST"])
+def _web_set_preamble(uid, chat_id):
+    from flask import request
+    text = (request.get_json(silent=True) or {}).get("preamble", "").strip()
+    path = _preamble_path(uid, chat_id)
+    if text:
+        with open(path, "w") as f:
+            f.write(text)
+        tui_log(f"[cyan]📝 preamble updated for {uid}:{chat_id}[/]")
+    else:
+        try:
+            os.unlink(path)
+            tui_log(f"[cyan]📝 preamble cleared for {uid}:{chat_id}[/]")
+        except FileNotFoundError:
+            pass
+    return {"ok": True}
 
 
 # ── Claude CLI ────────────────────────────────────────────────────────────────
@@ -609,9 +705,11 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
     # Build preamble with agent identity and context files
     memory_path = os.path.join(MEMORY_DIR, f"{uid}:{chat_id}.md")
     crons_path = os.path.join(CRONS_DIR, f"{uid}:{chat_id}.json")
+    custom_preamble = _read_preamble(uid, chat_id)
     memory_prefix = (
         f"[Agent chat:{uid}:{chat_id} | memory:{memory_path} | crons:{crons_path}]\n"
         f"Always reply after tool use.\n\n"
+        + (f"{custom_preamble}\n\n" if custom_preamble else "")
     )
 
     # Build prompt — download document to temp file if present
@@ -677,9 +775,11 @@ def _process_cron(uid: int, chat_id: int, task: dict, done: threading.Event):
 
     memory_path = os.path.join(MEMORY_DIR, f"{uid}:{chat_id}.md")
     crons_path = os.path.join(CRONS_DIR, f"{uid}:{chat_id}.json")
+    custom_preamble = _read_preamble(uid, chat_id)
     preamble = (
         f"[Agent chat:{uid}:{chat_id} | memory:{memory_path} | crons:{crons_path}]\n"
         f"Always reply after tool use.\n\n"
+        + (f"{custom_preamble}\n\n" if custom_preamble else "")
     )
     prompt = preamble + f"[Scheduled task {job_id}]\n{task['prompt']}"
 
