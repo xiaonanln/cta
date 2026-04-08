@@ -7,9 +7,9 @@ Uses Max subscription — no API tokens needed.
 
 import json
 import logging
-import math
 import os
 import queue
+import re
 import subprocess
 import sys
 import tempfile
@@ -20,12 +20,8 @@ from datetime import datetime
 
 import telebot
 import telegramify_markdown
-from rich.columns import Columns
-from rich.layout import Layout
-from rich.live import Live
+from flask import Flask, Response, stream_with_context
 from rich.markup import escape
-from rich.panel import Panel
-from rich.table import Table
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -37,6 +33,7 @@ DEFAULT_CONFIG = {
     "allowed_users": [],
     "claude_timeout": 600,
     "model": "claude-sonnet-4-6",
+    "web_port": 17488,
 }
 
 
@@ -66,6 +63,7 @@ BOT_TOKEN = ""
 ALLOWED_USERS: set[int] = set()
 TIMEOUT = 600
 MODEL = "claude-sonnet-4-6"
+WEB_PORT = 17488
 DEFAULT_CWD = os.getcwd()
 SESSIONS_PATH = os.path.join(CTA_HOME, "sessions.json")
 MEMORY_DIR = os.path.join(CTA_HOME, "memory")
@@ -80,17 +78,19 @@ user_queues: dict[tuple[int, int], queue.Queue] = {}
 user_queues_lock = threading.Lock()
 chat_labels: dict[tuple[int, int], str] = {}   # (uid, chat_id) → "DM" or group name
 msg_counts: dict[tuple[int, int], int] = {}    # (uid, chat_id) → messages processed
+last_reply: dict[tuple[int, int], str] = {}    # (uid, chat_id) → last reply snippet
 claude_lock = threading.Lock()  # serialize Claude CLI calls (Max subscription concurrency limit)
 claude_busy_for = None  # username of user currently calling Claude
 claude_busy_key = None  # (uid, chat_id) of active session
 
 
 def init(config: dict):
-    global BOT_TOKEN, ALLOWED_USERS, TIMEOUT, MODEL
+    global BOT_TOKEN, ALLOWED_USERS, TIMEOUT, MODEL, WEB_PORT
     BOT_TOKEN = config["telegram_bot_token"]
     ALLOWED_USERS = set(config["allowed_users"])
     TIMEOUT = config["claude_timeout"]
     MODEL = config.get("model", "claude-sonnet-4-6")
+    WEB_PORT = config.get("web_port", 17488)
     os.makedirs(MEMORY_DIR, exist_ok=True)
     os.makedirs(CRONS_DIR, exist_ok=True)
 
@@ -201,73 +201,321 @@ def _cron_scheduler():
                 _save_cron_jobs(uid, chat_id, jobs)
 
 
-# ── TUI ───────────────────────────────────────────────────────────────────────
+# ── Web interface ─────────────────────────────────────────────────────────────
 
 _log_entries: deque[tuple[str, str]] = deque(maxlen=200)
 _tui_lock = threading.Lock()
+_sse_subscribers: list[queue.Queue] = []
+_sse_lock = threading.Lock()
+_RICH_TAG = re.compile(r"\[/?[^\]]*\]")
+
+app = Flask(__name__)
+app.logger.disabled = True
+logging.getLogger("werkzeug").setLevel(logging.ERROR)
+
+
+def _strip_rich(text: str) -> str:
+    """Strip Rich markup tags for plain-text display."""
+    return _RICH_TAG.sub("", text).replace("\\[", "[")
 
 
 def tui_log(text: str) -> None:
     ts = datetime.now().strftime("%H:%M:%S")
+    stripped = _strip_rich(text)
     with _tui_lock:
-        _log_entries.append((ts, text))
+        _log_entries.append((ts, stripped))
+    event = {"ts": ts, "text": stripped}
+    with _sse_lock:
+        _sse_subscribers[:] = [q for q in _sse_subscribers if not q.full()]
+        for q in _sse_subscribers:
+            q.put_nowait(event)
 
 
-class _TuiLogHandler(logging.Handler):
+class _LogHandler(logging.Handler):
     def emit(self, record):
-        tui_log(f"[dim]{escape(self.format(record))}[/]")
+        tui_log(self.format(record))
 
 
-def _status_panel() -> tuple[Panel, int]:
-    header = f"[bold]model:[/] [cyan]{escape(MODEL)}[/]   [bold]cwd:[/] [cyan]{escape(DEFAULT_CWD)}[/]"
-    all_keys = set(user_sessions) | set(msg_counts)
-    if all_keys:
-        cards = []
-        for key in sorted(all_keys):
-            uid, chat_id = key
-            label = escape(chat_labels.get(key, f"{uid}:{chat_id}"))
-            sid = user_sessions.get(key, "")
-            sid_str = f"[dim]{sid[:8]}…[/]" if sid else "[dim]no session[/]"
-            model = escape(user_model.get(key, MODEL))
-            cwd = escape(user_cwd.get(key, DEFAULT_CWD).replace(os.path.expanduser("~"), "~", 1))
-            count = msg_counts.get(key, 0)
-            body = f"[bold]session:[/] {sid_str}\n[bold]model:[/]   [cyan]{model}[/]\n[bold]cwd:[/]     [cyan]{cwd}[/]\n[bold]msgs:[/]    [yellow]{count}[/]"
-            active = key == claude_busy_key
-            cards.append(Panel(body, title=f"[bold {'yellow' if active else 'green'}]{label}[/]", border_style="yellow" if active else "default"))
-        content = Columns(cards, equal=True, expand=True)
+_WEB_HTML = """<!DOCTYPE html>
+<html>
+<head>
+  <title>CTA</title>
+  <meta charset="utf-8">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #1e1e2e; color: #cdd6f4;
+           font-family: system-ui, -apple-system, sans-serif;
+           display: flex; height: 100vh; overflow: hidden; }
+
+    /* ── Left nav bar ── */
+    #nav { width: 260px; flex-shrink: 0; background: #181825;
+           border-right: 1px solid #313244;
+           display: flex; flex-direction: column; }
+
+    #nav-logo { padding: 1.1rem 1.25rem;
+                font-size: 1.1rem; font-weight: 700;
+                color: #89b4fa; letter-spacing: .04em;
+                border-bottom: 1px solid #313244; flex-shrink: 0; }
+    #nav-logo span { font-weight: 400; color: #6c7086; font-size: .8rem;
+                     display: block; margin-top: .2rem; }
+
+    #nav-items { padding: .6rem; flex-shrink: 0; }
+    .nav-item { display: flex; align-items: center; gap: .7rem;
+                padding: .7rem .85rem; border-radius: 7px;
+                font-size: .95rem; font-weight: 500; color: #6c7086;
+                cursor: pointer; transition: background .12s, color .12s;
+                user-select: none; }
+    .nav-item:hover { background: #313244; color: #cdd6f4; }
+    .nav-item.sel { background: #313244; color: #89b4fa; }
+    .nav-icon { font-size: 1.05rem; width: 1.3rem; text-align: center; flex-shrink: 0; }
+
+    .pulse { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+             background: #a6e3a1; margin-top: .3rem;
+             animation: blink 1.2s ease-in-out infinite; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.15} }
+
+    /* ── Right main content ── */
+    #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+    /* shared topbar */
+    .topbar { padding: .5rem 1rem; border-bottom: 1px solid #313244;
+              font-size: .8rem; font-weight: 600; color: #cdd6f4;
+              flex-shrink: 0; display: flex; align-items: center; gap: .6rem; }
+    .topbar-sub { font-weight: 400; color: #6c7086; font-size: .72rem; }
+
+    /* views */
+    .view { flex: 1; overflow-y: auto; display: none; }
+    .view.sel { display: flex; flex-direction: column; }
+
+    /* log view */
+    #v-log { padding: .65rem 1rem;
+             font-family: "SF Mono", "Fira Code", "Consolas", monospace;
+             font-size: .78rem; line-height: 1.55; }
+    .log-row { display: flex; gap: .55rem; }
+    .ts { color: #45475a; flex-shrink: 0; width: 5.5rem; user-select: none; }
+    .txt { flex: 1; white-space: pre-wrap; word-break: break-word; }
+
+    /* chats view */
+    #v-chats { padding: 1.25rem; gap: 1rem; flex-wrap: wrap;
+               align-content: flex-start; }
+    .chat-card { background: #181825; border: 1px solid #313244;
+                 border-radius: 8px; padding: 1rem 1.1rem; width: 300px; }
+    .chat-card.busy { border-color: #a6e3a1; }
+    .cc-name { font-size: .95rem; font-weight: 600;
+               display: flex; align-items: center; gap: .45rem; margin-bottom: .6rem; }
+    .cc-row { display: flex; justify-content: space-between;
+              font-size: .75rem; padding: .2rem 0; }
+    .cc-key { color: #6c7086; }
+    .cc-val { color: #cdd6f4; font-family: monospace; font-size: .72rem;
+              max-width: 180px; overflow: hidden;
+              text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+    .cc-preview { margin-top: .65rem; padding-top: .6rem;
+                  border-top: 1px solid #313244;
+                  font-size: .75rem; color: #a6adc8; line-height: 1.55;
+                  display: -webkit-box; -webkit-line-clamp: 4;
+                  -webkit-box-orient: vertical; overflow: hidden; }
+    #no-cards { padding: 1rem; font-size: .82rem; color: #45475a; }
+
+    /* status view */
+    #v-status { padding: 1.25rem; align-content: flex-start; }
+    .stat-block { background: #181825; border: 1px solid #313244;
+                  border-radius: 8px; padding: .85rem 1rem;
+                  max-width: 400px; width: 100%; }
+    .stat-row { display: flex; justify-content: space-between;
+                font-size: .8rem; padding: .3rem 0;
+                border-bottom: 1px solid #313244; }
+    .stat-row:last-child { border-bottom: none; }
+    .stat-key { color: #6c7086; }
+    .stat-val { color: #cdd6f4; font-family: monospace; font-size: .75rem;
+                text-align: right; max-width: 250px;
+                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  </style>
+</head>
+<body>
+
+<div id="nav">
+  <div id="nav-logo">CTA<span id="gmodel">—</span></div>
+
+  <div id="nav-items">
+    <div class="nav-item sel" data-view="chats">
+      <span class="nav-icon">💬</span> Chats
+    </div>
+    <div class="nav-item" data-view="log">
+      <span class="nav-icon">📋</span> Log
+    </div>
+    <div class="nav-item" data-view="status">
+      <span class="nav-icon">⚙️</span> Status
+    </div>
+  </div>
+
+</div>
+
+<div id="main">
+  <div class="topbar" id="topbar-label">
+    <span>Log</span>
+    <span class="topbar-sub" id="topbar-sub"></span>
+  </div>
+
+  <!-- Chats view -->
+  <div class="view sel" id="view-chats">
+    <div id="v-chats"><div id="no-cards">No active chats yet</div></div>
+  </div>
+
+  <!-- Log view -->
+  <div class="view" id="view-log">
+    <div id="v-log"></div>
+  </div>
+
+  <!-- Status view -->
+  <div class="view" id="view-status">
+    <div id="v-status">
+      <div class="stat-block" id="stat-block"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  function esc(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  // ── Nav switching ──
+  let currentView = 'chats';
+  const VIEW_LABELS = { chats: 'Chats', log: 'Log', status: 'Status' };
+
+  function selectView(name) {
+    currentView = name;
+    document.querySelectorAll('.nav-item').forEach(el => {
+      el.classList.toggle('sel', el.dataset.view === name);
+    });
+    document.querySelectorAll('.view').forEach(el => {
+      el.classList.toggle('sel', el.id === 'view-' + name);
+    });
+    document.getElementById('topbar-label').firstElementChild.textContent = VIEW_LABELS[name] || name;
+    document.getElementById('topbar-sub').textContent = '';
+  }
+
+  document.querySelectorAll('.nav-item').forEach(el => {
+    el.addEventListener('click', () => selectView(el.dataset.view));
+  });
+
+  // ── Live log ──
+  const logEl = document.getElementById('v-log');
+  let pin = true;
+  document.getElementById('view-log').addEventListener('scroll', e => {
+    pin = e.target.scrollTop + e.target.clientHeight >= e.target.scrollHeight - 40;
+  });
+
+  function addLine(ts, text) {
+    const row = document.createElement('div');
+    row.className = 'log-row';
+    row.innerHTML = `<span class="ts">${esc(ts)}</span><span class="txt">${esc(text)}</span>`;
+    logEl.appendChild(row);
+    const logView = document.getElementById('view-log');
+    if (pin) logView.scrollTop = logView.scrollHeight;
+  }
+
+  const es = new EventSource('/stream');
+  es.onmessage = e => {
+    const d = JSON.parse(e.data);
+    if (!d.ping) addLine(d.ts, d.text);
+  };
+
+  // ── Status polling ──
+  async function tick() {
+    try {
+      const r = await fetch('/status');
+      const d = await r.json();
+
+      document.getElementById('gmodel').textContent = d.model;
+
+      // Chats view — cards
+      const chatsEl = document.getElementById('v-chats');
+      if (!d.sessions.length) {
+        chatsEl.innerHTML = '<div id="no-cards">No active chats yet</div>';
+      } else {
+        chatsEl.innerHTML = d.sessions.map(s => `
+          <div class="chat-card${s.active ? ' busy' : ''}">
+            <div class="cc-name">
+              ${s.active ? '<span class="pulse"></span>' : ''}
+              ${esc(s.label)}
+            </div>
+            <div class="cc-row"><span class="cc-key">model</span><span class="cc-val" title="${esc(s.model)}">${esc(s.model)}</span></div>
+            <div class="cc-row"><span class="cc-key">cwd</span><span class="cc-val" title="${esc(s.cwd)}">${esc(s.cwd)}</span></div>
+            <div class="cc-row"><span class="cc-key">msgs</span><span class="cc-val">${s.msgs}</span></div>
+            ${s.last_reply ? `<div class="cc-preview">${esc(s.last_reply)}</div>` : ''}
+          </div>`).join('');
+      }
+
+      // Status view
+      document.getElementById('stat-block').innerHTML = [
+        ['Model',    d.model],
+        ['Default cwd', d.cwd],
+        ['Sessions', d.sessions.length],
+        ['Active',   d.sessions.filter(s => s.active).map(s => s.label).join(', ') || '—'],
+      ].map(([k, v]) => `
+        <div class="stat-row">
+          <span class="stat-key">${k}</span>
+          <span class="stat-val" title="${esc(String(v))}">${esc(String(v))}</span>
+        </div>`).join('');
+
+    } catch {}
+  }
+  tick();
+  setInterval(tick, 2000);
+</script>
+</body>
+</html>"""
+
+
+@app.route("/")
+def _web_index():
+    return _WEB_HTML, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
+@app.route("/stream")
+def _web_stream():
+    q = queue.Queue(maxsize=500)
+    with _sse_lock:
+        _sse_subscribers.append(q)
+
+    @stream_with_context
+    def generate():
+        with _tui_lock:
+            history = list(_log_entries)
+        for ts, text in history:
+            yield f"data: {json.dumps({'ts': ts, 'text': text})}\n\n"
         try:
-            term_width = os.get_terminal_size().columns
-        except OSError:
-            term_width = 80
-        card_width = 40  # approximate min card width
-        cols = max(1, term_width // card_width)
-        rows = math.ceil(len(cards) / cols)
-        card_height = 6  # 4 content lines + 2 border lines
-        size = 3 + rows * card_height
-    else:
-        content = header + "   [bold]sessions:[/] [dim]none[/]"
-        size = 3
-    return Panel(content, title=f"[bold green]CTA[/]  {header}"), size
+            while True:
+                try:
+                    event = q.get(timeout=25)
+                    yield f"data: {json.dumps(event)}\n\n"
+                except queue.Empty:
+                    yield 'data: {"ping":true}\n\n'
+        finally:
+            with _sse_lock:
+                if q in _sse_subscribers:
+                    _sse_subscribers.remove(q)
+
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-def _log_panel() -> Panel:
-    table = Table(box=None, show_header=False, padding=(0, 1), expand=True)
-    table.add_column("time", style="dim", width=8, no_wrap=True)
-    table.add_column("text")
-    with _tui_lock:
-        entries = list(_log_entries)
-    for ts, text in entries:
-        table.add_row(ts, text)
-    return Panel(table, title="[bold]Log[/]")
-
-
-def _build_layout() -> Layout:
-    panel, size = _status_panel()
-    layout = Layout()
-    layout.split_column(Layout(name="status", size=size), Layout(name="log"))
-    layout["status"].update(panel)
-    layout["log"].update(_log_panel())
-    return layout
+@app.route("/status")
+def _web_status():
+    all_keys = set(user_sessions) | set(msg_counts)
+    sessions = []
+    for key in sorted(all_keys):
+        uid, chat_id = key
+        sessions.append({
+            "label": chat_labels.get(key, f"{uid}:{chat_id}"),
+            "model": user_model.get(key, MODEL),
+            "cwd": user_cwd.get(key, DEFAULT_CWD).replace(os.path.expanduser("~"), "~", 1),
+            "msgs": msg_counts.get(key, 0),
+            "active": key == claude_busy_key,
+            "last_reply": last_reply.get(key, ""),
+        })
+    return {"model": MODEL, "cwd": DEFAULT_CWD, "sessions": sessions}
 
 
 # ── Claude CLI ────────────────────────────────────────────────────────────────
@@ -411,6 +659,7 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
         user_sessions[key] = new_session_id
         save_sessions()
     msg_counts[key] = msg_counts.get(key, 0) + 1
+    last_reply[key] = reply[:300]
     preview = reply[:120].replace("\n", " ")
     tui_log(f"[blue]←[/] [bold]{escape(username)}[/] {escape(preview)}{'…' if len(reply) > 120 else ''}")
     for chunk in _split_reply(reply):
@@ -451,6 +700,7 @@ def _process_cron(uid: int, chat_id: int, task: dict, done: threading.Event):
         user_sessions[key] = new_session_id
         save_sessions()
     msg_counts[key] = msg_counts.get(key, 0) + 1
+    last_reply[key] = reply[:300]
     preview = reply[:120].replace("\n", " ")
     tui_log(f"[magenta]←[/] [bold]cron:{job_id}[/] {escape(preview)}{'…' if len(reply) > 120 else ''}")
     for chunk in _split_reply(reply):
@@ -632,7 +882,7 @@ def create_bot():
     global bot
     telebot_log = logging.getLogger("TeleBot")
     telebot_log.addFilter(_Suppress409())
-    telebot_log.addHandler(_TuiLogHandler())
+    telebot_log.addHandler(_LogHandler())
     telebot_log.propagate = False
     bot = telebot.TeleBot(BOT_TOKEN, num_threads=8)
     bot.message_handler(commands=["start"])(cmd_start)
@@ -670,8 +920,5 @@ if __name__ == "__main__":
 
     threading.Thread(target=bot.infinity_polling, daemon=True).start()
     threading.Thread(target=_cron_scheduler, daemon=True).start()
-    with Live(auto_refresh=False, screen=True) as live:
-        while True:
-            live.update(_build_layout())
-            live.refresh()
-            time.sleep(0.25)
+    tui_log(f"[dim]Web UI → http://localhost:{WEB_PORT}/[/]")
+    app.run(host="0.0.0.0", port=WEB_PORT, threaded=True, debug=False, use_reloader=False)
