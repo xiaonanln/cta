@@ -450,22 +450,13 @@ _WEB_HTML = """<!DOCTYPE html>
   };
 
   // ── Preamble ──
-  let _focusedPreamble = null; // {uid, chat_id, selStart, selEnd}
+  // Track user edits locally so tick() rebuilds don't overwrite in-progress typing
+  const localPreambles = new Map(); // "uid:chat_id" -> current textarea value
 
-  function restoreFocus() {
-    if (!_focusedPreamble) return;
-    const {uid, chat_id, selStart, selEnd} = _focusedPreamble;
-    const ta = document.querySelector(`.cc-preamble[data-uid="${uid}"][data-chat="${chat_id}"]`);
-    if (ta) { ta.focus(); ta.setSelectionRange(selStart, selEnd); }
-    _focusedPreamble = null;
-  }
-
-  document.addEventListener('focusin', e => {
+  document.addEventListener('input', e => {
     if (e.target.classList.contains('cc-preamble')) {
-      _focusedPreamble = {
-        uid: e.target.dataset.uid, chat_id: e.target.dataset.chat,
-        selStart: e.target.selectionStart, selEnd: e.target.selectionEnd,
-      };
+      const key = `${e.target.dataset.uid}:${e.target.dataset.chat}`;
+      localPreambles.set(key, e.target.value);
     }
   });
 
@@ -474,11 +465,13 @@ _WEB_HTML = """<!DOCTYPE html>
     const ta = card.querySelector('.cc-preamble');
     const saved = card.querySelector('.cc-saved');
     const uid = ta.dataset.uid, chat_id = ta.dataset.chat;
+    const key = `${uid}:${chat_id}`;
     await fetch(`/preamble/${uid}/${chat_id}`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({preamble: ta.value}),
     });
+    localPreambles.delete(key); // synced with server, no longer need local copy
     saved.style.opacity = 1;
     setTimeout(() => saved.style.opacity = 0, 1500);
   }
@@ -496,7 +489,10 @@ _WEB_HTML = """<!DOCTYPE html>
       if (!d.sessions.length) {
         chatsEl.innerHTML = '<div id="no-cards">No active chats yet</div>';
       } else {
-        chatsEl.innerHTML = d.sessions.map(s => `
+        chatsEl.innerHTML = d.sessions.map(s => {
+          const key = `${s.uid}:${s.chat_id}`;
+          const preambleVal = localPreambles.has(key) ? localPreambles.get(key) : s.preamble;
+          return `
           <div class="chat-card${s.active ? ' busy' : ''}">
             <div class="cc-name">
               ${s.active ? '<span class="pulse"></span>' : ''}
@@ -507,14 +503,13 @@ _WEB_HTML = """<!DOCTYPE html>
             <div class="cc-row"><span class="cc-key">msgs</span><span class="cc-val">${s.msgs}</span></div>
             ${s.last_reply ? `<div class="cc-preview">${esc(s.last_reply)}</div>` : ''}
             <div class="cc-preamble-label">Custom preamble</div>
-            <textarea class="cc-preamble" data-uid="${s.uid}" data-chat="${s.chat_id}">${esc(s.preamble)}</textarea>
+            <textarea class="cc-preamble" data-uid="${s.uid}" data-chat="${s.chat_id}">${esc(preambleVal)}</textarea>
             <div>
               <button class="cc-save" onclick="savePreamble(this)">Save</button>
               <span class="cc-saved">Saved ✓</span>
             </div>
-          </div>`).join('');
-        // restore focus if textarea was being edited
-        restoreFocus();
+          </div>`;
+        }).join('');
       }
 
       // Status view
