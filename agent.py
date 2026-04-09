@@ -1426,7 +1426,8 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
     custom_preamble = _read_preamble(uid, chat_id)
     memory_prefix = (
         f"[Agent chat:{uid}:{chat_id} | memory:{memory_path} | crons:{crons_path} | preamble:{_preamble_path(uid, chat_id)}]\n"
-        f"Always reply after tool use.\n\n"
+        f"Always reply after tool use.\n"
+        f"Do NOT use built-in CronCreate, CronList, CronDelete tools. Manage crons by reading/writing the crons JSON file at {crons_path} directly.\n\n"
         + (f"{custom_preamble}\n\n" if custom_preamble else "")
     )
 
@@ -1501,7 +1502,8 @@ def _process_cron(uid: int, chat_id: int, task: dict, done: threading.Event):
     custom_preamble = _read_preamble(uid, chat_id)
     preamble = (
         f"[Agent chat:{uid}:{chat_id} | memory:{memory_path} | crons:{crons_path} | preamble:{_preamble_path(uid, chat_id)}]\n"
-        f"Always reply after tool use.\n\n"
+        f"Always reply after tool use.\n"
+        f"Do NOT use built-in CronCreate, CronList, CronDelete tools. Manage crons by reading/writing the crons JSON file at {crons_path} directly.\n\n"
         + (f"{custom_preamble}\n\n" if custom_preamble else "")
     )
     prompt = preamble + f"[Scheduled task {job_id}]\n{task['prompt']}"
