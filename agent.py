@@ -664,6 +664,7 @@ _WEB_HTML = """<!DOCTYPE html>
 
   // ── Nav switching ──
   let currentView = 'chats';
+  let chatUid = null, chatChatId = null, chatES = null;
   const VIEW_LABELS = { chats: 'Chats', crons: 'Cronjobs', log: 'Log', status: 'Status', config: 'Config' };
 
   function viewFromHash() {
@@ -946,8 +947,6 @@ _WEB_HTML = """<!DOCTYPE html>
 
 
   // ── Inline chat ──
-  let chatUid = null, chatChatId = null, chatES = null;
-
   function openChat(uid, chatId, label) {
     // Clean up previous chat SSE
     if (chatES) { chatES.close(); chatES = null; }
