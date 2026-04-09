@@ -407,8 +407,7 @@ _WEB_HTML = """<!DOCTYPE html>
                       vertical-align: top; }
     .crons-table tr:hover td { background: var(--bg2); }
     .crons-table tr.example td { color: var(--fg3); font-style: italic; }
-    .cron-prompt { color: var(--preview); max-width: 320px;
-                   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .cron-prompt { color: var(--preview); white-space: pre-wrap; word-break: break-word; }
     .cron-chat { color: var(--accent); white-space: nowrap; }
     .cron-id { color: var(--fg); white-space: nowrap; }
     .cron-sched { font-family: monospace; color: var(--green); white-space: nowrap; }
@@ -774,7 +773,7 @@ _WEB_HTML = """<!DOCTYPE html>
                 <td class="cron-id">${esc(j.id)}</td>
                 <td class="cron-sched">${esc(j.schedule)}</td>
                 <td class="cron-next">${esc(j.next_run.replace('T',' ').slice(0,16))}</td>
-                <td class="cron-prompt" title="${esc(j.prompt)}">${esc(j.prompt)}</td>
+                <td class="cron-prompt">${esc(j.prompt)}</td>
                 <td><button class="cron-del" onclick="delCron(${j.uid},${j.chat_id},'${esc(j.id)}')">✕</button></td>
               </tr>`).join('')}
             </tbody></table>`;
