@@ -267,6 +267,14 @@ app = Flask(__name__)
 app.logger.disabled = True
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
+# Flask's built-in <int:> only matches non-negative integers; Telegram group chat_ids are negative
+from werkzeug.routing import BaseConverter
+class _SignedInt(BaseConverter):
+    regex = r"-?\d+"
+    def to_python(self, value): return int(value)
+    def to_url(self, value): return str(value)
+app.url_map.converters["sint"] = _SignedInt
+
 
 def _strip_rich(text: str) -> str:
     """Strip Rich markup tags for plain-text display."""
@@ -1237,12 +1245,12 @@ def _web_set_config():
     return {"ok": True}
 
 
-@app.route("/preamble/<int:uid>/<int:chat_id>", methods=["GET"])
+@app.route("/preamble/<sint:uid>/<sint:chat_id>", methods=["GET"])
 def _web_get_preamble(uid, chat_id):
     return {"preamble": _read_preamble(uid, chat_id)}
 
 
-@app.route("/preamble/<int:uid>/<int:chat_id>", methods=["POST"])
+@app.route("/preamble/<sint:uid>/<sint:chat_id>", methods=["POST"])
 def _web_set_preamble(uid, chat_id):
     from flask import request
     text = (request.get_json(silent=True) or {}).get("preamble", "").strip()
@@ -1325,7 +1333,7 @@ def _web_create_cronjob():
     return {"ok": True, "next_run": next_run}
 
 
-@app.route("/cronjobs/<int:uid>/<int:chat_id>/<job_id>", methods=["DELETE"])
+@app.route("/cronjobs/<sint:uid>/<sint:chat_id>/<job_id>", methods=["DELETE"])
 def _web_delete_cronjob(uid, chat_id, job_id):
     jobs = _load_cron_jobs(uid, chat_id)
     new_jobs = [j for j in jobs if j.get("id") != job_id]
@@ -1336,7 +1344,7 @@ def _web_delete_cronjob(uid, chat_id, job_id):
     return {"ok": True}
 
 
-@app.route("/cronjobs/<int:uid>/<int:chat_id>/<job_id>", methods=["PUT"])
+@app.route("/cronjobs/<sint:uid>/<sint:chat_id>/<job_id>", methods=["PUT"])
 def _web_update_cronjob(uid, chat_id, job_id):
     from flask import request
     data = request.get_json(silent=True) or {}
@@ -1532,7 +1540,7 @@ _WEB_CHAT_HTML = """<!DOCTYPE html>
 </html>"""
 
 
-@app.route("/chat/<int:uid>/<int:chat_id>")
+@app.route("/chat/<sint:uid>/<sint:chat_id>")
 def _web_chat_page(uid, chat_id):
     key = (uid, chat_id)
     label = chat_labels.get(key, f"{uid}:{chat_id}")
@@ -1543,12 +1551,12 @@ def _web_chat_page(uid, chat_id):
     return html, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
-@app.route("/chat/<int:uid>/<int:chat_id>/history")
+@app.route("/chat/<sint:uid>/<sint:chat_id>/history")
 def _web_chat_history(uid, chat_id):
     return {"messages": chat_history.get((uid, chat_id), [])}
 
 
-@app.route("/chat/<int:uid>/<int:chat_id>/stream")
+@app.route("/chat/<sint:uid>/<sint:chat_id>/stream")
 def _web_chat_stream(uid, chat_id):
     key = (uid, chat_id)
     q = queue.Queue(maxsize=200)
@@ -1574,7 +1582,7 @@ def _web_chat_stream(uid, chat_id):
                         "Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
 
-@app.route("/chat/<int:uid>/<int:chat_id>/send", methods=["POST"])
+@app.route("/chat/<sint:uid>/<sint:chat_id>/send", methods=["POST"])
 def _web_chat_send(uid, chat_id):
     from flask import request
     data = request.get_json(silent=True) or {}
