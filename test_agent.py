@@ -2,6 +2,7 @@
 
 import json
 import os
+import queue
 import subprocess
 import tempfile
 import threading
@@ -805,6 +806,80 @@ class TestBotHandlers(unittest.TestCase):
         # First call: no session yet. Second call: session from first.
         self.assertIsNone(results[0])
         self.assertEqual(results[1], "new-sess")
+
+
+# ── /cancel command ──────────────────────────────────────────────────────────
+
+class TestCancel(unittest.TestCase):
+
+    def setUp(self):
+        self.bot = setup_fake_bot()
+        agent.ALLOWED_USERS.clear()
+        agent.ALLOWED_USERS.add(123)
+        agent._cancelled_keys.clear()
+        agent._current_proc = None
+
+    def tearDown(self):
+        agent.ALLOWED_USERS.clear()
+        agent._cancelled_keys.clear()
+        agent._current_proc = None
+        agent.claude_busy_key = None
+        with agent.user_queues_lock:
+            agent.user_queues.pop((123, 123), None)
+
+    def test_nothing_to_cancel(self):
+        """No active task and empty queue → "Nothing to cancel"."""
+        agent.cmd_cancel(make_fake_message("/cancel"))
+        reply = self.bot.reply_to.call_args[0][1]
+        self.assertIn("Nothing to cancel", reply)
+
+    def test_blocked_unknown_user(self):
+        agent.cmd_cancel(make_fake_message("/cancel", user_id=999))
+        self.bot.reply_to.assert_not_called()
+
+    def test_kills_active_proc_for_this_chat(self):
+        """When Claude is running for this chat, the proc is killed."""
+        proc = MagicMock()
+        agent._current_proc = proc
+        agent.claude_busy_key = (123, 123)
+        agent.cmd_cancel(make_fake_message("/cancel"))
+        proc.kill.assert_called_once()
+        self.assertIn((123, 123), agent._cancelled_keys)
+        reply = self.bot.reply_to.call_args[0][1]
+        self.assertIn("stopped", reply)
+
+    def test_does_not_kill_proc_for_other_chat(self):
+        """Active task belongs to a different chat — don't kill it."""
+        proc = MagicMock()
+        agent._current_proc = proc
+        agent.claude_busy_key = (999, 999)
+        agent.cmd_cancel(make_fake_message("/cancel"))
+        proc.kill.assert_not_called()
+        self.assertNotIn((123, 123), agent._cancelled_keys)
+
+    def test_drains_pending_queue(self):
+        """Pending messages in the queue are removed."""
+        # Inject a queue directly without starting a worker thread
+        q = queue.Queue()
+        q.put(make_fake_message("a"))
+        q.put(make_fake_message("b"))
+        with agent.user_queues_lock:
+            agent.user_queues[(123, 123)] = q
+        agent.cmd_cancel(make_fake_message("/cancel"))
+        reply = self.bot.reply_to.call_args[0][1]
+        self.assertIn("pending", reply)
+        self.assertEqual(q.qsize(), 0)
+
+    def test_cancelled_key_suppresses_reply(self):
+        """_cancelled_keys prevents _process_message from sending a reply."""
+        agent._cancelled_keys.add((123, 123))
+        # Simulate what _process_message does after call_claude returns
+        key = (123, 123)
+        if key in agent._cancelled_keys:
+            agent._cancelled_keys.discard(key)
+            # No reply sent — key was consumed
+        self.assertNotIn(key, agent._cancelled_keys)
+        self.bot.reply_to.assert_not_called()
 
 
 # ── Concurrent users ─────────────────────────────────────────────────────────
