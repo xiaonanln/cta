@@ -1175,6 +1175,191 @@ class TestCronScheduler(unittest.TestCase):
         self.assertIn(".json", prompt)
 
 
+# ── Web API ──────────────────────────────────────────────────────────────────
+
+class TestWebAPI(unittest.TestCase):
+    """Tests for Flask web dashboard API endpoints."""
+
+    def setUp(self):
+        self.bot = setup_fake_bot()
+        agent.ALLOWED_USERS.clear()
+        agent.ALLOWED_USERS.add(123)
+        self._orig_crons_dir = agent.CRONS_DIR
+        self._orig_sessions_path = agent.SESSIONS_PATH
+        self._tmp_crons = tempfile.mkdtemp()
+        self._tmp_sessions = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+        self._tmp_sessions.close()
+        agent.CRONS_DIR = self._tmp_crons
+        agent.SESSIONS_PATH = self._tmp_sessions.name
+        self.client = agent.app.test_client()
+
+    def tearDown(self):
+        import shutil
+        agent.CRONS_DIR = self._orig_crons_dir
+        agent.SESSIONS_PATH = self._orig_sessions_path
+        shutil.rmtree(self._tmp_crons, ignore_errors=True)
+        for p in [self._tmp_sessions.name, self._tmp_sessions.name + ".tmp"]:
+            if os.path.exists(p):
+                os.unlink(p)
+
+    def _write_cron_file(self, uid, chat_id, jobs):
+        path = os.path.join(self._tmp_crons, f"{uid}:{chat_id}.json")
+        with open(path, "w") as f:
+            json.dump(jobs, f)
+
+    def _write_sessions(self, data):
+        with open(self._tmp_sessions.name, "w") as f:
+            json.dump(data, f)
+
+    # ── GET /status ──
+
+    def test_status_returns_sessions(self):
+        agent.msg_counts[(123, 456)] = 5
+        r = self.client.get("/status")
+        self.assertEqual(r.status_code, 200)
+        d = r.get_json()
+        self.assertIn("sessions", d)
+        self.assertIn("model", d)
+
+    # ── GET /cronjobs ──
+
+    def test_cronjobs_empty(self):
+        r = self.client.get("/cronjobs")
+        d = r.get_json()
+        self.assertEqual(d["jobs"], [])
+
+    def test_cronjobs_lists_jobs(self):
+        self._write_cron_file(123, 456, [
+            {"id": "test1", "schedule": "0 9 * * *", "prompt": "hello", "next_run": "2026-04-10T09:00:00"},
+        ])
+        r = self.client.get("/cronjobs")
+        d = r.get_json()
+        self.assertEqual(len(d["jobs"]), 1)
+        self.assertEqual(d["jobs"][0]["id"], "test1")
+        self.assertEqual(d["jobs"][0]["schedule"], "0 9 * * *")
+
+    def test_cronjobs_skips_example_with_far_future_next_run(self):
+        self._write_cron_file(123, 456, [
+            {"id": "example", "schedule": "0 9 * * *", "prompt": "hi", "next_run": "2099-01-01T09:00:00"},
+        ])
+        r = self.client.get("/cronjobs")
+        d = r.get_json()
+        self.assertEqual(d["jobs"], [])
+
+    # ── POST /cronjobs ──
+
+    def test_create_cronjob(self):
+        r = self.client.post("/cronjobs", json={
+            "uid": 123, "chat_id": 456, "id": "morning",
+            "schedule": "0 9 * * *", "prompt": "good morning",
+        })
+        self.assertEqual(r.status_code, 200)
+        d = r.get_json()
+        self.assertTrue(d["ok"])
+        self.assertIn("next_run", d)
+        # Verify persisted
+        jobs = agent._load_cron_jobs(123, 456)
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["id"], "morning")
+
+    def test_create_cronjob_removes_example(self):
+        self._write_cron_file(123, 456, [
+            {"id": "example", "schedule": "0 9 * * *", "prompt": "hi", "next_run": "2099-01-01T09:00:00"},
+        ])
+        r = self.client.post("/cronjobs", json={
+            "uid": 123, "chat_id": 456, "id": "real",
+            "schedule": "30 8 * * *", "prompt": "wake up",
+        })
+        self.assertEqual(r.status_code, 200)
+        jobs = agent._load_cron_jobs(123, 456)
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["id"], "real")
+
+    def test_create_cronjob_missing_fields(self):
+        r = self.client.post("/cronjobs", json={"uid": 123})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("error", r.get_json())
+
+    def test_create_cronjob_invalid_schedule(self):
+        r = self.client.post("/cronjobs", json={
+            "uid": 123, "chat_id": 456, "id": "bad",
+            "schedule": "not-a-cron", "prompt": "test",
+        })
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("Invalid cron", r.get_json()["error"])
+
+    def test_create_cronjob_duplicate_id(self):
+        self._write_cron_file(123, 456, [
+            {"id": "dup", "schedule": "0 9 * * *", "prompt": "a", "next_run": "2026-04-10T09:00:00"},
+        ])
+        r = self.client.post("/cronjobs", json={
+            "uid": 123, "chat_id": 456, "id": "dup",
+            "schedule": "0 10 * * *", "prompt": "b",
+        })
+        self.assertEqual(r.status_code, 409)
+
+    def test_create_cronjob_invalid_uid(self):
+        r = self.client.post("/cronjobs", json={
+            "uid": "abc", "chat_id": 456, "id": "x",
+            "schedule": "0 9 * * *", "prompt": "test",
+        })
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("Invalid uid", r.get_json()["error"])
+
+    # ── DELETE /cronjobs ──
+
+    def test_delete_cronjob(self):
+        self._write_cron_file(123, 456, [
+            {"id": "del-me", "schedule": "0 9 * * *", "prompt": "x", "next_run": "2026-04-10T09:00:00"},
+            {"id": "keep", "schedule": "0 10 * * *", "prompt": "y", "next_run": "2026-04-10T10:00:00"},
+        ])
+        r = self.client.delete("/cronjobs/123/456/del-me")
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.get_json()["ok"])
+        jobs = agent._load_cron_jobs(123, 456)
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["id"], "keep")
+
+    def test_delete_cronjob_not_found(self):
+        self._write_cron_file(123, 456, [])
+        r = self.client.delete("/cronjobs/123/456/nonexistent")
+        self.assertEqual(r.status_code, 404)
+
+    # ── GET /chats ──
+
+    def test_chats_empty(self):
+        r = self.client.get("/chats")
+        d = r.get_json()
+        self.assertEqual(d["chats"], [])
+
+    def test_chats_returns_sessions(self):
+        self._write_sessions({
+            "123:456": {"session": "s1", "cwd": "/tmp/project"},
+            "123:789": {"cwd": "/tmp/other"},
+        })
+        r = self.client.get("/chats")
+        d = r.get_json()
+        self.assertEqual(len(d["chats"]), 2)
+        uids = {c["uid"] for c in d["chats"]}
+        self.assertEqual(uids, {123})
+        cwds = {c["cwd"] for c in d["chats"]}
+        self.assertIn("/tmp/project", cwds)
+
+    def test_chats_uses_labels(self):
+        self._write_sessions({"123:456": {"cwd": "/tmp"}})
+        agent.chat_labels[(123, 456)] = "DM:tester"
+        r = self.client.get("/chats")
+        d = r.get_json()
+        self.assertEqual(d["chats"][0]["label"], "DM:tester")
+
+    # ── GET / ──
+
+    def test_index_returns_html(self):
+        r = self.client.get("/")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn(b"<!DOCTYPE html>", r.data)
+
+
 # ── Real Claude integration ───────────────────────────────────────────────────
 
 class TestRealClaude(unittest.TestCase):

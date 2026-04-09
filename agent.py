@@ -85,6 +85,9 @@ claude_busy_for = None  # username of user currently calling Claude
 claude_busy_key = None  # (uid, chat_id) of active session
 _current_proc: subprocess.Popen = None  # running Claude subprocess (killable)
 _cancelled_keys: set = set()           # keys that had /cancel; suppresses reply
+chat_history: dict[tuple[int, int], list] = {}  # (uid, chat_id) → [{role,text,ts}]
+_chat_sse: dict[tuple[int, int], list] = {}     # (uid, chat_id) → [Queue]
+_chat_sse_lock = threading.Lock()
 
 
 def init(config: dict):
@@ -387,6 +390,10 @@ _WEB_HTML = """<!DOCTYPE html>
     .cc-save:hover { background: var(--border); }
     .cc-saved { color: var(--green); font-size: .7rem; margin-left: .4rem;
                 opacity: 0; transition: opacity .3s; }
+    .cc-open { margin-top: .35rem; padding: .3rem .7rem;
+               background: none; border: 1px solid var(--accent); border-radius: 4px;
+               color: var(--accent); font-size: .72rem; cursor: pointer; }
+    .cc-open:hover { background: var(--accent); color: var(--bg); }
     #no-cards { padding: 1rem; font-size: .82rem; color: var(--fg3); }
 
     /* crons view */
@@ -431,6 +438,40 @@ _WEB_HTML = """<!DOCTYPE html>
     .cron-form-msg { font-size: .72rem; margin-left: .4rem; }
     .cron-form-msg.ok { color: var(--green); }
     .cron-form-msg.err { color: #e64553; }
+
+    /* chat view (embedded) */
+    #view-chat { flex-direction: column; }
+    #chat-messages { flex: 1; overflow-y: auto; padding: 1rem; display: flex;
+                     flex-direction: column; gap: .6rem; }
+    .cmsg { max-width: 75%; padding: .55rem .8rem; border-radius: 12px; line-height: 1.45;
+            white-space: pre-wrap; word-break: break-word; }
+    .cmsg.user { align-self: flex-end; background: var(--accent); color: #fff;
+                 border-bottom-right-radius: 3px; }
+    .cmsg.assistant { align-self: flex-start; background: var(--bg2); color: var(--fg);
+                      border-bottom-left-radius: 3px; }
+    .cmsg.cron { align-self: flex-start; background: var(--bg3); color: var(--fg2);
+                 border-bottom-left-radius: 3px; font-size: .78rem; }
+    .cmsg-meta { font-size: .68rem; color: var(--fg3); margin-top: .2rem; }
+    .cmsg.user .cmsg-meta { text-align: right; }
+    #chat-inputbar { padding: .65rem 1rem; background: var(--bg2);
+                     border-top: 1px solid var(--border);
+                     display: flex; gap: .5rem; flex-shrink: 0; }
+    #chat-inp { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+                padding: .45rem .75rem; color: var(--fg); font-size: .85rem; font-family: inherit;
+                resize: none; min-height: 38px; max-height: 150px; outline: none; }
+    #chat-inp:focus { border-color: var(--accent); }
+    #chat-send { background: var(--accent); color: #fff; border: none; border-radius: 8px;
+                 padding: .45rem .9rem; cursor: pointer; font-size: .85rem; font-weight: 600; }
+    #chat-send:hover { opacity: .85; }
+    #chat-send:disabled { opacity: .4; cursor: default; }
+    #chat-typing { align-self: flex-start; padding: .45rem .8rem; display: none; }
+    #chat-typing.show { display: flex; }
+    .typing-dots { display: flex; gap: 4px; align-items: center; }
+    .typing-dots span { width: 7px; height: 7px; border-radius: 50%; background: var(--fg3);
+                        animation: typebounce .9s ease-in-out infinite; }
+    .typing-dots span:nth-child(2) { animation-delay: .15s; }
+    .typing-dots span:nth-child(3) { animation-delay: .3s; }
+    @keyframes typebounce { 0%,60%,100%{transform:translateY(0)} 30%{transform:translateY(-5px)} }
 
     /* status view */
     #v-status { padding: 1.25rem; align-content: flex-start; }
@@ -511,6 +552,17 @@ _WEB_HTML = """<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- Chat view (inline) -->
+  <div class="view" id="view-chat">
+    <div id="chat-messages">
+      <div id="chat-typing"><div class="typing-dots"><span></span><span></span><span></span></div></div>
+    </div>
+    <div id="chat-inputbar">
+      <textarea id="chat-inp" rows="3" placeholder="Message… (Ctrl+Enter to send)"></textarea>
+      <button id="chat-send" onclick="chatSend()">Send</button>
+    </div>
+  </div>
+
   <!-- Log view -->
   <div class="view" id="view-log">
     <div id="v-log"></div>
@@ -535,6 +587,8 @@ _WEB_HTML = """<!DOCTYPE html>
 
   function selectView(name) {
     currentView = name;
+    // Close chat SSE when navigating away
+    if (name !== 'chat' && chatES) { chatES.close(); chatES = null; }
     document.querySelectorAll('.nav-item').forEach(el => {
       el.classList.toggle('sel', el.dataset.view === name);
     });
@@ -626,9 +680,10 @@ _WEB_HTML = """<!DOCTYPE html>
             ${s.last_reply ? `<div class="cc-preview">${esc(s.last_reply)}</div>` : ''}
             <div class="cc-preamble-label">Custom preamble</div>
             <textarea class="cc-preamble" data-uid="${s.uid}" data-chat="${s.chat_id}">${esc(preambleVal)}</textarea>
-            <div>
-              <button class="cc-save" onclick="savePreamble(this)">Save</button>
+            <div style="display:flex;gap:.4rem;align-items:center">
+              <button class="cc-save" onclick="savePreamble(this)">Save preamble</button>
               <span class="cc-saved">Saved ✓</span>
+              <button class="cc-open" onclick="openChat(${s.uid},${s.chat_id},'${esc(s.label).replace(/'/g,"\\'")}')">Open chat</button>
             </div>
           </div>`;
         }).join('');
@@ -673,6 +728,14 @@ _WEB_HTML = """<!DOCTYPE html>
           <span class="stat-key">${k}</span>
           <span class="stat-val" title="${esc(String(v))}">${esc(String(v))}</span>
         </div>`).join('');
+
+      // Chat typing indicator
+      if (currentView === 'chat' && chatUid !== null) {
+        const isActive = d.sessions.some(s => s.uid === chatUid && s.chat_id === chatChatId && s.active);
+        const el = document.getElementById('chat-typing');
+        el.classList.toggle('show', isActive);
+        if (isActive) el.scrollIntoView({behavior: 'smooth'});
+      }
 
     } catch {}
   }
@@ -735,6 +798,79 @@ _WEB_HTML = """<!DOCTYPE html>
     el.className = 'cron-form-msg ' + (isErr ? 'err' : 'ok');
     setTimeout(() => { el.textContent = ''; }, 3000);
   }
+
+  // ── Inline chat ──
+  let chatUid = null, chatChatId = null, chatES = null;
+
+  function openChat(uid, chatId, label) {
+    // Clean up previous chat SSE
+    if (chatES) { chatES.close(); chatES = null; }
+    chatUid = uid; chatChatId = chatId;
+
+    // Update topbar and switch view
+    document.getElementById('topbar-label').firstElementChild.textContent = label;
+    document.getElementById('topbar-sub').textContent = '';
+    // Deselect nav items (chat isn't in the nav)
+    document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('sel'));
+    document.querySelectorAll('.view').forEach(el => el.classList.remove('sel'));
+    document.getElementById('view-chat').classList.add('sel');
+    currentView = 'chat';
+
+    // Load history + subscribe
+    const msgEl = document.getElementById('chat-messages');
+    const typing = document.getElementById('chat-typing');
+    // Clear all messages but keep typing indicator
+    while (msgEl.firstChild !== typing) msgEl.removeChild(msgEl.firstChild);
+    typing.classList.remove('show');
+    fetch(`/chat/${uid}/${chatId}/history`).then(r => r.json()).then(d => {
+      d.messages.forEach(m => chatAppend(m.role, m.text, m.ts, false));
+      msgEl.scrollTop = msgEl.scrollHeight;
+    }).catch(() => {});
+
+    chatES = new EventSource(`/chat/${uid}/${chatId}/stream`);
+    chatES.onmessage = e => {
+      const d = JSON.parse(e.data);
+      if (!d.ping) chatAppend(d.role, d.text, d.ts);
+    };
+
+    document.getElementById('chat-inp').focus();
+  }
+
+  function chatAppend(role, text, ts, scroll=true) {
+    const el = document.createElement('div');
+    el.className = 'cmsg ' + role;
+    const t = new Date(ts * 1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+    el.innerHTML = esc(text) + `<div class="cmsg-meta">${t}</div>`;
+    const c = document.getElementById('chat-messages');
+    const typing = document.getElementById('chat-typing');
+    c.insertBefore(el, typing);
+    if (scroll) el.scrollIntoView({behavior: 'smooth'});
+  }
+
+  async function chatSend() {
+    if (!chatUid) return;
+    const inp = document.getElementById('chat-inp');
+    const text = inp.value.trim();
+    if (!text) return;
+    inp.value = ''; inp.style.height = '';
+    document.getElementById('chat-send').disabled = true;
+    try {
+      await fetch(`/chat/${chatUid}/${chatChatId}/send`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text}),
+      });
+    } catch {}
+    document.getElementById('chat-send').disabled = false;
+    inp.focus();
+  }
+
+  document.getElementById('chat-inp').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); chatSend(); }
+  });
+  document.getElementById('chat-inp').addEventListener('input', function() {
+    this.style.height = 'auto';
+    this.style.height = Math.min(this.scrollHeight, 150) + 'px';
+  });
 
   // ── Theme toggle ──
   function toggleTheme() {
@@ -924,6 +1060,218 @@ def _web_chats():
     return {"chats": chats}
 
 
+# ── Web chat ──────────────────────────────────────────────────────────────────
+
+_WEB_CHAT_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Chat</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #eff1f5; --bg2: #e6e9ef; --bg3: #dce0e8;
+    --border: #bcc0cc; --fg: #4c4f69; --fg2: #6c6f85; --fg3: #8c8fa1;
+    --accent: #1e66f5; --user-bg: #1e66f5; --user-fg: #fff;
+    --bot-bg: #e6e9ef; --bot-fg: #4c4f69;
+  }
+  body.dark {
+    --bg: #1e1e2e; --bg2: #181825; --bg3: #313244;
+    --border: #313244; --fg: #cdd6f4; --fg2: #6c7086; --fg3: #45475a;
+    --accent: #89b4fa; --user-bg: #89b4fa; --user-fg: #1e1e2e;
+    --bot-bg: #313244; --bot-fg: #cdd6f4;
+  }
+  html, body { height: 100%; }
+  body { background: var(--bg); color: var(--fg); font-family: system-ui, sans-serif;
+         font-size: .85rem; display: flex; flex-direction: column; }
+  #topbar { padding: .55rem 1rem; background: var(--bg2); border-bottom: 1px solid var(--border);
+            display: flex; align-items: center; gap: .6rem; font-weight: 600; flex-shrink: 0; }
+  #topbar-name { flex: 1; }
+  #theme-btn { background: none; border: 1px solid var(--border); border-radius: 6px;
+               padding: .2rem .55rem; cursor: pointer; font-size: .85rem; color: var(--fg2); }
+  #messages { flex: 1; overflow-y: auto; padding: 1rem; display: flex; flex-direction: column; gap: .6rem; }
+  .msg { max-width: 75%; padding: .55rem .8rem; border-radius: 12px; line-height: 1.45;
+         white-space: pre-wrap; word-break: break-word; }
+  .msg.user { align-self: flex-end; background: var(--user-bg); color: var(--user-fg);
+              border-bottom-right-radius: 3px; }
+  .msg.assistant { align-self: flex-start; background: var(--bot-bg); color: var(--bot-fg);
+                   border-bottom-left-radius: 3px; }
+  .msg.cron { align-self: flex-start; background: var(--bg3); color: var(--fg2);
+              border-bottom-left-radius: 3px; font-size: .78rem; }
+  .msg-meta { font-size: .68rem; color: var(--fg3); margin-top: .2rem; }
+  .msg.user .msg-meta { text-align: right; }
+  #inputbar { padding: .65rem 1rem; background: var(--bg2); border-top: 1px solid var(--border);
+              display: flex; gap: .5rem; flex-shrink: 0; }
+  #inp { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+         padding: .45rem .75rem; color: var(--fg); font-size: .85rem; font-family: inherit;
+         resize: none; min-height: 38px; max-height: 150px; outline: none; }
+  #inp:focus { border-color: var(--accent); }
+  #send-btn { background: var(--accent); color: #fff; border: none; border-radius: 8px;
+              padding: .45rem .9rem; cursor: pointer; font-size: .85rem; font-weight: 600; }
+  #send-btn:hover { opacity: .85; }
+  #send-btn:disabled { opacity: .4; cursor: default; }
+</style>
+</head>
+<body class="light">
+<div id="topbar">
+  <span id="topbar-name">Chat</span>
+  <button id="theme-btn" onclick="toggleTheme()">&#9728;</button>
+</div>
+<div id="messages"></div>
+<div id="inputbar">
+  <textarea id="inp" rows="1" placeholder="Message…"></textarea>
+  <button id="send-btn" onclick="sendMsg()">Send</button>
+</div>
+<script>
+  const UID = %UID%;
+  const CHAT_ID = %CHAT_ID%;
+  const LABEL = %LABEL%;
+
+  document.title = LABEL;
+  document.getElementById('topbar-name').textContent = LABEL;
+
+  function esc(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function fmtTime(ts) {
+    return new Date(ts * 1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  }
+
+  function appendMsg(role, text, ts, scroll=true) {
+    const el = document.createElement('div');
+    el.className = 'msg ' + role;
+    el.innerHTML = esc(text) + `<div class="msg-meta">${fmtTime(ts)}</div>`;
+    document.getElementById('messages').appendChild(el);
+    if (scroll) el.scrollIntoView({behavior: 'smooth'});
+  }
+
+  // Load history then subscribe to SSE
+  async function init() {
+    try {
+      const r = await fetch(`/chat/${UID}/${CHAT_ID}/history`);
+      const d = await r.json();
+      d.messages.forEach(m => appendMsg(m.role, m.text, m.ts, false));
+      const msgs = document.getElementById('messages');
+      msgs.scrollTop = msgs.scrollHeight;
+    } catch {}
+
+    const es = new EventSource(`/chat/${UID}/${CHAT_ID}/stream`);
+    es.onmessage = e => {
+      const d = JSON.parse(e.data);
+      if (d.ping) return;
+      appendMsg(d.role, d.text, d.ts);
+    };
+  }
+  init();
+
+  async function sendMsg() {
+    const inp = document.getElementById('inp');
+    const text = inp.value.trim();
+    if (!text) return;
+    inp.value = '';
+    inp.style.height = '';
+    document.getElementById('send-btn').disabled = true;
+    try {
+      await fetch(`/chat/${UID}/${CHAT_ID}/send`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text}),
+      });
+    } catch {}
+    document.getElementById('send-btn').disabled = false;
+    inp.focus();
+  }
+
+  document.getElementById('inp').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMsg(); }
+  });
+
+  // Auto-resize textarea
+  document.getElementById('inp').addEventListener('input', function() {
+    this.style.height = 'auto';
+    this.style.height = Math.min(this.scrollHeight, 150) + 'px';
+  });
+
+  function toggleTheme() {
+    const dark = document.body.classList.toggle('dark');
+    document.body.classList.toggle('light', !dark);
+    localStorage.setItem('chat-theme', dark ? 'dark' : 'light');
+    document.getElementById('theme-btn').innerHTML = dark ? '&#9728;' : '&#9790;';
+  }
+  if (localStorage.getItem('chat-theme') === 'dark') {
+    document.body.classList.add('dark');
+    document.body.classList.remove('light');
+    document.getElementById('theme-btn').innerHTML = '&#9728;';
+  }
+</script>
+</body>
+</html>"""
+
+
+@app.route("/chat/<int:uid>/<int:chat_id>")
+def _web_chat_page(uid, chat_id):
+    key = (uid, chat_id)
+    label = chat_labels.get(key, f"{uid}:{chat_id}")
+    html = (_WEB_CHAT_HTML
+            .replace("%UID%", str(uid))
+            .replace("%CHAT_ID%", str(chat_id))
+            .replace("%LABEL%", json.dumps(label)))
+    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
+@app.route("/chat/<int:uid>/<int:chat_id>/history")
+def _web_chat_history(uid, chat_id):
+    return {"messages": chat_history.get((uid, chat_id), [])}
+
+
+@app.route("/chat/<int:uid>/<int:chat_id>/stream")
+def _web_chat_stream(uid, chat_id):
+    key = (uid, chat_id)
+    q = queue.Queue(maxsize=200)
+    with _chat_sse_lock:
+        _chat_sse.setdefault(key, []).append(q)
+
+    @stream_with_context
+    def generate():
+        try:
+            while True:
+                try:
+                    event = q.get(timeout=25)
+                    yield f"data: {json.dumps(event)}\n\n"
+                except queue.Empty:
+                    yield 'data: {"ping":true}\n\n'
+        finally:
+            with _chat_sse_lock:
+                subs = _chat_sse.get(key, [])
+                if q in subs:
+                    subs.remove(q)
+
+    return generate(), {"Content-Type": "text/event-stream",
+                        "Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+
+
+@app.route("/chat/<int:uid>/<int:chat_id>/send", methods=["POST"])
+def _web_chat_send(uid, chat_id):
+    from flask import request
+    data = request.get_json(silent=True) or {}
+    text = data.get("text", "").strip()
+    if not text:
+        return {"error": "empty"}, 400
+    key = (uid, chat_id)
+    if key not in chat_labels:
+        return {"error": "unknown chat"}, 404
+    # Echo to Telegram so the conversation is visible there too
+    try:
+        bot.send_message(chat_id, f"🌐 {text}")
+    except Exception:
+        pass
+    _chat_push(uid, chat_id, "user", text)
+    msg = _WebMessage(uid, chat_id, text)
+    _get_user_queue(uid, chat_id).put(msg)
+    return {"ok": True}
+
+
 # ── Claude CLI ────────────────────────────────────────────────────────────────
 
 def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str = None,
@@ -969,14 +1317,60 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
     return (f"[Error] {last_error}" if last_error else "(empty response)"), ""
 
 
+# ── Web chat history & SSE ────────────────────────────────────────────────────
+
+_CHAT_HISTORY_MAX = 200
+
+def _chat_push(uid: int, chat_id: int, role: str, text: str):
+    """Append a message to per-chat history and broadcast to web chat SSE subscribers."""
+    key = (uid, chat_id)
+    entry = {"role": role, "text": text, "ts": time.time()}
+    history = chat_history.setdefault(key, [])
+    history.append(entry)
+    if len(history) > _CHAT_HISTORY_MAX:
+        del history[:-_CHAT_HISTORY_MAX]
+    with _chat_sse_lock:
+        subs = list(_chat_sse.get(key, []))
+    dead = []
+    for q in subs:
+        try:
+            q.put_nowait(entry)
+        except queue.Full:
+            dead.append(q)
+    if dead:
+        with _chat_sse_lock:
+            _chat_sse[key] = [q for q in _chat_sse.get(key, []) if q not in dead]
+
+
+class _WebMessage:
+    """Fake Telegram message object for messages originating from the web UI."""
+    _from_web = True
+
+    def __init__(self, uid: int, chat_id: int, text: str, username: str = "web"):
+        import types
+        self.from_user = types.SimpleNamespace(id=uid, username=username)
+        self.chat = types.SimpleNamespace(id=chat_id, type="private", title=None)
+        self.text = text
+        self.caption = None
+        self.document = None
+        self.message_id = 0
+
+
 # ── Message processing ────────────────────────────────────────────────────────
 
 def _send_markdown(message, text: str):
     """Send text with MarkdownV2 formatting, falling back to plain text."""
-    try:
-        bot.reply_to(message, telegramify_markdown.markdownify(text), parse_mode="MarkdownV2")
-    except Exception:
-        bot.reply_to(message, text)
+    if isinstance(message, _WebMessage):
+        # Web-originated message: send back to Telegram via send_message (no reply_to)
+        try:
+            bot.send_message(message.chat.id, telegramify_markdown.markdownify(text), parse_mode="MarkdownV2")
+        except Exception:
+            bot.send_message(message.chat.id, text)
+    else:
+        try:
+            bot.reply_to(message, telegramify_markdown.markdownify(text), parse_mode="MarkdownV2")
+        except Exception:
+            bot.reply_to(message, text)
 
 
 def _split_reply(text: str, limit: int = 4096) -> list[str]:
@@ -1087,6 +1481,7 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
     last_reply[key] = reply[:300]
     preview = reply[:120].replace("\n", " ")
     tui_log(f"[blue]←[/] [bold]{escape(username)}[/] {escape(preview)}{'…' if len(reply) > 120 else ''}")
+    _chat_push(uid, chat_id, "assistant", reply)
     for chunk in _split_reply(reply):
         _send_markdown(message, chunk)
 
@@ -1134,6 +1529,7 @@ def _process_cron(uid: int, chat_id: int, task: dict, done: threading.Event):
     last_reply[key] = reply[:300]
     preview = reply[:120].replace("\n", " ")
     tui_log(f"[magenta]←[/] [bold]cron:{job_id}[/] {escape(preview)}{'…' if len(reply) > 120 else ''}")
+    _chat_push(uid, chat_id, "assistant", reply)
     for chunk in _split_reply(reply):
         bot.send_message(chat_id, telegramify_markdown.markdownify(chunk), parse_mode="MarkdownV2")
 
@@ -1313,6 +1709,7 @@ def handle_message(message):
     tui_log(f"[green]→[/] {source} [bold]{escape(str(message.from_user.username or uid))}[/] {escape(message.text)}")
     if not _allowed(message):
         return
+    _chat_push(uid, message.chat.id, "user", message.text or "")
     _get_user_queue(uid, message.chat.id).put(message)
 
 
