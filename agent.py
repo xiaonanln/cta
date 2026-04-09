@@ -257,13 +257,17 @@ def cmd_status(message):
 
 
 def _typing_loop(chat_id: int, done: threading.Event):
-    """Send typing action immediately, then every 4s until done."""
+    """Send typing action immediately, then every 3s until done.
+
+    Telegram's typing indicator expires after ~5s; 3s gives enough headroom
+    to survive occasional network latency without the indicator dropping.
+    """
     while True:
         try:
             bot.send_chat_action(chat_id, "typing")
         except Exception:
             pass
-        if done.wait(timeout=4):
+        if done.wait(timeout=3):
             break
 
 
