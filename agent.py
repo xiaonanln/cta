@@ -980,6 +980,15 @@ _WEB_HTML = """<!DOCTYPE html>
     document.getElementById('view-chat').classList.add('sel');
     currentView = 'chat';
 
+    // Resolve real label from server (needed when opened via direct URL)
+    fetch('/status').then(r => r.json()).then(d => {
+      const s = d.sessions.find(s => s.uid === uid && s.chat_id === chatId);
+      if (s && s.label) {
+        document.getElementById('topbar-label').firstElementChild.textContent = s.label;
+        history.replaceState({view: 'chat', uid, chatId, label: s.label}, '', location.hash);
+      }
+    }).catch(() => {});
+
     // Load history + subscribe
     const msgEl = document.getElementById('chat-messages');
     const typing = document.getElementById('chat-typing');
