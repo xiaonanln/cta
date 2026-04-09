@@ -678,6 +678,7 @@ _WEB_HTML = """<!DOCTYPE html>
     });
     document.getElementById('topbar-label').firstElementChild.textContent = VIEW_LABELS[name] || name;
     document.getElementById('topbar-sub').textContent = '';
+    if (name === 'config') loadConfig();
   }
 
   document.querySelectorAll('.nav-item').forEach(el => {
@@ -923,10 +924,6 @@ _WEB_HTML = """<!DOCTYPE html>
     } catch { msg.textContent = 'Network error'; msg.className = 'cfg-msg err'; }
   }
 
-  // Load config when switching to config tab
-  document.querySelectorAll('.nav-item').forEach(el => {
-    if (el.dataset.view === 'config') el.addEventListener('click', loadConfig, {once: false});
-  });
 
   // ── Inline chat ──
   let chatUid = null, chatChatId = null, chatES = null;
@@ -1018,7 +1015,7 @@ _WEB_HTML = """<!DOCTYPE html>
 
 @app.route("/")
 def _web_index():
-    return _WEB_HTML, 200, {"Content-Type": "text/html; charset=utf-8"}
+    return _WEB_HTML, 200, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache"}
 
 
 @app.route("/stream")
