@@ -71,6 +71,8 @@ CRONS_DIR = os.path.join(CTA_HOME, "crons")
 PREAMBLE_DIR = os.path.join(CTA_HOME, "preamble")
 GLOBAL_PREAMBLE_PATH = os.path.join(CTA_HOME, "global_preamble.md")
 GLOBAL_PREAMBLE = ""
+WHISPER_MODEL = "base"
+_whisper_model_instance = None
 
 bot = None  # initialized in create_bot()
 user_sessions: dict[tuple[int, int], str] = {}  # (uid, chat_id) → Claude session ID
@@ -100,13 +102,25 @@ def _read_global_preamble() -> str:
         return ""
 
 
+def _load_whisper():
+    """Lazily load the Whisper model (slow first call, cached after)."""
+    global _whisper_model_instance
+    if _whisper_model_instance is None:
+        import whisper as _whisper
+        tui_log(f"[cyan]🎙 loading Whisper model '{WHISPER_MODEL}'…[/]")
+        _whisper_model_instance = _whisper.load_model(WHISPER_MODEL)
+        tui_log(f"[cyan]🎙 Whisper ready[/]")
+    return _whisper_model_instance
+
+
 def init(config: dict):
-    global BOT_TOKEN, ALLOWED_USERS, TIMEOUT, MODEL, WEB_PORT, DEFAULT_CWD, GLOBAL_PREAMBLE
+    global BOT_TOKEN, ALLOWED_USERS, TIMEOUT, MODEL, WEB_PORT, DEFAULT_CWD, GLOBAL_PREAMBLE, WHISPER_MODEL
     BOT_TOKEN = config["telegram_bot_token"]
     ALLOWED_USERS = set(config["allowed_users"])
     TIMEOUT = config["claude_timeout"]
     MODEL = config.get("model", "claude-sonnet-4-6")
     WEB_PORT = config.get("web_port", 17488)
+    WHISPER_MODEL = config.get("whisper_model", "base")
     if config.get("default_cwd"):
         DEFAULT_CWD = os.path.expanduser(config["default_cwd"])
     GLOBAL_PREAMBLE = _read_global_preamble()
@@ -1684,6 +1698,8 @@ class _WebMessage:
         self.text = text
         self.caption = None
         self.document = None
+        self.voice = None
+        self.audio = None
         self.message_id = 0
 
 
@@ -1785,6 +1801,36 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
         except Exception as e:
             tui_log(f"[red]⚠ file download failed: {escape(str(e))}[/]")
             bot.reply_to(message, f"❌ Could not download file: {e}")
+            done.set()
+            return
+    elif message.voice or message.audio:
+        voice = message.voice or message.audio
+        try:
+            file_info = bot.get_file(voice.file_id)
+            data = bot.download_file(file_info.file_path)
+            ext = os.path.splitext(file_info.file_path)[1] or ".oga"
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+            tmp.write(data)
+            tmp.close()
+            tmp_photo = tmp.name
+            bot.reply_to(message, "🎙 Transcribing…")
+            whisper_model = _load_whisper()
+            result = whisper_model.transcribe(tmp_photo)
+            transcript = result["text"].strip()
+            if not transcript:
+                bot.reply_to(message, "❌ Could not transcribe voice message.")
+                done.set()
+                return
+            tui_log(f"[cyan]🎙 transcript:[/] {escape(transcript)}")
+            _chat_push(uid, message.chat.id, "user", f"🎙 {transcript}")
+            prompt = memory_prefix + transcript
+        except ImportError:
+            bot.reply_to(message, "❌ Whisper not installed. Run: pip install openai-whisper")
+            done.set()
+            return
+        except Exception as e:
+            tui_log(f"[red]⚠ voice transcription failed: {escape(str(e))}[/]")
+            bot.reply_to(message, f"❌ Transcription failed: {e}")
             done.set()
             return
 
@@ -2061,6 +2107,18 @@ def handle_document(message):
     _get_user_queue(uid, message.chat.id).put(message)
 
 
+def handle_voice(message):
+    uid = message.from_user.id
+    if message.chat.type == "private":
+        source = "[DM]"
+    else:
+        source = f"[Group: {escape(message.chat.title or str(message.chat.id))}]"
+    tui_log(f"[green]→[/] {source} [bold]{escape(str(message.from_user.username or uid))}[/] [dim]🎙 voice[/]")
+    if not _allowed(message):
+        return
+    _get_user_queue(uid, message.chat.id).put(message)
+
+
 # ── Bot setup ─────────────────────────────────────────────────────────────────
 
 class _Suppress409(logging.Filter):
@@ -2086,6 +2144,7 @@ def create_bot():
     bot.message_handler(commands=["status"])(cmd_status)
     bot.message_handler(func=lambda m: m.text and not m.text.startswith("/"))(handle_message)
     bot.message_handler(content_types=["document"])(handle_document)
+    bot.message_handler(content_types=["voice", "audio"])(handle_voice)
     return bot
 
 
