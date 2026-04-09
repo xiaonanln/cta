@@ -26,6 +26,8 @@ def make_fake_message(text, user_id=123, username="tester", chat_type="private",
     msg.caption = None
     msg.photo = None
     msg.document = None
+    msg.voice = None
+    msg.audio = None
     msg.from_user.id = user_id
     msg.from_user.username = username
     msg.chat.id = user_id
