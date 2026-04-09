@@ -103,7 +103,7 @@ class TestConfig(unittest.TestCase):
 
     def test_sessions_path_is_in_cta_home(self):
         self.assertTrue(agent.SESSIONS_PATH.startswith(agent.CTA_HOME))
-        self.assertTrue(agent.SESSIONS_PATH.endswith("sessions.json"))
+        self.assertTrue(agent.SESSIONS_PATH.endswith("agents.json"))
 
 
 # ── Session persistence ───────────────────────────────────────────────────────
