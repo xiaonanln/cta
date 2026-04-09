@@ -83,6 +83,8 @@ last_reply: dict[tuple[int, int], str] = {}    # (uid, chat_id) → last reply s
 claude_lock = threading.Lock()  # serialize Claude CLI calls (Max subscription concurrency limit)
 claude_busy_for = None  # username of user currently calling Claude
 claude_busy_key = None  # (uid, chat_id) of active session
+_current_proc: subprocess.Popen = None  # running Claude subprocess (killable)
+_cancelled_keys: set = set()           # keys that had /cancel; suppresses reply
 
 
 def init(config: dict):
@@ -937,19 +939,29 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
            "--model", model or MODEL, "--output-format", "json", "-p", prompt]
     if session_id:
         cmd += ["--resume", session_id]
+    global _current_proc
     last_error = ""
     for attempt in range(max_retries + 1):
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout or TIMEOUT, cwd=cwd)
-            if not result.stdout.strip():
-                last_error = result.stderr.strip()
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd)
+            _current_proc = proc
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout or TIMEOUT)
+            finally:
+                _current_proc = None
+            if proc.returncode != 0 or not stdout.strip():
+                last_error = stderr.strip()
             else:
-                data = json.loads(result.stdout)
+                data = json.loads(stdout)
                 text = (data.get("result") or "").strip() or "(empty response)"
                 return text, data.get("session_id", "")
         except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            _current_proc = None
             return "(Claude timed out)", ""
         except FileNotFoundError:
+            _current_proc = None
             return "(claude CLI not found — install @anthropic-ai/claude-code)", ""
         if attempt < max_retries:
             tui_log(f"[yellow]⚠ empty response, retrying ({attempt + 1}/{max_retries})…[/]")
@@ -1065,6 +1077,9 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
             if tmp_photo:
                 os.unlink(tmp_photo)
 
+    if key in _cancelled_keys:
+        _cancelled_keys.discard(key)
+        return
     if new_session_id:
         user_sessions[key] = new_session_id
         save_sessions()
@@ -1109,6 +1124,9 @@ def _process_cron(uid: int, chat_id: int, task: dict, done: threading.Event):
             claude_busy_key = None
             done.set()
 
+    if key in _cancelled_keys:
+        _cancelled_keys.discard(key)
+        return
     if new_session_id:
         user_sessions[key] = new_session_id
         save_sessions()
@@ -1164,6 +1182,7 @@ def cmd_help(message):
         "*Commands*\n"
         "/help — show this message\n"
         "/start — hello message\n"
+        "/cancel — stop current task and clear pending messages\n"
         "/clear — reset conversation session\n"
         "/cd `<path>` — change working directory (creates it if needed)\n"
         "/pwd — show current working directory\n"
@@ -1178,6 +1197,32 @@ def cmd_clear(message):
     user_sessions.pop((message.from_user.id, message.chat.id), None)
     save_sessions()
     bot.reply_to(message, "🧹 Conversation cleared.")
+
+
+def cmd_cancel(message):
+    if not _allowed(message): return
+    uid = message.from_user.id
+    key = (uid, message.chat.id)
+    parts = []
+    if claude_busy_key == key and _current_proc is not None:
+        _current_proc.kill()
+        _cancelled_keys.add(key)
+        parts.append("current task stopped")
+    q = user_queues.get(key)
+    drained = 0
+    if q:
+        while True:
+            try:
+                q.get_nowait()
+                drained += 1
+            except queue.Empty:
+                break
+    if drained:
+        parts.append(f"{drained} pending message(s) cleared")
+    if parts:
+        bot.reply_to(message, "🛑 " + ", ".join(parts).capitalize() + ".")
+    else:
+        bot.reply_to(message, "Nothing to cancel.")
 
 
 def cmd_cd(message):
@@ -1301,6 +1346,7 @@ def create_bot():
     bot.message_handler(commands=["start"])(cmd_start)
     bot.message_handler(commands=["help"])(cmd_help)
     bot.message_handler(commands=["clear"])(cmd_clear)
+    bot.message_handler(commands=["cancel"])(cmd_cancel)
     bot.message_handler(commands=["cd"])(cmd_cd)
     bot.message_handler(commands=["pwd"])(cmd_pwd)
     bot.message_handler(commands=["model"])(cmd_model)

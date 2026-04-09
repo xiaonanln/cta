@@ -205,133 +205,147 @@ class TestSessionPersistence(unittest.TestCase):
 
 class TestCallClaude(unittest.TestCase):
 
-    def _mock_result(self, result="ok", session_id="sid"):
-        return MagicMock(
-            stdout=json.dumps({"result": result, "session_id": session_id, "is_error": False}),
-            stderr="",
+    def _mock_proc(self, result="ok", session_id="sid", returncode=0):
+        proc = MagicMock()
+        proc.communicate.return_value = (
+            json.dumps({"result": result, "session_id": session_id, "is_error": False}),
+            "",
         )
+        proc.returncode = returncode
+        return proc
 
-    @patch("agent.subprocess.run")
-    def test_returns_text_and_session_id(self, mock_run):
-        mock_run.return_value = self._mock_result("Hello world", "abc-123")
+    def _mock_proc_error(self, stderr=""):
+        proc = MagicMock()
+        proc.communicate.return_value = ("", stderr)
+        proc.returncode = 1
+        return proc
+
+    @patch("agent.subprocess.Popen")
+    def test_returns_text_and_session_id(self, mock_popen):
+        mock_popen.return_value = self._mock_proc("Hello world", "abc-123")
         text, sid = agent.call_claude("hi")
         self.assertEqual(text, "Hello world")
         self.assertEqual(sid, "abc-123")
 
-    @patch("agent.subprocess.run")
-    def test_passes_cwd(self, mock_run):
-        mock_run.return_value = self._mock_result()
+    @patch("agent.subprocess.Popen")
+    def test_passes_cwd(self, mock_popen):
+        mock_popen.return_value = self._mock_proc()
         agent.call_claude("hi", cwd="/tmp/test")
-        self.assertEqual(mock_run.call_args[1]["cwd"], "/tmp/test")
+        self.assertEqual(mock_popen.call_args[1]["cwd"], "/tmp/test")
 
-    @patch("agent.subprocess.run")
-    def test_uses_default_cwd_when_none(self, mock_run):
-        mock_run.return_value = self._mock_result()
+    @patch("agent.subprocess.Popen")
+    def test_uses_default_cwd_when_none(self, mock_popen):
+        mock_popen.return_value = self._mock_proc()
         agent.call_claude("hi")
-        self.assertEqual(mock_run.call_args[1]["cwd"], agent.DEFAULT_CWD)
+        self.assertEqual(mock_popen.call_args[1]["cwd"], agent.DEFAULT_CWD)
 
-    @patch("agent.subprocess.run")
-    def test_uses_global_model(self, mock_run):
-        mock_run.return_value = self._mock_result()
+    @patch("agent.subprocess.Popen")
+    def test_uses_global_model(self, mock_popen):
+        mock_popen.return_value = self._mock_proc()
         agent.call_claude("hi")
-        args = mock_run.call_args[0][0]
+        args = mock_popen.call_args[0][0]
         self.assertIn("--model", args)
         self.assertIn(agent.MODEL, args)
 
-    @patch("agent.subprocess.run")
-    def test_uses_override_model(self, mock_run):
-        mock_run.return_value = self._mock_result()
+    @patch("agent.subprocess.Popen")
+    def test_uses_override_model(self, mock_popen):
+        mock_popen.return_value = self._mock_proc()
         agent.call_claude("hi", model="claude-sonnet-4-6")
-        args = mock_run.call_args[0][0]
+        args = mock_popen.call_args[0][0]
         idx = args.index("--model")
         self.assertEqual(args[idx + 1], "claude-sonnet-4-6")
 
-    @patch("agent.subprocess.run")
-    def test_includes_required_flags(self, mock_run):
-        mock_run.return_value = self._mock_result()
+    @patch("agent.subprocess.Popen")
+    def test_includes_required_flags(self, mock_popen):
+        mock_popen.return_value = self._mock_proc()
         agent.call_claude("hi")
-        args = mock_run.call_args[0][0]
+        args = mock_popen.call_args[0][0]
         self.assertIn("--print", args)
         self.assertIn("--dangerously-skip-permissions", args)
         self.assertIn("--output-format", args)
         self.assertIn("json", args)
 
-    @patch("agent.subprocess.run")
-    def test_resumes_session(self, mock_run):
-        mock_run.return_value = self._mock_result()
+    @patch("agent.subprocess.Popen")
+    def test_resumes_session(self, mock_popen):
+        mock_popen.return_value = self._mock_proc()
         agent.call_claude("hi", session_id="sess-xyz")
-        args = mock_run.call_args[0][0]
+        args = mock_popen.call_args[0][0]
         self.assertIn("--resume", args)
         self.assertIn("sess-xyz", args)
 
-    @patch("agent.subprocess.run")
-    def test_no_resume_without_session_id(self, mock_run):
-        mock_run.return_value = self._mock_result()
+    @patch("agent.subprocess.Popen")
+    def test_no_resume_without_session_id(self, mock_popen):
+        mock_popen.return_value = self._mock_proc()
         agent.call_claude("hi")
-        args = mock_run.call_args[0][0]
+        args = mock_popen.call_args[0][0]
         self.assertNotIn("--resume", args)
 
-    @patch("agent.subprocess.run")
-    def test_stderr_returned_on_empty_stdout(self, mock_run):
-        mock_run.return_value = MagicMock(stdout="", stderr="something broke")
+    @patch("agent.subprocess.Popen")
+    def test_stderr_returned_on_empty_stdout(self, mock_popen):
+        mock_popen.return_value = self._mock_proc_error("something broke")
         text, sid = agent.call_claude("hi", max_retries=0)
         self.assertIn("Error", text)
         self.assertIn("something broke", text)
         self.assertEqual(sid, "")
 
-    @patch("agent.subprocess.run")
-    def test_empty_stdout_and_stderr(self, mock_run):
-        mock_run.return_value = MagicMock(stdout="", stderr="")
+    @patch("agent.subprocess.Popen")
+    def test_empty_stdout_and_stderr(self, mock_popen):
+        mock_popen.return_value = self._mock_proc_error("")
         text, _ = agent.call_claude("hi", max_retries=0)
         self.assertEqual(text, "(empty response)")
 
-    @patch("agent.subprocess.run")
-    def test_strips_whitespace(self, mock_run):
-        mock_run.return_value = self._mock_result("  hello  \n")
+    @patch("agent.subprocess.Popen")
+    def test_strips_whitespace(self, mock_popen):
+        mock_popen.return_value = self._mock_proc("  hello  \n")
         text, _ = agent.call_claude("hi")
         self.assertEqual(text, "hello")
 
-    @patch("agent.subprocess.run", side_effect=subprocess.TimeoutExpired("claude", 600))
-    def test_timeout(self, _):
+    @patch("agent.subprocess.Popen")
+    def test_timeout(self, mock_popen):
+        proc = MagicMock()
+        proc.communicate.side_effect = [subprocess.TimeoutExpired("claude", 600), ("", "")]
+        mock_popen.return_value = proc
         text, sid = agent.call_claude("hi")
         self.assertIn("timed out", text)
         self.assertEqual(sid, "")
 
-    @patch("agent.subprocess.run", side_effect=FileNotFoundError)
+    @patch("agent.subprocess.Popen", side_effect=FileNotFoundError)
     def test_cli_not_found(self, _):
         text, _ = agent.call_claude("hi")
         self.assertIn("not found", text)
 
     @patch("agent.time.sleep")
-    @patch("agent.subprocess.run")
-    def test_retries_on_empty_response(self, mock_run, mock_sleep):
-        ok = self._mock_result("recovered", "sid-ok")
-        mock_run.side_effect = [MagicMock(stdout="", stderr=""), ok]
+    @patch("agent.subprocess.Popen")
+    def test_retries_on_empty_response(self, mock_popen, mock_sleep):
+        mock_popen.side_effect = [self._mock_proc_error(""), self._mock_proc("recovered", "sid-ok")]
         text, sid = agent.call_claude("hi", max_retries=1, retry_delay=0)
         self.assertEqual(text, "recovered")
         self.assertEqual(sid, "sid-ok")
-        self.assertEqual(mock_run.call_count, 2)
+        self.assertEqual(mock_popen.call_count, 2)
 
     @patch("agent.time.sleep")
-    @patch("agent.subprocess.run")
-    def test_returns_error_after_all_retries_exhausted(self, mock_run, mock_sleep):
-        mock_run.return_value = MagicMock(stdout="", stderr="transient error")
+    @patch("agent.subprocess.Popen")
+    def test_returns_error_after_all_retries_exhausted(self, mock_popen, mock_sleep):
+        mock_popen.return_value = self._mock_proc_error("transient error")
         text, sid = agent.call_claude("hi", max_retries=2, retry_delay=0)
         self.assertIn("transient error", text)
         self.assertEqual(sid, "")
-        self.assertEqual(mock_run.call_count, 3)
+        self.assertEqual(mock_popen.call_count, 3)
 
-    @patch("agent.subprocess.run", side_effect=subprocess.TimeoutExpired("claude", 600))
-    def test_no_retry_on_timeout(self, mock_run):
+    @patch("agent.subprocess.Popen")
+    def test_no_retry_on_timeout(self, mock_popen):
+        proc = MagicMock()
+        proc.communicate.side_effect = [subprocess.TimeoutExpired("claude", 600), ("", "")]
+        mock_popen.return_value = proc
         text, _ = agent.call_claude("hi", max_retries=2)
         self.assertIn("timed out", text)
-        self.assertEqual(mock_run.call_count, 1)
+        self.assertEqual(mock_popen.call_count, 1)
 
-    @patch("agent.subprocess.run", side_effect=FileNotFoundError)
-    def test_no_retry_on_file_not_found(self, mock_run):
+    @patch("agent.subprocess.Popen", side_effect=FileNotFoundError)
+    def test_no_retry_on_file_not_found(self, mock_popen):
         text, _ = agent.call_claude("hi", max_retries=2)
         self.assertIn("not found", text)
-        self.assertEqual(mock_run.call_count, 1)
+        self.assertEqual(mock_popen.call_count, 1)
 
 
 # ── _split_reply ──────────────────────────────────────────────────────────────
