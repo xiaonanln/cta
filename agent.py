@@ -423,9 +423,10 @@ _WEB_HTML = """<!DOCTYPE html>
     .cron-id { color: var(--fg); white-space: nowrap; }
     .cron-sched { font-family: monospace; color: var(--green); white-space: nowrap; }
     .cron-next { color: var(--fg2); white-space: nowrap; font-size: .72rem; }
-    .cron-del { background: none; border: 1px solid var(--border); border-radius: 4px;
-                color: var(--fg2); font-size: .7rem; padding: .15rem .45rem; cursor: pointer; }
+    .cron-del, .cron-edit { background: none; border: 1px solid var(--border); border-radius: 4px;
+                color: var(--fg2); font-size: .7rem; padding: .15rem .45rem; cursor: pointer; margin-right: .2rem; }
     .cron-del:hover { background: #e64553; color: #fff; border-color: #e64553; }
+    .cron-edit:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
     #no-crons { color: var(--fg3); font-size: .82rem; padding: .5rem 0; }
 
     /* add-cron form */
@@ -563,7 +564,7 @@ _WEB_HTML = """<!DOCTYPE html>
   <div class="view" id="view-crons">
     <div id="v-crons">
       <div class="cron-form" id="cron-form">
-        <h3>Add Cronjob</h3>
+        <h3 id="cron-form-title">Add Cronjob</h3>
         <div class="cron-form-row">
           <label>Chat</label>
           <select id="cron-chat-sel"><option value="">Loading…</option></select>
@@ -581,7 +582,8 @@ _WEB_HTML = """<!DOCTYPE html>
           <textarea id="cron-prompt-inp" placeholder="What should the agent do?"></textarea>
         </div>
         <div class="cron-form-actions">
-          <button class="cron-form-btn" onclick="addCron()">Add</button>
+          <button class="cron-form-btn" id="cron-submit-btn" onclick="saveCron()">Add</button>
+          <button class="cron-form-btn" id="cron-cancel-btn" onclick="cancelEdit()" style="display:none;background:var(--bg3)">Cancel</button>
           <span class="cron-form-msg" id="cron-form-msg"></span>
         </div>
       </div>
@@ -818,7 +820,10 @@ _WEB_HTML = """<!DOCTYPE html>
                 <td class="cron-sched">${esc(j.schedule)}</td>
                 <td class="cron-next">${esc(j.next_run.replace('T',' ').slice(0,16))}</td>
                 <td class="cron-prompt">${esc(j.prompt)}</td>
-                <td><button class="cron-del" onclick="delCron(${j.uid},${j.chat_id},'${esc(j.id)}')">✕</button></td>
+                <td style="white-space:nowrap">
+                  <button class="cron-edit" onclick="editCron(${j.uid},${j.chat_id},${JSON.stringify(j.id)},${JSON.stringify(j.schedule)},${JSON.stringify(j.prompt)})">✎</button>
+                  <button class="cron-del" onclick="delCron(${j.uid},${j.chat_id},'${esc(j.id)}')">✕</button>
+                </td>
               </tr>`).join('')}
             </tbody></table>`;
         }
@@ -876,30 +881,78 @@ _WEB_HTML = """<!DOCTYPE html>
     } catch {}
   }
 
-  async function addCron() {
+  let _editingCron = null; // {uid, chatId, jobId} when in edit mode
+
+  function editCron(uid, chatId, jobId, schedule, prompt) {
+    _editingCron = {uid, chatId, jobId};
+    document.getElementById('cron-form-title').textContent = 'Edit Cronjob';
+    document.getElementById('cron-submit-btn').textContent = 'Save';
+    document.getElementById('cron-cancel-btn').style.display = '';
+    const sel = document.getElementById('cron-chat-sel');
+    sel.value = `${uid}:${chatId}`;
+    sel.disabled = true;
+    const idInp = document.getElementById('cron-id-inp');
+    idInp.value = jobId;
+    idInp.readOnly = true;
+    document.getElementById('cron-sched-inp').value = schedule;
+    document.getElementById('cron-prompt-inp').value = prompt;
+    document.getElementById('cron-form').scrollIntoView({behavior: 'smooth'});
+  }
+
+  function cancelEdit() {
+    _editingCron = null;
+    document.getElementById('cron-form-title').textContent = 'Add Cronjob';
+    document.getElementById('cron-submit-btn').textContent = 'Add';
+    document.getElementById('cron-cancel-btn').style.display = 'none';
+    document.getElementById('cron-chat-sel').disabled = false;
+    document.getElementById('cron-id-inp').readOnly = false;
+    document.getElementById('cron-id-inp').value = '';
+    document.getElementById('cron-sched-inp').value = '';
+    document.getElementById('cron-prompt-inp').value = '';
+  }
+
+  async function saveCron() {
     const msg = document.getElementById('cron-form-msg');
-    const sel = document.getElementById('cron-chat-sel').value;
-    const id = document.getElementById('cron-id-inp').value.trim();
     const schedule = document.getElementById('cron-sched-inp').value.trim();
     const prompt = document.getElementById('cron-prompt-inp').value.trim();
-    if (!sel) { showMsg(msg, 'Select a chat', true); return; }
-    if (!id) { showMsg(msg, 'Enter a job ID', true); return; }
     if (!schedule) { showMsg(msg, 'Enter a cron schedule', true); return; }
     if (!prompt) { showMsg(msg, 'Enter a prompt', true); return; }
-    const [uid, chat_id] = sel.split(':');
-    try {
-      const r = await fetch('/cronjobs', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({uid: +uid, chat_id: +chat_id, id, schedule, prompt}),
-      });
-      const d = await r.json();
-      if (!r.ok) { showMsg(msg, d.error || 'Failed', true); return; }
-      showMsg(msg, 'Added! Next run: ' + d.next_run.replace('T',' ').slice(0,16), false);
-      document.getElementById('cron-id-inp').value = '';
-      document.getElementById('cron-sched-inp').value = '';
-      document.getElementById('cron-prompt-inp').value = '';
-      tick();
-    } catch (e) { showMsg(msg, 'Network error', true); }
+
+    if (_editingCron) {
+      // Update existing
+      const {uid, chatId, jobId} = _editingCron;
+      try {
+        const r = await fetch(`/cronjobs/${uid}/${chatId}/${jobId}`, {
+          method: 'PUT', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({schedule, prompt}),
+        });
+        const d = await r.json();
+        if (!r.ok) { showMsg(msg, d.error || 'Failed', true); return; }
+        showMsg(msg, 'Saved! Next run: ' + d.next_run.replace('T',' ').slice(0,16), false);
+        cancelEdit();
+        tick();
+      } catch { showMsg(msg, 'Network error', true); }
+    } else {
+      // Add new
+      const sel = document.getElementById('cron-chat-sel').value;
+      const id = document.getElementById('cron-id-inp').value.trim();
+      if (!sel) { showMsg(msg, 'Select a chat', true); return; }
+      if (!id) { showMsg(msg, 'Enter a job ID', true); return; }
+      const [uid, chat_id] = sel.split(':');
+      try {
+        const r = await fetch('/cronjobs', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({uid: +uid, chat_id: +chat_id, id, schedule, prompt}),
+        });
+        const d = await r.json();
+        if (!r.ok) { showMsg(msg, d.error || 'Failed', true); return; }
+        showMsg(msg, 'Added! Next run: ' + d.next_run.replace('T',' ').slice(0,16), false);
+        document.getElementById('cron-id-inp').value = '';
+        document.getElementById('cron-sched-inp').value = '';
+        document.getElementById('cron-prompt-inp').value = '';
+        tick();
+      } catch { showMsg(msg, 'Network error', true); }
+    }
   }
 
   async function delCron(uid, chatId, jobId) {
@@ -1279,6 +1332,32 @@ def _web_delete_cronjob(uid, chat_id, job_id):
     _save_cron_jobs(uid, chat_id, new_jobs)
     tui_log(f"[magenta]⏰ cron deleted[/] {uid}:{chat_id} job={job_id}")
     return {"ok": True}
+
+
+@app.route("/cronjobs/<int:uid>/<int:chat_id>/<job_id>", methods=["PUT"])
+def _web_update_cronjob(uid, chat_id, job_id):
+    from flask import request
+    data = request.get_json(silent=True) or {}
+    schedule = data.get("schedule", "").strip()
+    prompt = data.get("prompt", "").strip()
+    if not schedule or not prompt:
+        return {"error": "Missing required fields: schedule, prompt"}, 400
+    try:
+        from croniter import croniter
+        cron = croniter(schedule, datetime.now())
+        next_run = cron.get_next(datetime).isoformat()
+    except Exception as e:
+        return {"error": f"Invalid cron schedule: {e}"}, 400
+    jobs = _load_cron_jobs(uid, chat_id)
+    for j in jobs:
+        if j.get("id") == job_id:
+            j["schedule"] = schedule
+            j["prompt"] = prompt
+            j["next_run"] = next_run
+            _save_cron_jobs(uid, chat_id, jobs)
+            tui_log(f"[magenta]⏰ cron updated[/] {uid}:{chat_id} job={job_id}")
+            return {"ok": True, "next_run": next_run}
+    return {"error": "Job not found"}, 404
 
 
 @app.route("/chats")
