@@ -1828,6 +1828,14 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
             bot.reply_to(message, "❌ Whisper not installed. Run: pip install openai-whisper")
             done.set()
             return
+        except FileNotFoundError as e:
+            if "ffmpeg" in str(e):
+                bot.reply_to(message, "❌ ffmpeg not found. Install it with: brew install ffmpeg")
+            else:
+                bot.reply_to(message, f"❌ Transcription failed: {e}")
+            tui_log(f"[red]⚠ voice transcription failed: {escape(str(e))}[/]")
+            done.set()
+            return
         except Exception as e:
             tui_log(f"[red]⚠ voice transcription failed: {escape(str(e))}[/]")
             bot.reply_to(message, f"❌ Transcription failed: {e}")
