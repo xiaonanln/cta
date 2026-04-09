@@ -821,7 +821,7 @@ _WEB_HTML = """<!DOCTYPE html>
                 <td class="cron-next">${esc(j.next_run.replace('T',' ').slice(0,16))}</td>
                 <td class="cron-prompt">${esc(j.prompt)}</td>
                 <td style="white-space:nowrap">
-                  <button class="cron-edit" onclick="editCron(${j.uid},${j.chat_id},${JSON.stringify(j.id)},${JSON.stringify(j.schedule)},${JSON.stringify(j.prompt)})">✎</button>
+                  <button class="cron-edit" onclick="editCron(this)" data-uid="${j.uid}" data-chatid="${j.chat_id}" data-jobid="${esc(j.id)}" data-schedule="${esc(j.schedule)}" data-prompt="${esc(j.prompt)}">✎</button>
                   <button class="cron-del" onclick="delCron(${j.uid},${j.chat_id},'${esc(j.id)}')">✕</button>
                 </td>
               </tr>`).join('')}
@@ -883,7 +883,9 @@ _WEB_HTML = """<!DOCTYPE html>
 
   let _editingCron = null; // {uid, chatId, jobId} when in edit mode
 
-  function editCron(uid, chatId, jobId, schedule, prompt) {
+  function editCron(btn) {
+    const uid = +btn.dataset.uid, chatId = +btn.dataset.chatid;
+    const jobId = btn.dataset.jobid, schedule = btn.dataset.schedule, prompt = btn.dataset.prompt;
     _editingCron = {uid, chatId, jobId};
     document.getElementById('cron-form-title').textContent = 'Edit Cronjob';
     document.getElementById('cron-submit-btn').textContent = 'Save';
