@@ -439,6 +439,32 @@ _WEB_HTML = """<!DOCTYPE html>
     .cron-form-msg.ok { color: var(--green); }
     .cron-form-msg.err { color: #e64553; }
 
+    /* chat view (embedded) */
+    #view-chat { flex-direction: column; }
+    #chat-messages { flex: 1; overflow-y: auto; padding: 1rem; display: flex;
+                     flex-direction: column; gap: .6rem; }
+    .cmsg { max-width: 75%; padding: .55rem .8rem; border-radius: 12px; line-height: 1.45;
+            white-space: pre-wrap; word-break: break-word; }
+    .cmsg.user { align-self: flex-end; background: var(--accent); color: #fff;
+                 border-bottom-right-radius: 3px; }
+    .cmsg.assistant { align-self: flex-start; background: var(--bg2); color: var(--fg);
+                      border-bottom-left-radius: 3px; }
+    .cmsg.cron { align-self: flex-start; background: var(--bg3); color: var(--fg2);
+                 border-bottom-left-radius: 3px; font-size: .78rem; }
+    .cmsg-meta { font-size: .68rem; color: var(--fg3); margin-top: .2rem; }
+    .cmsg.user .cmsg-meta { text-align: right; }
+    #chat-inputbar { padding: .65rem 1rem; background: var(--bg2);
+                     border-top: 1px solid var(--border);
+                     display: flex; gap: .5rem; flex-shrink: 0; }
+    #chat-inp { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+                padding: .45rem .75rem; color: var(--fg); font-size: .85rem; font-family: inherit;
+                resize: none; min-height: 38px; max-height: 150px; outline: none; }
+    #chat-inp:focus { border-color: var(--accent); }
+    #chat-send { background: var(--accent); color: #fff; border: none; border-radius: 8px;
+                 padding: .45rem .9rem; cursor: pointer; font-size: .85rem; font-weight: 600; }
+    #chat-send:hover { opacity: .85; }
+    #chat-send:disabled { opacity: .4; cursor: default; }
+
     /* status view */
     #v-status { padding: 1.25rem; align-content: flex-start; }
     .stat-block { background: var(--bg2); border: 1px solid var(--border);
@@ -518,6 +544,15 @@ _WEB_HTML = """<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- Chat view (inline) -->
+  <div class="view" id="view-chat">
+    <div id="chat-messages"></div>
+    <div id="chat-inputbar">
+      <textarea id="chat-inp" rows="1" placeholder="Message…"></textarea>
+      <button id="chat-send" onclick="chatSend()">Send</button>
+    </div>
+  </div>
+
   <!-- Log view -->
   <div class="view" id="view-log">
     <div id="v-log"></div>
@@ -542,6 +577,8 @@ _WEB_HTML = """<!DOCTYPE html>
 
   function selectView(name) {
     currentView = name;
+    // Close chat SSE when navigating away
+    if (name !== 'chat' && chatES) { chatES.close(); chatES = null; }
     document.querySelectorAll('.nav-item').forEach(el => {
       el.classList.toggle('sel', el.dataset.view === name);
     });
@@ -636,7 +673,7 @@ _WEB_HTML = """<!DOCTYPE html>
             <div style="display:flex;gap:.4rem;align-items:center">
               <button class="cc-save" onclick="savePreamble(this)">Save preamble</button>
               <span class="cc-saved">Saved ✓</span>
-              <button class="cc-open" onclick="window.open('/chat/${s.uid}/${s.chat_id}','_blank')">Open chat ↗</button>
+              <button class="cc-open" onclick="openChat(${s.uid},${s.chat_id},'${esc(s.label).replace(/'/g,"\\'")}')">Open chat</button>
             </div>
           </div>`;
         }).join('');
@@ -743,6 +780,75 @@ _WEB_HTML = """<!DOCTYPE html>
     el.className = 'cron-form-msg ' + (isErr ? 'err' : 'ok');
     setTimeout(() => { el.textContent = ''; }, 3000);
   }
+
+  // ── Inline chat ──
+  let chatUid = null, chatChatId = null, chatES = null;
+
+  function openChat(uid, chatId, label) {
+    // Clean up previous chat SSE
+    if (chatES) { chatES.close(); chatES = null; }
+    chatUid = uid; chatChatId = chatId;
+
+    // Update topbar and switch view
+    document.getElementById('topbar-label').firstElementChild.textContent = label;
+    document.getElementById('topbar-sub').textContent = '';
+    // Deselect nav items (chat isn't in the nav)
+    document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('sel'));
+    document.querySelectorAll('.view').forEach(el => el.classList.remove('sel'));
+    document.getElementById('view-chat').classList.add('sel');
+    currentView = 'chat';
+
+    // Load history + subscribe
+    const msgEl = document.getElementById('chat-messages');
+    msgEl.innerHTML = '';
+    fetch(`/chat/${uid}/${chatId}/history`).then(r => r.json()).then(d => {
+      d.messages.forEach(m => chatAppend(m.role, m.text, m.ts, false));
+      msgEl.scrollTop = msgEl.scrollHeight;
+    }).catch(() => {});
+
+    chatES = new EventSource(`/chat/${uid}/${chatId}/stream`);
+    chatES.onmessage = e => {
+      const d = JSON.parse(e.data);
+      if (!d.ping) chatAppend(d.role, d.text, d.ts);
+    };
+
+    document.getElementById('chat-inp').focus();
+  }
+
+  function chatAppend(role, text, ts, scroll=true) {
+    const el = document.createElement('div');
+    el.className = 'cmsg ' + role;
+    const t = new Date(ts * 1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+    el.innerHTML = esc(text) + `<div class="cmsg-meta">${t}</div>`;
+    const c = document.getElementById('chat-messages');
+    c.appendChild(el);
+    if (scroll) el.scrollIntoView({behavior: 'smooth'});
+  }
+
+  async function chatSend() {
+    if (!chatUid) return;
+    const inp = document.getElementById('chat-inp');
+    const text = inp.value.trim();
+    if (!text) return;
+    inp.value = ''; inp.style.height = '';
+    document.getElementById('chat-send').disabled = true;
+    try {
+      await fetch(`/chat/${chatUid}/${chatChatId}/send`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text}),
+      });
+    } catch {}
+    document.getElementById('chat-send').disabled = false;
+    inp.focus();
+  }
+
+  document.getElementById('chat-inp').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); chatSend(); }
+  });
+  document.getElementById('chat-inp').addEventListener('input', function() {
+    this.style.height = 'auto';
+    this.style.height = Math.min(this.scrollHeight, 150) + 'px';
+  });
 
   // ── Theme toggle ──
   function toggleTheme() {
