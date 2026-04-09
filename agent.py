@@ -667,11 +667,13 @@ _WEB_HTML = """<!DOCTYPE html>
   const VIEW_LABELS = { chats: 'Chats', crons: 'Cronjobs', log: 'Log', status: 'Status', config: 'Config' };
 
   function viewFromHash() {
-    const h = location.hash.replace(/^#/, '') || 'chats';
-    return Object.keys(VIEW_LABELS).includes(h) ? h : 'chats';
+    const h = location.hash.replace(/^#/, '');
+    return VIEW_LABELS[h] ? h : 'chats';
   }
 
-  function selectView(name, updateHash = true) {
+  let _popNav = false;
+
+  function selectView(name) {
     currentView = name;
     // Close chat SSE when navigating away
     if (name !== 'chat' && chatES) { chatES.close(); chatES = null; }
@@ -684,10 +686,17 @@ _WEB_HTML = """<!DOCTYPE html>
     document.getElementById('topbar-label').firstElementChild.textContent = VIEW_LABELS[name] || name;
     document.getElementById('topbar-sub').textContent = '';
     if (name === 'config') loadConfig();
-    if (updateHash) location.hash = name === 'chats' ? '' : name;
+    if (!_popNav) {
+      const hash = name === 'chats' ? '' : '#' + name;
+      history.pushState({view: name}, '', location.pathname + hash);
+    }
   }
 
-  window.addEventListener('hashchange', () => selectView(viewFromHash(), false));
+  window.addEventListener('popstate', e => {
+    _popNav = true;
+    selectView((e.state && e.state.view) || viewFromHash());
+    _popNav = false;
+  });
 
   document.querySelectorAll('.nav-item').forEach(el => {
     el.addEventListener('click', () => selectView(el.dataset.view));
@@ -829,8 +838,9 @@ _WEB_HTML = """<!DOCTYPE html>
 
     } catch {}
   }
-  // Navigate to the view matching the current hash on page load
-  selectView(viewFromHash(), false);
+  // On page load: show the view matching the hash, replace (not push) history entry
+  history.replaceState({view: viewFromHash()}, '', location.href);
+  _popNav = true; selectView(viewFromHash()); _popNav = false;
   tick();
   setInterval(tick, 2000);
 
