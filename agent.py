@@ -83,6 +83,8 @@ last_reply: dict[tuple[int, int], str] = {}    # (uid, chat_id) → last reply s
 claude_lock = threading.Lock()  # serialize Claude CLI calls (Max subscription concurrency limit)
 claude_busy_for = None  # username of user currently calling Claude
 claude_busy_key = None  # (uid, chat_id) of active session
+_current_proc: subprocess.Popen = None  # running Claude subprocess (killable)
+_cancelled_keys: set = set()           # keys that had /cancel; suppresses reply
 
 
 def init(config: dict):
@@ -402,7 +404,33 @@ _WEB_HTML = """<!DOCTYPE html>
     .cron-id { color: var(--fg); white-space: nowrap; }
     .cron-sched { font-family: monospace; color: var(--green); white-space: nowrap; }
     .cron-next { color: var(--fg2); white-space: nowrap; font-size: .72rem; }
+    .cron-del { background: none; border: 1px solid var(--border); border-radius: 4px;
+                color: var(--fg2); font-size: .7rem; padding: .15rem .45rem; cursor: pointer; }
+    .cron-del:hover { background: #e64553; color: #fff; border-color: #e64553; }
     #no-crons { color: var(--fg3); font-size: .82rem; padding: .5rem 0; }
+
+    /* add-cron form */
+    .cron-form { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
+                 padding: 1rem 1.1rem; margin-bottom: 1rem; }
+    .cron-form h3 { font-size: .85rem; font-weight: 600; margin-bottom: .75rem; color: var(--accent); }
+    .cron-form-row { display: flex; gap: .6rem; align-items: center; margin-bottom: .55rem;
+                     font-size: .8rem; }
+    .cron-form-row label { color: var(--fg2); width: 70px; flex-shrink: 0; font-size: .75rem; }
+    .cron-form-row input, .cron-form-row select, .cron-form-row textarea {
+      flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+      color: var(--fg); font-family: inherit; font-size: .78rem; padding: .35rem .5rem; outline: none; }
+    .cron-form-row input:focus, .cron-form-row select:focus, .cron-form-row textarea:focus {
+      border-color: var(--accent); }
+    .cron-form-row textarea { resize: vertical; min-height: 50px; }
+    .cron-form-actions { display: flex; gap: .5rem; align-items: center; margin-top: .4rem; }
+    .cron-form-btn { padding: .35rem .85rem; background: var(--accent); border: none;
+                     border-radius: 5px; color: #fff; font-size: .78rem; font-weight: 600;
+                     cursor: pointer; }
+    .cron-form-btn:hover { opacity: .85; }
+    .cron-form-btn:disabled { opacity: .4; cursor: default; }
+    .cron-form-msg { font-size: .72rem; margin-left: .4rem; }
+    .cron-form-msg.ok { color: var(--green); }
+    .cron-form-msg.err { color: #e64553; }
 
     /* status view */
     #v-status { padding: 1.25rem; align-content: flex-start; }
@@ -419,7 +447,7 @@ _WEB_HTML = """<!DOCTYPE html>
                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   </style>
 </head>
-<body>
+<body class="light">
 
 <div id="nav">
   <div id="nav-logo">CTA<span id="gmodel">—</span></div>
@@ -445,7 +473,7 @@ _WEB_HTML = """<!DOCTYPE html>
   <div class="topbar" id="topbar-label">
     <span>Log</span>
     <span class="topbar-sub" id="topbar-sub"></span>
-    <button id="theme-btn" onclick="toggleTheme()">&#9790;</button>
+    <button id="theme-btn" onclick="toggleTheme()">&#9728;</button>
   </div>
 
   <!-- Chats view -->
@@ -455,7 +483,32 @@ _WEB_HTML = """<!DOCTYPE html>
 
   <!-- Crons view -->
   <div class="view" id="view-crons">
-    <div id="v-crons"></div>
+    <div id="v-crons">
+      <div class="cron-form" id="cron-form">
+        <h3>Add Cronjob</h3>
+        <div class="cron-form-row">
+          <label>Chat</label>
+          <select id="cron-chat-sel"><option value="">Loading…</option></select>
+        </div>
+        <div class="cron-form-row">
+          <label>Job ID</label>
+          <input id="cron-id-inp" placeholder="e.g. morning-report" />
+        </div>
+        <div class="cron-form-row">
+          <label>Schedule</label>
+          <input id="cron-sched-inp" placeholder="minute hour day month weekday  e.g. 0 9 * * *" />
+        </div>
+        <div class="cron-form-row">
+          <label>Prompt</label>
+          <textarea id="cron-prompt-inp" placeholder="What should the agent do?"></textarea>
+        </div>
+        <div class="cron-form-actions">
+          <button class="cron-form-btn" onclick="addCron()">Add</button>
+          <span class="cron-form-msg" id="cron-form-msg"></span>
+        </div>
+      </div>
+      <div id="cron-table-area"></div>
+    </div>
   </div>
 
   <!-- Log view -->
@@ -581,17 +634,17 @@ _WEB_HTML = """<!DOCTYPE html>
         }).join('');
       }
 
-      // Crons view
-      const cronsEl = document.getElementById('v-crons');
+      // Crons view — table only (form is static HTML)
+      const tableArea = document.getElementById('cron-table-area');
       try {
         const cr = await fetch('/cronjobs');
         const cd = await cr.json();
         if (!cd.jobs.length) {
-          cronsEl.innerHTML = '<div id="no-crons">No cron jobs yet</div>';
+          tableArea.innerHTML = '<div id="no-crons">No cron jobs yet</div>';
         } else {
-          cronsEl.innerHTML = `<table class="crons-table">
+          tableArea.innerHTML = `<table class="crons-table">
             <thead><tr>
-              <th>Chat</th><th>ID</th><th>Schedule</th><th>Next run</th><th>Prompt</th>
+              <th>Chat</th><th>ID</th><th>Schedule</th><th>Next run</th><th>Prompt</th><th></th>
             </tr></thead>
             <tbody>${cd.jobs.map(j => `
               <tr class="${j.example ? 'example' : ''}">
@@ -600,10 +653,14 @@ _WEB_HTML = """<!DOCTYPE html>
                 <td class="cron-sched">${esc(j.schedule)}</td>
                 <td class="cron-next">${esc(j.next_run.replace('T',' ').slice(0,16))}</td>
                 <td class="cron-prompt" title="${esc(j.prompt)}">${esc(j.prompt)}</td>
+                <td><button class="cron-del" onclick="delCron(${j.uid},${j.chat_id},'${esc(j.id)}')">✕</button></td>
               </tr>`).join('')}
             </tbody></table>`;
         }
       } catch {}
+
+      // Load chat options for cron form (only once)
+      if (!cronChatsLoaded) loadCronChats();
 
       // Status view
       document.getElementById('stat-block').innerHTML = [
@@ -622,15 +679,72 @@ _WEB_HTML = """<!DOCTYPE html>
   tick();
   setInterval(tick, 2000);
 
+  // ── Cron CRUD ──
+  let cronChatsLoaded = false;
+  async function loadCronChats() {
+    try {
+      const r = await fetch('/chats');
+      const d = await r.json();
+      const sel = document.getElementById('cron-chat-sel');
+      if (!d.chats.length) {
+        sel.innerHTML = '<option value="">No chats available</option>';
+        return;
+      }
+      sel.innerHTML = '<option value="">Select a chat…</option>' +
+        d.chats.map(c => `<option value="${c.uid}:${c.chat_id}">${esc(c.label)}${c.cwd ? ' — ' + esc(c.cwd.replace(/.*\//, '')) : ''}</option>`).join('');
+      cronChatsLoaded = true;
+    } catch {}
+  }
+
+  async function addCron() {
+    const msg = document.getElementById('cron-form-msg');
+    const sel = document.getElementById('cron-chat-sel').value;
+    const id = document.getElementById('cron-id-inp').value.trim();
+    const schedule = document.getElementById('cron-sched-inp').value.trim();
+    const prompt = document.getElementById('cron-prompt-inp').value.trim();
+    if (!sel) { showMsg(msg, 'Select a chat', true); return; }
+    if (!id) { showMsg(msg, 'Enter a job ID', true); return; }
+    if (!schedule) { showMsg(msg, 'Enter a cron schedule', true); return; }
+    if (!prompt) { showMsg(msg, 'Enter a prompt', true); return; }
+    const [uid, chat_id] = sel.split(':');
+    try {
+      const r = await fetch('/cronjobs', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({uid: +uid, chat_id: +chat_id, id, schedule, prompt}),
+      });
+      const d = await r.json();
+      if (!r.ok) { showMsg(msg, d.error || 'Failed', true); return; }
+      showMsg(msg, 'Added! Next run: ' + d.next_run.replace('T',' ').slice(0,16), false);
+      document.getElementById('cron-id-inp').value = '';
+      document.getElementById('cron-sched-inp').value = '';
+      document.getElementById('cron-prompt-inp').value = '';
+      tick();
+    } catch (e) { showMsg(msg, 'Network error', true); }
+  }
+
+  async function delCron(uid, chatId, jobId) {
+    if (!confirm('Delete cronjob "' + jobId + '"?')) return;
+    try {
+      await fetch(`/cronjobs/${uid}/${chatId}/${jobId}`, {method: 'DELETE'});
+      tick();
+    } catch {}
+  }
+
+  function showMsg(el, text, isErr) {
+    el.textContent = text;
+    el.className = 'cron-form-msg ' + (isErr ? 'err' : 'ok');
+    setTimeout(() => { el.textContent = ''; }, 3000);
+  }
+
   // ── Theme toggle ──
   function toggleTheme() {
     const light = document.body.classList.toggle('light');
     localStorage.setItem('theme', light ? 'light' : 'dark');
     document.getElementById('theme-btn').innerHTML = light ? '&#9728;' : '&#9790;';
   }
-  if (localStorage.getItem('theme') === 'light') {
-    document.body.classList.add('light');
-    document.getElementById('theme-btn').innerHTML = '&#9728;';
+  if (localStorage.getItem('theme') === 'dark') {
+    document.body.classList.remove('light');
+    document.getElementById('theme-btn').innerHTML = '&#9790;';
   }
 </script>
 </body>
@@ -728,6 +842,9 @@ def _web_cronjobs():
             key = (uid, chat_id)
             label = chat_labels.get(key, f"{uid}:{chat_id}")
             for job in _load_cron_jobs(uid, chat_id):
+                next_run = job.get("next_run", "")
+                if next_run and next_run >= "2099":
+                    continue
                 jobs.append({
                     "chat": label,
                     "uid": uid,
@@ -739,6 +856,72 @@ def _web_cronjobs():
                     "example": job.get("id") == "example",
                 })
     return {"jobs": jobs}
+
+
+@app.route("/cronjobs", methods=["POST"])
+def _web_create_cronjob():
+    from flask import request
+    data = request.get_json(silent=True) or {}
+    uid = data.get("uid")
+    chat_id = data.get("chat_id")
+    job_id = data.get("id", "").strip()
+    schedule = data.get("schedule", "").strip()
+    prompt = data.get("prompt", "").strip()
+    if not all([uid, chat_id, job_id, schedule, prompt]):
+        return {"error": "Missing required fields: uid, chat_id, id, schedule, prompt"}, 400
+    try:
+        uid, chat_id = int(uid), int(chat_id)
+    except (ValueError, TypeError):
+        return {"error": "Invalid uid or chat_id"}, 400
+    # Validate cron expression
+    try:
+        from croniter import croniter
+        cron = croniter(schedule, datetime.now())
+        next_run = cron.get_next(datetime).isoformat()
+    except Exception as e:
+        return {"error": f"Invalid cron schedule: {e}"}, 400
+    jobs = _load_cron_jobs(uid, chat_id)
+    # Remove example job if present
+    jobs = [j for j in jobs if j.get("id") != "example"]
+    # Check for duplicate id
+    if any(j.get("id") == job_id for j in jobs):
+        return {"error": f"Job ID '{job_id}' already exists"}, 409
+    jobs.append({"id": job_id, "schedule": schedule, "prompt": prompt, "next_run": next_run})
+    _save_cron_jobs(uid, chat_id, jobs)
+    tui_log(f"[magenta]⏰ cron added[/] {uid}:{chat_id} job={job_id} schedule={schedule}")
+    return {"ok": True, "next_run": next_run}
+
+
+@app.route("/cronjobs/<int:uid>/<int:chat_id>/<job_id>", methods=["DELETE"])
+def _web_delete_cronjob(uid, chat_id, job_id):
+    jobs = _load_cron_jobs(uid, chat_id)
+    new_jobs = [j for j in jobs if j.get("id") != job_id]
+    if len(new_jobs) == len(jobs):
+        return {"error": "Job not found"}, 404
+    _save_cron_jobs(uid, chat_id, new_jobs)
+    tui_log(f"[magenta]⏰ cron deleted[/] {uid}:{chat_id} job={job_id}")
+    return {"ok": True}
+
+
+@app.route("/chats")
+def _web_chats():
+    """Return all known chats from agents.json for the cronjob chat picker."""
+    chats = []
+    if os.path.exists(SESSIONS_PATH):
+        try:
+            with open(SESSIONS_PATH) as f:
+                data = json.load(f)
+            for key_str, entry in data.items():
+                uid_str, chat_str = key_str.split(":", 1)
+                key = (int(uid_str), int(chat_str))
+                label = chat_labels.get(key, key_str)
+                cwd = ""
+                if isinstance(entry, dict):
+                    cwd = entry.get("cwd", "")
+                chats.append({"uid": int(uid_str), "chat_id": int(chat_str), "label": label, "cwd": cwd})
+        except Exception:
+            pass
+    return {"chats": chats}
 
 
 # ── Claude CLI ────────────────────────────────────────────────────────────────
@@ -756,19 +939,29 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
            "--model", model or MODEL, "--output-format", "json", "-p", prompt]
     if session_id:
         cmd += ["--resume", session_id]
+    global _current_proc
     last_error = ""
     for attempt in range(max_retries + 1):
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout or TIMEOUT, cwd=cwd)
-            if not result.stdout.strip():
-                last_error = result.stderr.strip()
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd)
+            _current_proc = proc
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout or TIMEOUT)
+            finally:
+                _current_proc = None
+            if proc.returncode != 0 or not stdout.strip():
+                last_error = stderr.strip()
             else:
-                data = json.loads(result.stdout)
+                data = json.loads(stdout)
                 text = (data.get("result") or "").strip() or "(empty response)"
                 return text, data.get("session_id", "")
         except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            _current_proc = None
             return "(Claude timed out)", ""
         except FileNotFoundError:
+            _current_proc = None
             return "(claude CLI not found — install @anthropic-ai/claude-code)", ""
         if attempt < max_retries:
             tui_log(f"[yellow]⚠ empty response, retrying ({attempt + 1}/{max_retries})…[/]")
@@ -884,6 +1077,9 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
             if tmp_photo:
                 os.unlink(tmp_photo)
 
+    if key in _cancelled_keys:
+        _cancelled_keys.discard(key)
+        return
     if new_session_id:
         user_sessions[key] = new_session_id
         save_sessions()
@@ -928,6 +1124,9 @@ def _process_cron(uid: int, chat_id: int, task: dict, done: threading.Event):
             claude_busy_key = None
             done.set()
 
+    if key in _cancelled_keys:
+        _cancelled_keys.discard(key)
+        return
     if new_session_id:
         user_sessions[key] = new_session_id
         save_sessions()
@@ -983,6 +1182,7 @@ def cmd_help(message):
         "*Commands*\n"
         "/help — show this message\n"
         "/start — hello message\n"
+        "/cancel — stop current task and clear pending messages\n"
         "/clear — reset conversation session\n"
         "/cd `<path>` — change working directory (creates it if needed)\n"
         "/pwd — show current working directory\n"
@@ -997,6 +1197,32 @@ def cmd_clear(message):
     user_sessions.pop((message.from_user.id, message.chat.id), None)
     save_sessions()
     bot.reply_to(message, "🧹 Conversation cleared.")
+
+
+def cmd_cancel(message):
+    if not _allowed(message): return
+    uid = message.from_user.id
+    key = (uid, message.chat.id)
+    parts = []
+    if claude_busy_key == key and _current_proc is not None:
+        _current_proc.kill()
+        _cancelled_keys.add(key)
+        parts.append("current task stopped")
+    q = user_queues.get(key)
+    drained = 0
+    if q:
+        while True:
+            try:
+                q.get_nowait()
+                drained += 1
+            except queue.Empty:
+                break
+    if drained:
+        parts.append(f"{drained} pending message(s) cleared")
+    if parts:
+        bot.reply_to(message, "🛑 " + ", ".join(parts).capitalize() + ".")
+    else:
+        bot.reply_to(message, "Nothing to cancel.")
 
 
 def cmd_cd(message):
@@ -1120,6 +1346,7 @@ def create_bot():
     bot.message_handler(commands=["start"])(cmd_start)
     bot.message_handler(commands=["help"])(cmd_help)
     bot.message_handler(commands=["clear"])(cmd_clear)
+    bot.message_handler(commands=["cancel"])(cmd_cancel)
     bot.message_handler(commands=["cd"])(cmd_cd)
     bot.message_handler(commands=["pwd"])(cmd_pwd)
     bot.message_handler(commands=["model"])(cmd_model)
