@@ -160,6 +160,24 @@ def _read_preamble(uid: int, chat_id: int) -> str:
         return ""
 
 
+_CRON_EXAMPLE = [
+    {
+        "id": "example",
+        "schedule": "0 9 * * *",
+        "prompt": "Send a good morning message.",
+        "next_run": "2099-01-01T09:00:00",
+        "_comment": "Edit or remove this example. Schedule uses cron syntax: minute hour day month weekday",
+    }
+]
+
+
+def _ensure_cron_file(uid: int, chat_id: int):
+    """Write an example cron file if none exists yet, so Claude knows the format."""
+    path = _cron_path(uid, chat_id)
+    if not os.path.exists(path):
+        _save_cron_jobs(uid, chat_id, _CRON_EXAMPLE)
+
+
 def _load_cron_jobs(uid: int, chat_id: int) -> list:
     path = _cron_path(uid, chat_id)
     try:
@@ -704,6 +722,7 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
     # Build preamble with agent identity and context files
     memory_path = os.path.join(MEMORY_DIR, f"{uid}:{chat_id}.md")
     crons_path = os.path.join(CRONS_DIR, f"{uid}:{chat_id}.json")
+    _ensure_cron_file(uid, chat_id)
     custom_preamble = _read_preamble(uid, chat_id)
     memory_prefix = (
         f"[Agent chat:{uid}:{chat_id} | memory:{memory_path} | crons:{crons_path} | preamble:{_preamble_path(uid, chat_id)}]\n"
@@ -774,6 +793,7 @@ def _process_cron(uid: int, chat_id: int, task: dict, done: threading.Event):
 
     memory_path = os.path.join(MEMORY_DIR, f"{uid}:{chat_id}.md")
     crons_path = os.path.join(CRONS_DIR, f"{uid}:{chat_id}.json")
+    _ensure_cron_file(uid, chat_id)
     custom_preamble = _read_preamble(uid, chat_id)
     preamble = (
         f"[Agent chat:{uid}:{chat_id} | memory:{memory_path} | crons:{crons_path} | preamble:{_preamble_path(uid, chat_id)}]\n"
