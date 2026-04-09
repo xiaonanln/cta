@@ -664,7 +664,19 @@ _WEB_HTML = """<!DOCTYPE html>
 
   // ── Nav switching ──
   let currentView = 'chats';
+  let chatUid = null, chatChatId = null, chatES = null;
   const VIEW_LABELS = { chats: 'Chats', crons: 'Cronjobs', log: 'Log', status: 'Status', config: 'Config' };
+
+  function viewFromHash() {
+    const h = location.hash.replace(/^#/, '');
+    if (h.startsWith('chat/')) {
+      const parts = h.split('/');
+      if (parts.length === 3) return {view: 'chat', uid: +parts[1], chatId: +parts[2]};
+    }
+    return {view: VIEW_LABELS[h] ? h : 'chats'};
+  }
+
+  let _popNav = false;
 
   function selectView(name) {
     currentView = name;
@@ -679,7 +691,23 @@ _WEB_HTML = """<!DOCTYPE html>
     document.getElementById('topbar-label').firstElementChild.textContent = VIEW_LABELS[name] || name;
     document.getElementById('topbar-sub').textContent = '';
     if (name === 'config') loadConfig();
+    if (!_popNav) {
+      const hash = name === 'chats' ? '' : '#' + name;
+      history.pushState({view: name}, '', location.pathname + hash);
+    }
   }
+
+  window.addEventListener('popstate', e => {
+    _popNav = true;
+    if (e.state && e.state.view === 'chat') {
+      openChat(e.state.uid, e.state.chatId, e.state.label || '…');
+    } else {
+      const nav = viewFromHash();
+      if (nav.view === 'chat') openChat(nav.uid, nav.chatId, '…');
+      else selectView(nav.view);
+    }
+    _popNav = false;
+  });
 
   document.querySelectorAll('.nav-item').forEach(el => {
     el.addEventListener('click', () => selectView(el.dataset.view));
@@ -821,6 +849,13 @@ _WEB_HTML = """<!DOCTYPE html>
 
     } catch {}
   }
+  // On page load: show the view matching the hash, replace (not push) history entry
+  const _initNav = viewFromHash();
+  history.replaceState({view: _initNav.view, uid: _initNav.uid, chatId: _initNav.chatId}, '', location.href);
+  _popNav = true;
+  if (_initNav.view === 'chat') openChat(_initNav.uid, _initNav.chatId, '…');
+  else selectView(_initNav.view);
+  _popNav = false;
   tick();
   setInterval(tick, 2000);
 
@@ -926,12 +961,15 @@ _WEB_HTML = """<!DOCTYPE html>
 
 
   // ── Inline chat ──
-  let chatUid = null, chatChatId = null, chatES = null;
-
   function openChat(uid, chatId, label) {
     // Clean up previous chat SSE
     if (chatES) { chatES.close(); chatES = null; }
     chatUid = uid; chatChatId = chatId;
+
+    // Update URL
+    if (!_popNav) {
+      history.pushState({view: 'chat', uid, chatId, label}, '', `#chat/${uid}/${chatId}`);
+    }
 
     // Update topbar and switch view
     document.getElementById('topbar-label').firstElementChild.textContent = label;
@@ -941,6 +979,15 @@ _WEB_HTML = """<!DOCTYPE html>
     document.querySelectorAll('.view').forEach(el => el.classList.remove('sel'));
     document.getElementById('view-chat').classList.add('sel');
     currentView = 'chat';
+
+    // Resolve real label from server (needed when opened via direct URL)
+    fetch('/status').then(r => r.json()).then(d => {
+      const s = d.sessions.find(s => s.uid === uid && s.chat_id === chatId);
+      if (s && s.label) {
+        document.getElementById('topbar-label').firstElementChild.textContent = s.label;
+        history.replaceState({view: 'chat', uid, chatId, label: s.label}, '', location.hash);
+      }
+    }).catch(() => {});
 
     // Load history + subscribe
     const msgEl = document.getElementById('chat-messages');
