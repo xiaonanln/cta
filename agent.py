@@ -366,6 +366,23 @@ _WEB_HTML = """<!DOCTYPE html>
                 opacity: 0; transition: opacity .3s; }
     #no-cards { padding: 1rem; font-size: .82rem; color: #45475a; }
 
+    /* crons view */
+    #v-crons { padding: 1.25rem; flex-direction: column; gap: .75rem; }
+    .crons-table { width: 100%; border-collapse: collapse; font-size: .78rem; }
+    .crons-table th { text-align: left; color: #6c7086; font-weight: 600;
+                      padding: .4rem .75rem; border-bottom: 1px solid #313244; }
+    .crons-table td { padding: .45rem .75rem; border-bottom: 1px solid #1e1e2e;
+                      vertical-align: top; }
+    .crons-table tr:hover td { background: #181825; }
+    .crons-table tr.example td { color: #45475a; font-style: italic; }
+    .cron-prompt { color: #a6adc8; max-width: 320px;
+                   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .cron-chat { color: #89b4fa; white-space: nowrap; }
+    .cron-id { color: #cdd6f4; white-space: nowrap; }
+    .cron-sched { font-family: monospace; color: #a6e3a1; white-space: nowrap; }
+    .cron-next { color: #6c7086; white-space: nowrap; font-size: .72rem; }
+    #no-crons { color: #45475a; font-size: .82rem; padding: .5rem 0; }
+
     /* status view */
     #v-status { padding: 1.25rem; align-content: flex-start; }
     .stat-block { background: #181825; border: 1px solid #313244;
@@ -390,6 +407,9 @@ _WEB_HTML = """<!DOCTYPE html>
     <div class="nav-item sel" data-view="chats">
       <span class="nav-icon">💬</span> Chats
     </div>
+    <div class="nav-item" data-view="crons">
+      <span class="nav-icon">⏰</span> Cronjobs
+    </div>
     <div class="nav-item" data-view="log">
       <span class="nav-icon">📋</span> Log
     </div>
@@ -409,6 +429,11 @@ _WEB_HTML = """<!DOCTYPE html>
   <!-- Chats view -->
   <div class="view sel" id="view-chats">
     <div id="v-chats"><div id="no-cards">No active chats yet</div></div>
+  </div>
+
+  <!-- Crons view -->
+  <div class="view" id="view-crons">
+    <div id="v-crons"></div>
   </div>
 
   <!-- Log view -->
@@ -431,7 +456,7 @@ _WEB_HTML = """<!DOCTYPE html>
 
   // ── Nav switching ──
   let currentView = 'chats';
-  const VIEW_LABELS = { chats: 'Chats', log: 'Log', status: 'Status' };
+  const VIEW_LABELS = { chats: 'Chats', crons: 'Cronjobs', log: 'Log', status: 'Status' };
 
   function selectView(name) {
     currentView = name;
@@ -534,6 +559,30 @@ _WEB_HTML = """<!DOCTYPE html>
         }).join('');
       }
 
+      // Crons view
+      const cronsEl = document.getElementById('v-crons');
+      try {
+        const cr = await fetch('/cronjobs');
+        const cd = await cr.json();
+        if (!cd.jobs.length) {
+          cronsEl.innerHTML = '<div id="no-crons">No cron jobs yet</div>';
+        } else {
+          cronsEl.innerHTML = `<table class="crons-table">
+            <thead><tr>
+              <th>Chat</th><th>ID</th><th>Schedule</th><th>Next run</th><th>Prompt</th>
+            </tr></thead>
+            <tbody>${cd.jobs.map(j => `
+              <tr class="${j.example ? 'example' : ''}">
+                <td class="cron-chat">${esc(j.chat)}</td>
+                <td class="cron-id">${esc(j.id)}</td>
+                <td class="cron-sched">${esc(j.schedule)}</td>
+                <td class="cron-next">${esc(j.next_run.replace('T',' ').slice(0,16))}</td>
+                <td class="cron-prompt" title="${esc(j.prompt)}">${esc(j.prompt)}</td>
+              </tr>`).join('')}
+            </tbody></table>`;
+        }
+      } catch {}
+
       // Status view
       document.getElementById('stat-block').innerHTML = [
         ['Model',    d.model],
@@ -631,6 +680,34 @@ def _web_set_preamble(uid, chat_id):
     return {"ok": True}
 
 
+@app.route("/cronjobs")
+def _web_cronjobs():
+    jobs = []
+    if os.path.isdir(CRONS_DIR):
+        for fname in sorted(os.listdir(CRONS_DIR)):
+            if not fname.endswith(".json"):
+                continue
+            try:
+                uid_str, chat_str = fname[:-5].split(":", 1)
+                uid, chat_id = int(uid_str), int(chat_str)
+            except ValueError:
+                continue
+            key = (uid, chat_id)
+            label = chat_labels.get(key, f"{uid}:{chat_id}")
+            for job in _load_cron_jobs(uid, chat_id):
+                jobs.append({
+                    "chat": label,
+                    "uid": uid,
+                    "chat_id": chat_id,
+                    "id": job.get("id", ""),
+                    "schedule": job.get("schedule", ""),
+                    "next_run": job.get("next_run", ""),
+                    "prompt": job.get("prompt", ""),
+                    "example": job.get("id") == "example",
+                })
+    return {"jobs": jobs}
+
+
 # ── Claude CLI ────────────────────────────────────────────────────────────────
 
 def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str = None,
@@ -691,13 +768,16 @@ def _split_reply(text: str, limit: int = 4096) -> list[str]:
 
 
 def _typing_loop(chat_id: int, done: threading.Event):
-    """Send typing action immediately, then every 4s until done."""
+    """Send typing action immediately, then every 3s until done.
+
+    Telegram's typing indicator expires after ~5s; 3s gives enough headroom
+    to survive occasional network latency without the indicator dropping."""
     while True:
         try:
             bot.send_chat_action(chat_id, "typing")
         except Exception:
             pass
-        if done.wait(timeout=4):
+        if done.wait(timeout=3):
             break
 
 
