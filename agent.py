@@ -91,12 +91,14 @@ _chat_sse_lock = threading.Lock()
 
 
 def init(config: dict):
-    global BOT_TOKEN, ALLOWED_USERS, TIMEOUT, MODEL, WEB_PORT
+    global BOT_TOKEN, ALLOWED_USERS, TIMEOUT, MODEL, WEB_PORT, DEFAULT_CWD
     BOT_TOKEN = config["telegram_bot_token"]
     ALLOWED_USERS = set(config["allowed_users"])
     TIMEOUT = config["claude_timeout"]
     MODEL = config.get("model", "claude-sonnet-4-6")
     WEB_PORT = config.get("web_port", 17488)
+    if config.get("default_cwd"):
+        DEFAULT_CWD = os.path.expanduser(config["default_cwd"])
     os.makedirs(MEMORY_DIR, exist_ok=True)
     os.makedirs(CRONS_DIR, exist_ok=True)
     os.makedirs(PREAMBLE_DIR, exist_ok=True)
@@ -405,8 +407,7 @@ _WEB_HTML = """<!DOCTYPE html>
                       vertical-align: top; }
     .crons-table tr:hover td { background: var(--bg2); }
     .crons-table tr.example td { color: var(--fg3); font-style: italic; }
-    .cron-prompt { color: var(--preview); max-width: 320px;
-                   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .cron-prompt { color: var(--preview); white-space: pre-wrap; word-break: break-word; }
     .cron-chat { color: var(--accent); white-space: nowrap; }
     .cron-id { color: var(--fg); white-space: nowrap; }
     .cron-sched { font-family: monospace; color: var(--green); white-space: nowrap; }
@@ -486,6 +487,28 @@ _WEB_HTML = """<!DOCTYPE html>
     .stat-val { color: var(--fg); font-family: monospace; font-size: .75rem;
                 text-align: right; max-width: 250px;
                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* config view */
+    #view-config { padding: 1.25rem; }
+    .cfg-form { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
+                padding: 1rem 1.25rem; max-width: 480px; }
+    .cfg-form h3 { font-size: .82rem; font-weight: 600; color: var(--accent);
+                   margin-bottom: .9rem; }
+    .cfg-row { display: flex; align-items: center; gap: .6rem; margin-bottom: .6rem; }
+    .cfg-row label { color: var(--fg2); font-size: .75rem; width: 130px; flex-shrink: 0; }
+    .cfg-row input, .cfg-row select { flex: 1; background: var(--bg); border: 1px solid var(--border);
+                     border-radius: 6px; padding: .35rem .65rem; color: var(--fg);
+                     font-size: .8rem; font-family: monospace; outline: none; }
+    .cfg-row input:focus, .cfg-row select:focus { border-color: var(--accent); }
+    .cfg-row input[type=number] { width: 90px; flex: none; }
+    .cfg-actions { display: flex; align-items: center; gap: .6rem; margin-top: .75rem; }
+    .cfg-save-btn { padding: .35rem .85rem; background: var(--accent); border: none;
+                    border-radius: 6px; color: #fff; font-size: .8rem;
+                    font-weight: 600; cursor: pointer; }
+    .cfg-save-btn:hover { opacity: .85; }
+    .cfg-msg { font-size: .72rem; }
+    .cfg-msg.ok { color: var(--green); }
+    .cfg-msg.err { color: #e64553; }
+    .cfg-note { font-size: .68rem; color: var(--fg3); margin-top: .65rem; }
   </style>
 </head>
 <body class="light">
@@ -505,6 +528,9 @@ _WEB_HTML = """<!DOCTYPE html>
     </div>
     <div class="nav-item" data-view="status">
       <span class="nav-icon">⚙️</span> Status
+    </div>
+    <div class="nav-item" data-view="config">
+      <span class="nav-icon">🔧</span> Config
     </div>
   </div>
 
@@ -574,6 +600,46 @@ _WEB_HTML = """<!DOCTYPE html>
       <div class="stat-block" id="stat-block"></div>
     </div>
   </div>
+
+  <!-- Config view -->
+  <div class="view" id="view-config">
+    <div class="cfg-form">
+      <h3>Global Configuration</h3>
+      <div class="cfg-row">
+        <label>Telegram bot token</label>
+        <input id="cfg-token" type="text" />
+      </div>
+      <div class="cfg-row">
+        <label>Default model</label>
+        <select id="cfg-model">
+          <option value="claude-opus-4-6">claude-opus-4-6</option>
+          <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
+          <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001</option>
+        </select>
+      </div>
+      <div class="cfg-row">
+        <label>Claude timeout (s)</label>
+        <input id="cfg-timeout" type="number" min="10" />
+      </div>
+      <div class="cfg-row">
+        <label>Web port</label>
+        <input id="cfg-port" type="number" min="1024" max="65535" />
+      </div>
+      <div class="cfg-row">
+        <label>Default cwd</label>
+        <input id="cfg-cwd" type="text" />
+      </div>
+      <div class="cfg-row">
+        <label>Allowed users</label>
+        <input id="cfg-users" type="text" placeholder="comma-separated user IDs, empty = all" />
+      </div>
+      <div class="cfg-actions">
+        <button class="cfg-save-btn" onclick="saveConfig()">Save</button>
+        <span class="cfg-msg" id="cfg-msg"></span>
+      </div>
+      <div class="cfg-note">Bot token and web port changes require a restart to take effect.</div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -583,7 +649,7 @@ _WEB_HTML = """<!DOCTYPE html>
 
   // ── Nav switching ──
   let currentView = 'chats';
-  const VIEW_LABELS = { chats: 'Chats', crons: 'Cronjobs', log: 'Log', status: 'Status' };
+  const VIEW_LABELS = { chats: 'Chats', crons: 'Cronjobs', log: 'Log', status: 'Status', config: 'Config' };
 
   function selectView(name) {
     currentView = name;
@@ -707,7 +773,7 @@ _WEB_HTML = """<!DOCTYPE html>
                 <td class="cron-id">${esc(j.id)}</td>
                 <td class="cron-sched">${esc(j.schedule)}</td>
                 <td class="cron-next">${esc(j.next_run.replace('T',' ').slice(0,16))}</td>
-                <td class="cron-prompt" title="${esc(j.prompt)}">${esc(j.prompt)}</td>
+                <td class="cron-prompt">${esc(j.prompt)}</td>
                 <td><button class="cron-del" onclick="delCron(${j.uid},${j.chat_id},'${esc(j.id)}')">✕</button></td>
               </tr>`).join('')}
             </tbody></table>`;
@@ -798,6 +864,52 @@ _WEB_HTML = """<!DOCTYPE html>
     el.className = 'cron-form-msg ' + (isErr ? 'err' : 'ok');
     setTimeout(() => { el.textContent = ''; }, 3000);
   }
+
+  // ── Config ──
+  async function loadConfig() {
+    try {
+      const r = await fetch('/config');
+      const d = await r.json();
+      document.getElementById('cfg-token').value = d.telegram_bot_token || '';
+      const modelSel = document.getElementById('cfg-model');
+      if (d.model && [...modelSel.options].some(o => o.value === d.model)) {
+        modelSel.value = d.model;
+      }
+      document.getElementById('cfg-timeout').value = d.claude_timeout ?? '';
+      document.getElementById('cfg-port').value = d.web_port ?? '';
+      document.getElementById('cfg-cwd').value = d.default_cwd || '';
+      document.getElementById('cfg-users').value = (d.allowed_users || []).join(', ');
+    } catch {}
+  }
+
+  async function saveConfig() {
+    const msg = document.getElementById('cfg-msg');
+    const token = document.getElementById('cfg-token').value.trim();
+    const body = {
+      model: document.getElementById('cfg-model').value,
+      claude_timeout: parseInt(document.getElementById('cfg-timeout').value) || 600,
+      web_port: parseInt(document.getElementById('cfg-port').value) || 17488,
+      default_cwd: document.getElementById('cfg-cwd').value.trim(),
+      allowed_users: document.getElementById('cfg-users').value
+        .split(',').map(s => s.trim()).filter(Boolean).map(Number),
+    };
+    if (token) body.telegram_bot_token = token;
+    try {
+      const r = await fetch('/config', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body),
+      });
+      const d = await r.json();
+      if (!r.ok) { msg.textContent = d.error || 'Failed'; msg.className = 'cfg-msg err'; }
+      else { msg.textContent = 'Saved ✓'; msg.className = 'cfg-msg ok'; }
+      setTimeout(() => { msg.textContent = ''; }, 2500);
+    } catch { msg.textContent = 'Network error'; msg.className = 'cfg-msg err'; }
+  }
+
+  // Load config when switching to config tab
+  document.querySelectorAll('.nav-item').forEach(el => {
+    if (el.dataset.view === 'config') el.addEventListener('click', loadConfig, {once: false});
+  });
 
   // ── Inline chat ──
   let chatUid = null, chatChatId = null, chatES = null;
@@ -938,6 +1050,63 @@ def _web_status():
             "preamble": _read_preamble(uid, chat_id),
         })
     return {"model": MODEL, "cwd": DEFAULT_CWD, "sessions": sessions}
+
+
+@app.route("/config", methods=["GET"])
+def _web_get_config():
+    try:
+        with open(CONFIG_PATH) as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {}
+    return {
+        "telegram_bot_token": cfg.get("telegram_bot_token", BOT_TOKEN),
+        "model": cfg.get("model", MODEL),
+        "claude_timeout": cfg.get("claude_timeout", TIMEOUT),
+        "web_port": cfg.get("web_port", WEB_PORT),
+        "default_cwd": cfg.get("default_cwd", DEFAULT_CWD),
+        "allowed_users": cfg.get("allowed_users", list(ALLOWED_USERS)),
+    }
+
+
+@app.route("/config", methods=["POST"])
+def _web_set_config():
+    global BOT_TOKEN, MODEL, TIMEOUT, DEFAULT_CWD, ALLOWED_USERS
+    from flask import request
+    data = request.get_json(silent=True) or {}
+    try:
+        with open(CONFIG_PATH) as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {}
+    if data.get("telegram_bot_token"):
+        cfg["telegram_bot_token"] = data["telegram_bot_token"]
+        BOT_TOKEN = data["telegram_bot_token"]
+    if "model" in data and data["model"]:
+        cfg["model"] = data["model"]
+        MODEL = data["model"]
+    if "claude_timeout" in data and data["claude_timeout"] > 0:
+        cfg["claude_timeout"] = data["claude_timeout"]
+        TIMEOUT = data["claude_timeout"]
+    if "web_port" in data and data["web_port"]:
+        cfg["web_port"] = data["web_port"]
+    if "default_cwd" in data and data["default_cwd"]:
+        expanded = os.path.expanduser(data["default_cwd"])
+        cfg["default_cwd"] = expanded
+        DEFAULT_CWD = expanded
+    if "allowed_users" in data:
+        cfg["allowed_users"] = [int(u) for u in data["allowed_users"] if str(u).strip()]
+        ALLOWED_USERS = set(cfg["allowed_users"])
+    try:
+        tmp = CONFIG_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(cfg, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, CONFIG_PATH)
+    except Exception as e:
+        return {"error": str(e)}, 500
+    tui_log(f"[cyan]⚙ config updated via web[/]")
+    return {"ok": True}
 
 
 @app.route("/preamble/<int:uid>/<int:chat_id>", methods=["GET"])
