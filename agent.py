@@ -558,7 +558,7 @@ _WEB_HTML = """<!DOCTYPE html>
       <div id="chat-typing"><div class="typing-dots"><span></span><span></span><span></span></div></div>
     </div>
     <div id="chat-inputbar">
-      <textarea id="chat-inp" rows="1" placeholder="Message…"></textarea>
+      <textarea id="chat-inp" rows="3" placeholder="Message… (Ctrl+Enter to send)"></textarea>
       <button id="chat-send" onclick="chatSend()">Send</button>
     </div>
   </div>
@@ -865,7 +865,7 @@ _WEB_HTML = """<!DOCTYPE html>
   }
 
   document.getElementById('chat-inp').addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); chatSend(); }
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); chatSend(); }
   });
   document.getElementById('chat-inp').addEventListener('input', function() {
     this.style.height = 'auto';
