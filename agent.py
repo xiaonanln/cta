@@ -608,7 +608,7 @@ _WEB_HTML = """<!DOCTYPE html>
       <h3>Global Configuration</h3>
       <div class="cfg-row">
         <label>Telegram bot token</label>
-        <input id="cfg-token" type="password" placeholder="leave blank to keep current" />
+        <input id="cfg-token" type="text" />
       </div>
       <div class="cfg-row">
         <label>Default model</label>
@@ -638,7 +638,7 @@ _WEB_HTML = """<!DOCTYPE html>
         <button class="cfg-save-btn" onclick="saveConfig()">Save</button>
         <span class="cfg-msg" id="cfg-msg"></span>
       </div>
-      <div class="cfg-note">Bot token and web port changes require a restart. Token is write-only — leave blank to keep current.</div>
+      <div class="cfg-note">Bot token and web port changes require a restart to take effect.</div>
     </div>
   </div>
 </div>
@@ -871,6 +871,7 @@ _WEB_HTML = """<!DOCTYPE html>
     try {
       const r = await fetch('/config');
       const d = await r.json();
+      document.getElementById('cfg-token').value = d.telegram_bot_token || '';
       const modelSel = document.getElementById('cfg-model');
       if (d.model && [...modelSel.options].some(o => o.value === d.model)) {
         modelSel.value = d.model;
@@ -1060,6 +1061,7 @@ def _web_get_config():
     except Exception:
         cfg = {}
     return {
+        "telegram_bot_token": cfg.get("telegram_bot_token", BOT_TOKEN),
         "model": cfg.get("model", MODEL),
         "claude_timeout": cfg.get("claude_timeout", TIMEOUT),
         "web_port": cfg.get("web_port", WEB_PORT),
