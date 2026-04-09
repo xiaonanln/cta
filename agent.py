@@ -607,6 +607,10 @@ _WEB_HTML = """<!DOCTYPE html>
     <div class="cfg-form">
       <h3>Global Configuration</h3>
       <div class="cfg-row">
+        <label>Telegram bot token</label>
+        <input id="cfg-token" type="password" placeholder="leave blank to keep current" />
+      </div>
+      <div class="cfg-row">
         <label>Default model</label>
         <input id="cfg-model" type="text" />
       </div>
@@ -630,7 +634,7 @@ _WEB_HTML = """<!DOCTYPE html>
         <button class="cfg-save-btn" onclick="saveConfig()">Save</button>
         <span class="cfg-msg" id="cfg-msg"></span>
       </div>
-      <div class="cfg-note">Changes to web port and bot token require a restart to take effect.</div>
+      <div class="cfg-note">Bot token and web port changes require a restart. Token is write-only — leave blank to keep current.</div>
     </div>
   </div>
 </div>
@@ -873,6 +877,7 @@ _WEB_HTML = """<!DOCTYPE html>
 
   async function saveConfig() {
     const msg = document.getElementById('cfg-msg');
+    const token = document.getElementById('cfg-token').value.trim();
     const body = {
       model: document.getElementById('cfg-model').value.trim(),
       claude_timeout: parseInt(document.getElementById('cfg-timeout').value) || 600,
@@ -881,6 +886,7 @@ _WEB_HTML = """<!DOCTYPE html>
       allowed_users: document.getElementById('cfg-users').value
         .split(',').map(s => s.trim()).filter(Boolean).map(Number),
     };
+    if (token) body.telegram_bot_token = token;
     try {
       const r = await fetch('/config', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -1057,7 +1063,7 @@ def _web_get_config():
 
 @app.route("/config", methods=["POST"])
 def _web_set_config():
-    global MODEL, TIMEOUT, DEFAULT_CWD, ALLOWED_USERS
+    global BOT_TOKEN, MODEL, TIMEOUT, DEFAULT_CWD, ALLOWED_USERS
     from flask import request
     data = request.get_json(silent=True) or {}
     try:
@@ -1065,6 +1071,9 @@ def _web_set_config():
             cfg = json.load(f)
     except Exception:
         cfg = {}
+    if data.get("telegram_bot_token"):
+        cfg["telegram_bot_token"] = data["telegram_bot_token"]
+        BOT_TOKEN = data["telegram_bot_token"]
     if "model" in data and data["model"]:
         cfg["model"] = data["model"]
         MODEL = data["model"]
