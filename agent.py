@@ -669,7 +669,11 @@ _WEB_HTML = """<!DOCTYPE html>
 
   function viewFromHash() {
     const h = location.hash.replace(/^#/, '');
-    return VIEW_LABELS[h] ? h : 'chats';
+    if (h.startsWith('chat/')) {
+      const parts = h.split('/');
+      if (parts.length === 3) return {view: 'chat', uid: +parts[1], chatId: +parts[2]};
+    }
+    return {view: VIEW_LABELS[h] ? h : 'chats'};
   }
 
   let _popNav = false;
@@ -695,7 +699,13 @@ _WEB_HTML = """<!DOCTYPE html>
 
   window.addEventListener('popstate', e => {
     _popNav = true;
-    selectView((e.state && e.state.view) || viewFromHash());
+    if (e.state && e.state.view === 'chat') {
+      openChat(e.state.uid, e.state.chatId, e.state.label || '…');
+    } else {
+      const nav = viewFromHash();
+      if (nav.view === 'chat') openChat(nav.uid, nav.chatId, '…');
+      else selectView(nav.view);
+    }
     _popNav = false;
   });
 
@@ -840,8 +850,12 @@ _WEB_HTML = """<!DOCTYPE html>
     } catch {}
   }
   // On page load: show the view matching the hash, replace (not push) history entry
-  history.replaceState({view: viewFromHash()}, '', location.href);
-  _popNav = true; selectView(viewFromHash()); _popNav = false;
+  const _initNav = viewFromHash();
+  history.replaceState({view: _initNav.view, uid: _initNav.uid, chatId: _initNav.chatId}, '', location.href);
+  _popNav = true;
+  if (_initNav.view === 'chat') openChat(_initNav.uid, _initNav.chatId, '…');
+  else selectView(_initNav.view);
+  _popNav = false;
   tick();
   setInterval(tick, 2000);
 
@@ -951,6 +965,11 @@ _WEB_HTML = """<!DOCTYPE html>
     // Clean up previous chat SSE
     if (chatES) { chatES.close(); chatES = null; }
     chatUid = uid; chatChatId = chatId;
+
+    // Update URL
+    if (!_popNav) {
+      history.pushState({view: 'chat', uid, chatId, label}, '', `#chat/${uid}/${chatId}`);
+    }
 
     // Update topbar and switch view
     document.getElementById('topbar-label').firstElementChild.textContent = label;
