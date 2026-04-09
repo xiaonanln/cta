@@ -69,6 +69,8 @@ SESSIONS_PATH = os.path.join(CTA_HOME, "agents.json")
 MEMORY_DIR = os.path.join(CTA_HOME, "memory")
 CRONS_DIR = os.path.join(CTA_HOME, "crons")
 PREAMBLE_DIR = os.path.join(CTA_HOME, "preamble")
+GLOBAL_PREAMBLE_PATH = os.path.join(CTA_HOME, "global_preamble.md")
+GLOBAL_PREAMBLE = ""
 
 bot = None  # initialized in create_bot()
 user_sessions: dict[tuple[int, int], str] = {}  # (uid, chat_id) → Claude session ID
@@ -90,8 +92,16 @@ _chat_sse: dict[tuple[int, int], list] = {}     # (uid, chat_id) → [Queue]
 _chat_sse_lock = threading.Lock()
 
 
+def _read_global_preamble() -> str:
+    try:
+        with open(GLOBAL_PREAMBLE_PATH) as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return ""
+
+
 def init(config: dict):
-    global BOT_TOKEN, ALLOWED_USERS, TIMEOUT, MODEL, WEB_PORT, DEFAULT_CWD
+    global BOT_TOKEN, ALLOWED_USERS, TIMEOUT, MODEL, WEB_PORT, DEFAULT_CWD, GLOBAL_PREAMBLE
     BOT_TOKEN = config["telegram_bot_token"]
     ALLOWED_USERS = set(config["allowed_users"])
     TIMEOUT = config["claude_timeout"]
@@ -99,6 +109,7 @@ def init(config: dict):
     WEB_PORT = config.get("web_port", 17488)
     if config.get("default_cwd"):
         DEFAULT_CWD = os.path.expanduser(config["default_cwd"])
+    GLOBAL_PREAMBLE = _read_global_preamble()
     os.makedirs(MEMORY_DIR, exist_ok=True)
     os.makedirs(CRONS_DIR, exist_ok=True)
     os.makedirs(PREAMBLE_DIR, exist_ok=True)
@@ -633,6 +644,10 @@ _WEB_HTML = """<!DOCTYPE html>
         <label>Allowed users</label>
         <input id="cfg-users" type="text" placeholder="comma-separated user IDs, empty = all" />
       </div>
+      <div class="cfg-row" style="flex-direction:column;align-items:flex-start;gap:0.4rem;">
+        <label>Global preamble</label>
+        <textarea id="cfg-global-preamble" rows="5" style="width:100%;box-sizing:border-box;resize:vertical;font-family:inherit;font-size:0.9rem;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:0.4rem;" placeholder="Instructions injected into every agent's preamble…"></textarea>
+      </div>
       <div class="cfg-actions">
         <button class="cfg-save-btn" onclick="saveConfig()">Save</button>
         <span class="cfg-msg" id="cfg-msg"></span>
@@ -879,6 +894,7 @@ _WEB_HTML = """<!DOCTYPE html>
       document.getElementById('cfg-port').value = d.web_port ?? '';
       document.getElementById('cfg-cwd').value = d.default_cwd || '';
       document.getElementById('cfg-users').value = (d.allowed_users || []).join(', ');
+      document.getElementById('cfg-global-preamble').value = d.global_preamble || '';
     } catch {}
   }
 
@@ -892,6 +908,7 @@ _WEB_HTML = """<!DOCTYPE html>
       default_cwd: document.getElementById('cfg-cwd').value.trim(),
       allowed_users: document.getElementById('cfg-users').value
         .split(',').map(s => s.trim()).filter(Boolean).map(Number),
+      global_preamble: document.getElementById('cfg-global-preamble').value,
     };
     if (token) body.telegram_bot_token = token;
     try {
@@ -1066,12 +1083,13 @@ def _web_get_config():
         "web_port": cfg.get("web_port", WEB_PORT),
         "default_cwd": cfg.get("default_cwd", DEFAULT_CWD),
         "allowed_users": cfg.get("allowed_users", list(ALLOWED_USERS)),
+        "global_preamble": _read_global_preamble(),
     }
 
 
 @app.route("/config", methods=["POST"])
 def _web_set_config():
-    global BOT_TOKEN, MODEL, TIMEOUT, DEFAULT_CWD, ALLOWED_USERS
+    global BOT_TOKEN, MODEL, TIMEOUT, DEFAULT_CWD, ALLOWED_USERS, GLOBAL_PREAMBLE
     from flask import request
     data = request.get_json(silent=True) or {}
     try:
@@ -1097,6 +1115,17 @@ def _web_set_config():
     if "allowed_users" in data:
         cfg["allowed_users"] = [int(u) for u in data["allowed_users"] if str(u).strip()]
         ALLOWED_USERS = set(cfg["allowed_users"])
+    if "global_preamble" in data:
+        text = data["global_preamble"].strip()
+        if text:
+            with open(GLOBAL_PREAMBLE_PATH, "w") as f:
+                f.write(text)
+        else:
+            try:
+                os.unlink(GLOBAL_PREAMBLE_PATH)
+            except FileNotFoundError:
+                pass
+        GLOBAL_PREAMBLE = text
     try:
         tmp = CONFIG_PATH + ".tmp"
         with open(tmp, "w") as f:
@@ -1597,6 +1626,7 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
         f"[Agent chat:{uid}:{chat_id} | memory:{memory_path} | crons:{crons_path} | preamble:{_preamble_path(uid, chat_id)}]\n"
         f"Always reply after tool use.\n"
         f"Do NOT use built-in CronCreate, CronList, CronDelete tools. Manage crons by reading/writing the crons JSON file at {crons_path} directly.\n\n"
+        + (f"{GLOBAL_PREAMBLE}\n\n" if GLOBAL_PREAMBLE else "")
         + (f"{custom_preamble}\n\n" if custom_preamble else "")
     )
 
@@ -1673,6 +1703,7 @@ def _process_cron(uid: int, chat_id: int, task: dict, done: threading.Event):
         f"[Agent chat:{uid}:{chat_id} | memory:{memory_path} | crons:{crons_path} | preamble:{_preamble_path(uid, chat_id)}]\n"
         f"Always reply after tool use.\n"
         f"Do NOT use built-in CronCreate, CronList, CronDelete tools. Manage crons by reading/writing the crons JSON file at {crons_path} directly.\n\n"
+        + (f"{GLOBAL_PREAMBLE}\n\n" if GLOBAL_PREAMBLE else "")
         + (f"{custom_preamble}\n\n" if custom_preamble else "")
     )
     prompt = preamble + f"[Scheduled task {job_id}]\n{task['prompt']}"
