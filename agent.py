@@ -666,7 +666,12 @@ _WEB_HTML = """<!DOCTYPE html>
   let currentView = 'chats';
   const VIEW_LABELS = { chats: 'Chats', crons: 'Cronjobs', log: 'Log', status: 'Status', config: 'Config' };
 
-  function selectView(name) {
+  function viewFromHash() {
+    const h = location.hash.replace(/^#/, '') || 'chats';
+    return Object.keys(VIEW_LABELS).includes(h) ? h : 'chats';
+  }
+
+  function selectView(name, updateHash = true) {
     currentView = name;
     // Close chat SSE when navigating away
     if (name !== 'chat' && chatES) { chatES.close(); chatES = null; }
@@ -679,7 +684,10 @@ _WEB_HTML = """<!DOCTYPE html>
     document.getElementById('topbar-label').firstElementChild.textContent = VIEW_LABELS[name] || name;
     document.getElementById('topbar-sub').textContent = '';
     if (name === 'config') loadConfig();
+    if (updateHash) location.hash = name === 'chats' ? '' : name;
   }
+
+  window.addEventListener('hashchange', () => selectView(viewFromHash(), false));
 
   document.querySelectorAll('.nav-item').forEach(el => {
     el.addEventListener('click', () => selectView(el.dataset.view));
@@ -821,6 +829,8 @@ _WEB_HTML = """<!DOCTYPE html>
 
     } catch {}
   }
+  // Navigate to the view matching the current hash on page load
+  selectView(viewFromHash(), false);
   tick();
   setInterval(tick, 2000);
 
