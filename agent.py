@@ -496,10 +496,10 @@ _WEB_HTML = """<!DOCTYPE html>
                    margin-bottom: .9rem; }
     .cfg-row { display: flex; align-items: center; gap: .6rem; margin-bottom: .6rem; }
     .cfg-row label { color: var(--fg2); font-size: .75rem; width: 130px; flex-shrink: 0; }
-    .cfg-row input { flex: 1; background: var(--bg); border: 1px solid var(--border);
+    .cfg-row input, .cfg-row select { flex: 1; background: var(--bg); border: 1px solid var(--border);
                      border-radius: 6px; padding: .35rem .65rem; color: var(--fg);
                      font-size: .8rem; font-family: monospace; outline: none; }
-    .cfg-row input:focus { border-color: var(--accent); }
+    .cfg-row input:focus, .cfg-row select:focus { border-color: var(--accent); }
     .cfg-row input[type=number] { width: 90px; flex: none; }
     .cfg-actions { display: flex; align-items: center; gap: .6rem; margin-top: .75rem; }
     .cfg-save-btn { padding: .35rem .85rem; background: var(--accent); border: none;
@@ -612,7 +612,11 @@ _WEB_HTML = """<!DOCTYPE html>
       </div>
       <div class="cfg-row">
         <label>Default model</label>
-        <input id="cfg-model" type="text" />
+        <select id="cfg-model">
+          <option value="claude-opus-4-6">claude-opus-4-6</option>
+          <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
+          <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001</option>
+        </select>
       </div>
       <div class="cfg-row">
         <label>Claude timeout (s)</label>
@@ -867,7 +871,10 @@ _WEB_HTML = """<!DOCTYPE html>
     try {
       const r = await fetch('/config');
       const d = await r.json();
-      document.getElementById('cfg-model').value = d.model || '';
+      const modelSel = document.getElementById('cfg-model');
+      if (d.model && [...modelSel.options].some(o => o.value === d.model)) {
+        modelSel.value = d.model;
+      }
       document.getElementById('cfg-timeout').value = d.claude_timeout ?? '';
       document.getElementById('cfg-port').value = d.web_port ?? '';
       document.getElementById('cfg-cwd').value = d.default_cwd || '';
@@ -879,7 +886,7 @@ _WEB_HTML = """<!DOCTYPE html>
     const msg = document.getElementById('cfg-msg');
     const token = document.getElementById('cfg-token').value.trim();
     const body = {
-      model: document.getElementById('cfg-model').value.trim(),
+      model: document.getElementById('cfg-model').value,
       claude_timeout: parseInt(document.getElementById('cfg-timeout').value) || 600,
       web_port: parseInt(document.getElementById('cfg-port').value) || 17488,
       default_cwd: document.getElementById('cfg-cwd').value.trim(),
