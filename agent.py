@@ -464,6 +464,14 @@ _WEB_HTML = """<!DOCTYPE html>
                  padding: .45rem .9rem; cursor: pointer; font-size: .85rem; font-weight: 600; }
     #chat-send:hover { opacity: .85; }
     #chat-send:disabled { opacity: .4; cursor: default; }
+    #chat-typing { align-self: flex-start; padding: .45rem .8rem; display: none; }
+    #chat-typing.show { display: flex; }
+    .typing-dots { display: flex; gap: 4px; align-items: center; }
+    .typing-dots span { width: 7px; height: 7px; border-radius: 50%; background: var(--fg3);
+                        animation: typebounce .9s ease-in-out infinite; }
+    .typing-dots span:nth-child(2) { animation-delay: .15s; }
+    .typing-dots span:nth-child(3) { animation-delay: .3s; }
+    @keyframes typebounce { 0%,60%,100%{transform:translateY(0)} 30%{transform:translateY(-5px)} }
 
     /* status view */
     #v-status { padding: 1.25rem; align-content: flex-start; }
@@ -546,7 +554,9 @@ _WEB_HTML = """<!DOCTYPE html>
 
   <!-- Chat view (inline) -->
   <div class="view" id="view-chat">
-    <div id="chat-messages"></div>
+    <div id="chat-messages">
+      <div id="chat-typing"><div class="typing-dots"><span></span><span></span><span></span></div></div>
+    </div>
     <div id="chat-inputbar">
       <textarea id="chat-inp" rows="1" placeholder="Message…"></textarea>
       <button id="chat-send" onclick="chatSend()">Send</button>
@@ -719,6 +729,14 @@ _WEB_HTML = """<!DOCTYPE html>
           <span class="stat-val" title="${esc(String(v))}">${esc(String(v))}</span>
         </div>`).join('');
 
+      // Chat typing indicator
+      if (currentView === 'chat' && chatUid !== null) {
+        const isActive = d.sessions.some(s => s.uid === chatUid && s.chat_id === chatChatId && s.active);
+        const el = document.getElementById('chat-typing');
+        el.classList.toggle('show', isActive);
+        if (isActive) el.scrollIntoView({behavior: 'smooth'});
+      }
+
     } catch {}
   }
   tick();
@@ -800,7 +818,10 @@ _WEB_HTML = """<!DOCTYPE html>
 
     // Load history + subscribe
     const msgEl = document.getElementById('chat-messages');
-    msgEl.innerHTML = '';
+    const typing = document.getElementById('chat-typing');
+    // Clear all messages but keep typing indicator
+    while (msgEl.firstChild !== typing) msgEl.removeChild(msgEl.firstChild);
+    typing.classList.remove('show');
     fetch(`/chat/${uid}/${chatId}/history`).then(r => r.json()).then(d => {
       d.messages.forEach(m => chatAppend(m.role, m.text, m.ts, false));
       msgEl.scrollTop = msgEl.scrollHeight;
@@ -821,7 +842,8 @@ _WEB_HTML = """<!DOCTYPE html>
     const t = new Date(ts * 1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
     el.innerHTML = esc(text) + `<div class="cmsg-meta">${t}</div>`;
     const c = document.getElementById('chat-messages');
-    c.appendChild(el);
+    const typing = document.getElementById('chat-typing');
+    c.insertBefore(el, typing);
     if (scroll) el.scrollIntoView({behavior: 'smooth'});
   }
 
