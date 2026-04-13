@@ -794,17 +794,26 @@ class TestBotHandlers(unittest.TestCase):
     def test_messages_processed_sequentially(self, mock_claude):
         """Second message uses session ID set by first message."""
         results = []
+        barrier = threading.Barrier(2, timeout=5)
 
         def side_effect(*args, **kwargs):
             sid = kwargs.get("session_id")
             results.append(sid)
+            # Hold msg1 until msg2 is queued *after* worker has started msg1,
+            # so the two messages are NOT batched together.
+            if len(results) == 1:
+                barrier.wait()
+                time.sleep(0.1)
             return "reply", "new-sess"
 
         mock_claude.side_effect = side_effect
-        q = agent._get_user_queue(123, 123)
+        agent._get_user_queue(123, 123)
         agent.handle_message(make_fake_message("msg1"))
+        time.sleep(0.1)   # let the worker start processing msg1
+        barrier.wait()    # now msg1 is in flight — queue msg2 while it's running
         agent.handle_message(make_fake_message("msg2"))
-        time.sleep(1.0)
+
+        time.sleep(1.5)
         # First call: no session yet. Second call: session from first.
         self.assertIsNone(results[0])
         self.assertEqual(results[1], "new-sess")
@@ -1030,6 +1039,126 @@ class TestConcurrentUsers(unittest.TestCase):
         all_replies = [str(c) for c in self.bot.reply_to.call_args_list]
         waiting_replies = [r for r in all_replies if "Waiting" in r]
         self.assertEqual(len(waiting_replies), 0, "Same user should NOT get waiting notification")
+
+
+# ── Message batching ──────────────────────────────────────────────────────────
+
+class TestMessageBatching(unittest.TestCase):
+    """Tests for batching multiple pending text messages into one Claude call."""
+
+    def setUp(self):
+        self.bot = setup_fake_bot()
+        agent.ALLOWED_USERS.clear()
+        agent.claude_busy_for = None
+        self._orig_sessions_path = agent.SESSIONS_PATH
+        self._tmp_sessions = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+        self._tmp_sessions.close()
+        agent.SESSIONS_PATH = self._tmp_sessions.name
+
+    def tearDown(self):
+        agent.ALLOWED_USERS.clear()
+        agent.claude_busy_for = None
+        agent.SESSIONS_PATH = self._orig_sessions_path
+        for path in [self._tmp_sessions.name, self._tmp_sessions.name + ".tmp"]:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_is_plain_text_true(self):
+        msg = make_fake_message("hello", user_id=1, username="alice")
+        self.assertTrue(agent._is_plain_text(msg))
+
+    def test_is_plain_text_false_no_text(self):
+        msg = make_fake_message("hello", user_id=1, username="alice")
+        msg.text = None
+        self.assertFalse(agent._is_plain_text(msg))
+
+    def test_is_plain_text_false_dict(self):
+        self.assertFalse(agent._is_plain_text({"_type": "cron"}))
+
+    def test_is_plain_text_false_has_document(self):
+        msg = make_fake_message("hello", user_id=1, username="alice")
+        msg.document = object()
+        self.assertFalse(agent._is_plain_text(msg))
+
+    def test_is_plain_text_false_has_voice(self):
+        msg = make_fake_message("hello", user_id=1, username="alice")
+        msg.voice = object()
+        self.assertFalse(agent._is_plain_text(msg))
+
+    @patch("agent.call_claude")
+    def test_multiple_texts_batched_into_one_call(self, mock_claude):
+        """When multiple text messages queue up, they are combined into one Claude call."""
+        barrier = threading.Barrier(2, timeout=5)
+        captured_prompts = []
+
+        def slow_claude(prompt, *args, **kwargs):
+            captured_prompts.append(prompt)
+            # First call: hold until second+third messages are queued
+            if len(captured_prompts) == 1:
+                barrier.wait()
+                time.sleep(0.1)
+            return "reply", "sess"
+
+        mock_claude.side_effect = slow_claude
+
+        msg1 = make_fake_message("first", user_id=1, username="alice")
+        msg2 = make_fake_message("second", user_id=1, username="alice")
+        msg3 = make_fake_message("third", user_id=1, username="alice")
+
+        agent._get_user_queue(1, 1)
+        agent.handle_message(msg1)
+        time.sleep(0.1)  # let worker pick up msg1
+        # Queue msg2 and msg3 while msg1 is being processed
+        agent.handle_message(msg2)
+        agent.handle_message(msg3)
+        barrier.wait()  # release msg1 processing
+
+        time.sleep(1.5)  # let batched call complete
+
+        # Should be exactly 2 Claude calls: one for msg1, one for msg2+msg3 batched
+        self.assertEqual(mock_claude.call_count, 2)
+        batched_prompt = captured_prompts[1]
+        self.assertIn("[Message 1]: second", batched_prompt)
+        self.assertIn("[Message 2]: third", batched_prompt)
+
+    @patch("agent.call_claude")
+    def test_non_text_interrupts_batch(self, mock_claude):
+        """A non-text message in the queue stops batching; msg2 is not merged into msg1."""
+        captured_prompts = []
+        barrier = threading.Barrier(2, timeout=5)
+
+        def slow_claude(prompt, *args, **kwargs):
+            captured_prompts.append(prompt)
+            if len(captured_prompts) == 1:
+                barrier.wait()
+                time.sleep(0.1)
+            return "reply", "sess"
+
+        mock_claude.side_effect = slow_claude
+
+        msg1 = make_fake_message("first", user_id=1, username="alice")
+        msg2 = make_fake_message("second", user_id=1, username="alice")
+        msg_doc = make_fake_message("caption", user_id=1, username="alice")
+        msg_doc.document = MagicMock()
+
+        agent._get_user_queue(1, 1)
+        agent.handle_message(msg1)
+        time.sleep(0.1)
+        # Queue: doc (non-batchable) then msg2 — should not be batched with msg1
+        agent.handle_message(msg_doc)
+        agent.handle_message(msg2)
+        barrier.wait()
+
+        time.sleep(2.0)
+
+        # msg1 is processed alone (doc stops the drain); doc processing fails (mock can't
+        # write MagicMock bytes to a tempfile) → no call_claude; msg2 gets its own call.
+        # Total: 2 calls (msg1, msg2).
+        self.assertEqual(mock_claude.call_count, 2)
+        # msg1 prompt is just its text — no batching prefix
+        self.assertNotIn("[Message", captured_prompts[0])
+        # msg2 prompt is just its text — processed alone, not merged with anything
+        self.assertNotIn("[Message", captured_prompts[1])
 
 
 # ── User state ────────────────────────────────────────────────────────────────
