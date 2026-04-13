@@ -1935,36 +1935,41 @@ def _is_plain_text(item) -> bool:
     )
 
 
+BATCH_WINDOW = 3.0  # seconds to wait for more messages before processing
+
+
 def _user_worker(uid: int, chat_id: int, q: queue.Queue):
     while True:
         item = q.get()
+        # If first item is plain text, wait for the batch window then drain more
+        if _is_plain_text(item):
+            time.sleep(BATCH_WINDOW)
+            extra_texts = []
+            while True:
+                try:
+                    extra = q.get_nowait()
+                    if _is_plain_text(extra):
+                        extra_texts.append(extra.text)
+                        q.task_done()
+                    else:
+                        with q.mutex:
+                            q.queue.appendleft(extra)
+                            q.not_empty.notify()
+                        break
+                except queue.Empty:
+                    break
+            if extra_texts:
+                all_texts = [item.text] + extra_texts
+                item.text = "\n\n".join(
+                    f"[Message {i+1}]: {t}" for i, t in enumerate(all_texts)
+                )
+                tui_log(f"[cyan]batched {len(all_texts)} messages for {uid}:{chat_id}[/]")
         done = threading.Event()
         threading.Thread(target=_typing_loop, args=(chat_id, done), daemon=True).start()
         try:
             if isinstance(item, dict) and item.get("_type") == "cron":
                 _process_cron(uid, chat_id, item, done)
             else:
-                if _is_plain_text(item):
-                    extra_texts = []
-                    while True:
-                        try:
-                            extra = q.get_nowait()
-                            if _is_plain_text(extra):
-                                extra_texts.append(extra.text)
-                                q.task_done()
-                            else:
-                                with q.mutex:
-                                    q.queue.appendleft(extra)
-                                    q.not_empty.notify()
-                                break
-                        except queue.Empty:
-                            break
-                    if extra_texts:
-                        all_texts = [item.text] + extra_texts
-                        item.text = "\n\n".join(
-                            f"[Message {i+1}]: {t}" for i, t in enumerate(all_texts)
-                        )
-                        tui_log(f"[cyan]batched {len(all_texts)} messages for {uid}:{chat_id}[/]")
                 _process_message(uid, chat_id, item, done)
         except Exception as e:
             done.set()

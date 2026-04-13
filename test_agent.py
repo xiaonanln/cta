@@ -502,6 +502,8 @@ class TestBotHandlers(unittest.TestCase):
         self._orig_preamble_dir = agent.PREAMBLE_DIR
         self._tmp_preamble_dir = tempfile.mkdtemp()
         agent.PREAMBLE_DIR = self._tmp_preamble_dir
+        self._orig_batch_window = agent.BATCH_WINDOW
+        agent.BATCH_WINDOW = 0  # disable batch window in handler tests
 
     def tearDown(self):
         import shutil
@@ -509,6 +511,7 @@ class TestBotHandlers(unittest.TestCase):
         agent.SESSIONS_PATH = self._orig_sessions_path
         agent.MEMORY_DIR = self._orig_memory_dir
         agent.PREAMBLE_DIR = self._orig_preamble_dir
+        agent.BATCH_WINDOW = self._orig_batch_window
         for path in [self._tmp_sessions.name, self._tmp_sessions.name + ".tmp"]:
             if os.path.exists(path):
                 os.unlink(path)
@@ -794,26 +797,22 @@ class TestBotHandlers(unittest.TestCase):
     def test_messages_processed_sequentially(self, mock_claude):
         """Second message uses session ID set by first message."""
         results = []
-        barrier = threading.Barrier(2, timeout=5)
 
         def side_effect(*args, **kwargs):
-            sid = kwargs.get("session_id")
-            results.append(sid)
-            # Hold msg1 until msg2 is queued *after* worker has started msg1,
-            # so the two messages are NOT batched together.
-            if len(results) == 1:
-                barrier.wait()
-                time.sleep(0.1)
+            results.append(kwargs.get("session_id"))
             return "reply", "new-sess"
 
         mock_claude.side_effect = side_effect
-        agent._get_user_queue(123, 123)
-        agent.handle_message(make_fake_message("msg1"))
-        time.sleep(0.1)   # let the worker start processing msg1
-        barrier.wait()    # now msg1 is in flight — queue msg2 while it's running
-        agent.handle_message(make_fake_message("msg2"))
-
-        time.sleep(1.5)
+        orig_window = agent.BATCH_WINDOW
+        agent.BATCH_WINDOW = 0.05
+        try:
+            agent._get_user_queue(123, 123)
+            agent.handle_message(make_fake_message("msg1"))
+            time.sleep(0.5)   # let msg1 fully complete (window + processing)
+            agent.handle_message(make_fake_message("msg2"))
+            time.sleep(0.5)
+        finally:
+            agent.BATCH_WINDOW = orig_window
         # First call: no session yet. Second call: session from first.
         self.assertIsNone(results[0])
         self.assertEqual(results[1], "new-sess")
@@ -829,12 +828,15 @@ class TestCancel(unittest.TestCase):
         agent.ALLOWED_USERS.add(123)
         agent._cancelled_keys.clear()
         agent._current_proc = None
+        self._orig_batch_window = agent.BATCH_WINDOW
+        agent.BATCH_WINDOW = 0
 
     def tearDown(self):
         agent.ALLOWED_USERS.clear()
         agent._cancelled_keys.clear()
         agent._current_proc = None
         agent.claude_busy_key = None
+        agent.BATCH_WINDOW = self._orig_batch_window
         with agent.user_queues_lock:
             agent.user_queues.pop((123, 123), None)
 
@@ -906,11 +908,14 @@ class TestConcurrentUsers(unittest.TestCase):
         self._tmp_sessions = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
         self._tmp_sessions.close()
         agent.SESSIONS_PATH = self._tmp_sessions.name
+        self._orig_batch_window = agent.BATCH_WINDOW
+        agent.BATCH_WINDOW = 0  # disable batch window in concurrency tests
 
     def tearDown(self):
         agent.ALLOWED_USERS.clear()
         agent.claude_busy_for = None
         agent.SESSIONS_PATH = self._orig_sessions_path
+        agent.BATCH_WINDOW = self._orig_batch_window
         for path in [self._tmp_sessions.name, self._tmp_sessions.name + ".tmp"]:
             if os.path.exists(path):
                 os.unlink(path)
@@ -1087,77 +1092,69 @@ class TestMessageBatching(unittest.TestCase):
 
     @patch("agent.call_claude")
     def test_multiple_texts_batched_into_one_call(self, mock_claude):
-        """When multiple text messages queue up, they are combined into one Claude call."""
-        barrier = threading.Barrier(2, timeout=5)
+        """Messages arriving within BATCH_WINDOW are combined into one Claude call."""
         captured_prompts = []
 
-        def slow_claude(prompt, *args, **kwargs):
+        def fake_claude(prompt, *args, **kwargs):
             captured_prompts.append(prompt)
-            # First call: hold until second+third messages are queued
-            if len(captured_prompts) == 1:
-                barrier.wait()
-                time.sleep(0.1)
             return "reply", "sess"
 
-        mock_claude.side_effect = slow_claude
+        mock_claude.side_effect = fake_claude
 
-        msg1 = make_fake_message("first", user_id=1, username="alice")
-        msg2 = make_fake_message("second", user_id=1, username="alice")
-        msg3 = make_fake_message("third", user_id=1, username="alice")
+        orig_window = agent.BATCH_WINDOW
+        agent.BATCH_WINDOW = 0.1  # short window so test is fast
+        try:
+            msg1 = make_fake_message("first", user_id=1, username="alice")
+            msg2 = make_fake_message("second", user_id=1, username="alice")
+            msg3 = make_fake_message("third", user_id=1, username="alice")
 
-        agent._get_user_queue(1, 1)
-        agent.handle_message(msg1)
-        time.sleep(0.1)  # let worker pick up msg1
-        # Queue msg2 and msg3 while msg1 is being processed
-        agent.handle_message(msg2)
-        agent.handle_message(msg3)
-        barrier.wait()  # release msg1 processing
+            agent._get_user_queue(1, 1)
+            # Send all three before the window expires
+            agent.handle_message(msg1)
+            agent.handle_message(msg2)
+            agent.handle_message(msg3)
 
-        time.sleep(1.5)  # let batched call complete
+            time.sleep(1.0)  # wait for window + processing to complete
+        finally:
+            agent.BATCH_WINDOW = orig_window
 
-        # Should be exactly 2 Claude calls: one for msg1, one for msg2+msg3 batched
-        self.assertEqual(mock_claude.call_count, 2)
-        batched_prompt = captured_prompts[1]
-        self.assertIn("[Message 1]: second", batched_prompt)
-        self.assertIn("[Message 2]: third", batched_prompt)
+        # All three should be combined into one call
+        self.assertEqual(mock_claude.call_count, 1)
+        self.assertIn("[Message 1]: first", captured_prompts[0])
+        self.assertIn("[Message 2]: second", captured_prompts[0])
+        self.assertIn("[Message 3]: third", captured_prompts[0])
 
     @patch("agent.call_claude")
     def test_non_text_interrupts_batch(self, mock_claude):
-        """A non-text message in the queue stops batching; msg2 is not merged into msg1."""
+        """A non-text message in the queue stops the batch drain."""
         captured_prompts = []
-        barrier = threading.Barrier(2, timeout=5)
 
-        def slow_claude(prompt, *args, **kwargs):
+        def fake_claude(prompt, *args, **kwargs):
             captured_prompts.append(prompt)
-            if len(captured_prompts) == 1:
-                barrier.wait()
-                time.sleep(0.1)
             return "reply", "sess"
 
-        mock_claude.side_effect = slow_claude
+        mock_claude.side_effect = fake_claude
 
-        msg1 = make_fake_message("first", user_id=1, username="alice")
-        msg2 = make_fake_message("second", user_id=1, username="alice")
-        msg_doc = make_fake_message("caption", user_id=1, username="alice")
-        msg_doc.document = MagicMock()
+        orig_window = agent.BATCH_WINDOW
+        agent.BATCH_WINDOW = 0.1
+        try:
+            msg1 = make_fake_message("first", user_id=1, username="alice")
+            msg_doc = make_fake_message("caption", user_id=1, username="alice")
+            msg_doc.document = MagicMock()
+            msg2 = make_fake_message("second", user_id=1, username="alice")
 
-        agent._get_user_queue(1, 1)
-        agent.handle_message(msg1)
-        time.sleep(0.1)
-        # Queue: doc (non-batchable) then msg2 — should not be batched with msg1
-        agent.handle_message(msg_doc)
-        agent.handle_message(msg2)
-        barrier.wait()
+            agent._get_user_queue(1, 1)
+            agent.handle_message(msg1)
+            agent.handle_message(msg_doc)   # stops the drain
+            agent.handle_message(msg2)
 
-        time.sleep(2.0)
+            time.sleep(1.5)
+        finally:
+            agent.BATCH_WINDOW = orig_window
 
-        # msg1 is processed alone (doc stops the drain); doc processing fails (mock can't
-        # write MagicMock bytes to a tempfile) → no call_claude; msg2 gets its own call.
-        # Total: 2 calls (msg1, msg2).
+        # msg1 alone (doc stops drain), doc fails (no call_claude), msg2 alone = 2 calls
         self.assertEqual(mock_claude.call_count, 2)
-        # msg1 prompt is just its text — no batching prefix
         self.assertNotIn("[Message", captured_prompts[0])
-        # msg2 prompt is just its text — processed alone, not merged with anything
         self.assertNotIn("[Message", captured_prompts[1])
 
 
