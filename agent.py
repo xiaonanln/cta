@@ -1923,6 +1923,18 @@ def _process_cron(uid: int, chat_id: int, task: dict, done: threading.Event):
         bot.send_message(chat_id, telegramify_markdown.markdownify(chunk), parse_mode="MarkdownV2")
 
 
+def _is_plain_text(item) -> bool:
+    """Return True if item is a plain text message that can be batched."""
+    return (
+        not isinstance(item, dict)
+        and getattr(item, "text", None)
+        and not getattr(item, "document", None)
+        and not getattr(item, "voice", None)
+        and not getattr(item, "audio", None)
+        and not getattr(item, "photo", None)
+    )
+
+
 def _user_worker(uid: int, chat_id: int, q: queue.Queue):
     while True:
         item = q.get()
@@ -1932,6 +1944,27 @@ def _user_worker(uid: int, chat_id: int, q: queue.Queue):
             if isinstance(item, dict) and item.get("_type") == "cron":
                 _process_cron(uid, chat_id, item, done)
             else:
+                if _is_plain_text(item):
+                    extra_texts = []
+                    while True:
+                        try:
+                            extra = q.get_nowait()
+                            if _is_plain_text(extra):
+                                extra_texts.append(extra.text)
+                                q.task_done()
+                            else:
+                                with q.mutex:
+                                    q.queue.appendleft(extra)
+                                    q.not_empty.notify()
+                                break
+                        except queue.Empty:
+                            break
+                    if extra_texts:
+                        all_texts = [item.text] + extra_texts
+                        item.text = "\n\n".join(
+                            f"[Message {i+1}]: {t}" for i, t in enumerate(all_texts)
+                        )
+                        tui_log(f"[cyan]batched {len(all_texts)} messages for {uid}:{chat_id}[/]")
                 _process_message(uid, chat_id, item, done)
         except Exception as e:
             done.set()
