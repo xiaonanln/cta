@@ -1803,6 +1803,23 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
             bot.reply_to(message, f"❌ Could not download file: {e}")
             done.set()
             return
+    elif message.photo:
+        try:
+            photo = message.photo[-1]  # highest resolution
+            file_info = bot.get_file(photo.file_id)
+            data = bot.download_file(file_info.file_path)
+            ext = os.path.splitext(file_info.file_path)[1] or ".jpg"
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+            tmp.write(data)
+            tmp.close()
+            tmp_photo = tmp.name
+            user_instruction = f"\n\nUser's question: {caption}" if caption else ""
+            prompt = memory_prefix + f"Use the Read tool to view the image at: {tmp_photo}{user_instruction}"
+        except Exception as e:
+            tui_log(f"[red]⚠ photo download failed: {escape(str(e))}[/]")
+            bot.reply_to(message, f"❌ Could not download photo: {e}")
+            done.set()
+            return
     elif message.voice or message.audio:
         voice = message.voice or message.audio
         try:
@@ -2148,6 +2165,18 @@ def handle_document(message):
     _get_user_queue(uid, message.chat.id).put(message)
 
 
+def handle_photo(message):
+    uid = message.from_user.id
+    if message.chat.type == "private":
+        source = "[DM]"
+    else:
+        source = f"[Group: {escape(message.chat.title or str(message.chat.id))}]"
+    tui_log(f"[green]→[/] {source} [bold]{escape(str(message.from_user.username or uid))}[/] [dim]🖼 photo[/]")
+    if not _allowed(message):
+        return
+    _get_user_queue(uid, message.chat.id).put(message)
+
+
 def handle_voice(message):
     uid = message.from_user.id
     if message.chat.type == "private":
@@ -2185,6 +2214,7 @@ def create_bot():
     bot.message_handler(commands=["status"])(cmd_status)
     bot.message_handler(func=lambda m: m.text and not m.text.startswith("/"))(handle_message)
     bot.message_handler(content_types=["document"])(handle_document)
+    bot.message_handler(content_types=["photo"])(handle_photo)
     bot.message_handler(content_types=["voice", "audio"])(handle_voice)
     return bot
 
