@@ -2022,6 +2022,8 @@ def cmd_help(message):
         "/cd `<path>` — change working directory (creates it if needed)\n"
         "/pwd — show current working directory\n"
         "/model `<name>` — switch Claude model (clears session)\n"
+        "/opus — switch to latest Opus model (clears session)\n"
+        "/sonnet — switch to latest Sonnet model (clears session)\n"
         "/timeout `<seconds>` — set per-chat Claude timeout (or `reset`)\n"
         "/status — show model, cwd, timeout, and session info"
     ), parse_mode="Markdown")
@@ -2095,6 +2097,26 @@ def cmd_model(message):
     if not name:
         bot.reply_to(message, f"🤖 Model: `{user_model.get((uid, message.chat.id), MODEL)}`", parse_mode="Markdown")
         return
+    user_model[(uid, message.chat.id)] = name
+    user_sessions.pop((uid, message.chat.id), None)
+    save_sessions()
+    bot.reply_to(message, f"🤖 Model → `{name}` (session cleared)", parse_mode="Markdown")
+
+
+def cmd_opus(message):
+    if not _allowed(message): return
+    uid = message.from_user.id
+    name = "claude-opus-4-7"
+    user_model[(uid, message.chat.id)] = name
+    user_sessions.pop((uid, message.chat.id), None)
+    save_sessions()
+    bot.reply_to(message, f"🤖 Model → `{name}` (session cleared)", parse_mode="Markdown")
+
+
+def cmd_sonnet(message):
+    if not _allowed(message): return
+    uid = message.from_user.id
+    name = "claude-sonnet-4-6"
     user_model[(uid, message.chat.id)] = name
     user_sessions.pop((uid, message.chat.id), None)
     save_sessions()
@@ -2210,6 +2232,8 @@ def create_bot():
     bot.message_handler(commands=["cd"])(cmd_cd)
     bot.message_handler(commands=["pwd"])(cmd_pwd)
     bot.message_handler(commands=["model"])(cmd_model)
+    bot.message_handler(commands=["opus"])(cmd_opus)
+    bot.message_handler(commands=["sonnet"])(cmd_sonnet)
     bot.message_handler(commands=["timeout"])(cmd_timeout)
     bot.message_handler(commands=["status"])(cmd_status)
     bot.message_handler(func=lambda m: m.text and not m.text.startswith("/"))(handle_message)
