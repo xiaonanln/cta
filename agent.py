@@ -232,43 +232,58 @@ def _save_cron_jobs(uid: int, chat_id: int, jobs: list):
         tui_log(f"[red]Warning: could not save crons for {uid}:{chat_id}: {escape(str(e))}[/]")
 
 
+def _cron_tick_once(now: datetime):
+    """Run one scheduler tick: fire due jobs and persist next_run updates."""
+    from croniter import croniter
+    if not os.path.isdir(CRONS_DIR):
+        return
+    for fname in os.listdir(CRONS_DIR):
+        if not fname.endswith(".json"):
+            continue
+        try:
+            uid_str, chat_str = fname[:-5].split(":", 1)
+            uid, chat_id = int(uid_str), int(chat_str)
+        except ValueError:
+            continue
+        jobs = _load_cron_jobs(uid, chat_id)
+        changed = False
+        for job in jobs:
+            try:
+                raw = job.get("next_run")
+                try:
+                    next_run = datetime.fromisoformat(raw) if raw else None
+                except (TypeError, ValueError):
+                    next_run = None
+                if next_run is None:
+                    # next_run missing or unparseable — default to next scheduled
+                    # occurrence so jobs written directly to the JSON file
+                    # (without the web UI) still run.
+                    job["next_run"] = croniter(job["schedule"], now).get_next(datetime).isoformat()
+                    changed = True
+                    tui_log(f"[yellow]⏰ cron[/] {uid}:{chat_id} job={job['id']} next_run defaulted to {job['next_run']}")
+                    continue
+                if next_run <= now:
+                    _get_user_queue(uid, chat_id).put({
+                        "_type": "cron",
+                        "uid": uid,
+                        "chat_id": chat_id,
+                        "job_id": job["id"],
+                        "prompt": job["prompt"],
+                    })
+                    tui_log(f"[magenta]⏰ cron[/] {uid}:{chat_id} job={job['id']}")
+                    job["next_run"] = croniter(job["schedule"], now).get_next(datetime).isoformat()
+                    changed = True
+            except Exception as e:
+                tui_log(f"[red]cron error {uid}:{chat_id} job={job.get('id')}: {escape(str(e))}[/]")
+        if changed:
+            _save_cron_jobs(uid, chat_id, jobs)
+
+
 def _cron_scheduler():
     """Background thread: fires due cron jobs into user queues every 60s."""
-    from croniter import croniter
     while True:
         time.sleep(60)
-        now = datetime.now()
-        if not os.path.isdir(CRONS_DIR):
-            continue
-        for fname in os.listdir(CRONS_DIR):
-            if not fname.endswith(".json"):
-                continue
-            try:
-                uid_str, chat_str = fname[:-5].split(":", 1)
-                uid, chat_id = int(uid_str), int(chat_str)
-            except ValueError:
-                continue
-            jobs = _load_cron_jobs(uid, chat_id)
-            changed = False
-            for job in jobs:
-                try:
-                    next_run = datetime.fromisoformat(job["next_run"])
-                    if next_run <= now:
-                        _get_user_queue(uid, chat_id).put({
-                            "_type": "cron",
-                            "uid": uid,
-                            "chat_id": chat_id,
-                            "job_id": job["id"],
-                            "prompt": job["prompt"],
-                        })
-                        tui_log(f"[magenta]⏰ cron[/] {uid}:{chat_id} job={job['id']}")
-                        cron = croniter(job["schedule"], now)
-                        job["next_run"] = cron.get_next(datetime).isoformat()
-                        changed = True
-                except Exception as e:
-                    tui_log(f"[red]cron error {uid}:{chat_id} job={job.get('id')}: {escape(str(e))}[/]")
-            if changed:
-                _save_cron_jobs(uid, chat_id, jobs)
+        _cron_tick_once(datetime.now())
 
 
 # ── Web interface ─────────────────────────────────────────────────────────────
@@ -2014,6 +2029,7 @@ def cmd_start(message):
 
 
 def cmd_help(message):
+    print(f"[CMD_HELP] entered chat={message.chat.id} text={message.text!r}", flush=True)
     if not _allowed(message): return
     bot.reply_to(message, (
         "*Commands*\n"
@@ -2106,23 +2122,37 @@ def cmd_model(message):
 
 
 def cmd_opus(message):
-    if not _allowed(message): return
+    print(f"[CMD_OPUS] entered chat={message.chat.id} user={message.from_user.id} text={message.text!r}", flush=True)
+    if not _allowed(message):
+        print(f"[CMD_OPUS] denied", flush=True)
+        return
     uid = message.from_user.id
     name = "claude-opus-4-7"
     user_model[(uid, message.chat.id)] = name
     user_sessions.pop((uid, message.chat.id), None)
     save_sessions()
-    bot.reply_to(message, f"🤖 Model → `{name}` (session cleared)", parse_mode="Markdown")
+    try:
+        bot.reply_to(message, f"🤖 Model → `{name}` (session cleared)", parse_mode="Markdown")
+        print(f"[CMD_OPUS] reply_to OK", flush=True)
+    except Exception as e:
+        print(f"[CMD_OPUS] reply_to FAILED: {e!r}", flush=True)
 
 
 def cmd_sonnet(message):
-    if not _allowed(message): return
+    print(f"[CMD_SONNET] entered chat={message.chat.id} user={message.from_user.id} text={message.text!r}", flush=True)
+    if not _allowed(message):
+        print(f"[CMD_SONNET] denied", flush=True)
+        return
     uid = message.from_user.id
     name = "claude-sonnet-4-6"
     user_model[(uid, message.chat.id)] = name
     user_sessions.pop((uid, message.chat.id), None)
     save_sessions()
-    bot.reply_to(message, f"🤖 Model → `{name}` (session cleared)", parse_mode="Markdown")
+    try:
+        bot.reply_to(message, f"🤖 Model → `{name}` (session cleared)", parse_mode="Markdown")
+        print(f"[CMD_SONNET] reply_to OK", flush=True)
+    except Exception as e:
+        print(f"[CMD_SONNET] reply_to FAILED: {e!r}", flush=True)
 
 
 def cmd_timeout(message):
@@ -2164,6 +2194,7 @@ def cmd_status(message):
 
 
 def handle_message(message):
+    print(f"[HANDLE_MSG] chat={message.chat.id} user={message.from_user.id} text={message.text!r}", flush=True)
     uid = message.from_user.id
     if message.chat.type == "private":
         source = "[DM]"
