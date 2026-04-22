@@ -26,9 +26,11 @@ from rich.markup import escape
 
 # Ensure /usr/local/bin is in PATH so shell commands issued by Claude (docker, etc.)
 # work even when agent.py is launched via launchd/systemd with a minimal environment.
-_path_parts = os.environ.get("PATH", "").split(os.pathsep)
-if "/usr/local/bin" not in _path_parts:
-    os.environ["PATH"] = "/usr/local/bin" + os.pathsep + os.environ.get("PATH", "")
+# If PATH is unset, fall back to standard system dirs (not "" — which resolves to CWD).
+_existing_path = os.environ.get("PATH", "")
+if "/usr/local/bin" not in _existing_path.split(os.pathsep):
+    _base = _existing_path or "/usr/bin:/bin:/usr/sbin:/sbin"
+    os.environ["PATH"] = "/usr/local/bin" + os.pathsep + _base
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
