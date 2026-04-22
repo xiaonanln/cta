@@ -2116,9 +2116,8 @@ def cmd_model(message):
         bot.reply_to(message, f"🤖 Model: `{user_model.get((uid, message.chat.id), MODEL)}`", parse_mode="Markdown")
         return
     user_model[(uid, message.chat.id)] = name
-    user_sessions.pop((uid, message.chat.id), None)
     save_sessions()
-    bot.reply_to(message, f"🤖 Model → `{name}` (session cleared)", parse_mode="Markdown")
+    bot.reply_to(message, f"🤖 Model → `{name}`", parse_mode="Markdown")
 
 
 def cmd_opus(message):
@@ -2129,10 +2128,9 @@ def cmd_opus(message):
     uid = message.from_user.id
     name = "claude-opus-4-7"
     user_model[(uid, message.chat.id)] = name
-    user_sessions.pop((uid, message.chat.id), None)
     save_sessions()
     try:
-        bot.reply_to(message, f"🤖 Model → `{name}` (session cleared)", parse_mode="Markdown")
+        bot.reply_to(message, f"🤖 Model → `{name}`", parse_mode="Markdown")
         print(f"[CMD_OPUS] reply_to OK", flush=True)
     except Exception as e:
         print(f"[CMD_OPUS] reply_to FAILED: {e!r}", flush=True)
@@ -2146,10 +2144,9 @@ def cmd_sonnet(message):
     uid = message.from_user.id
     name = "claude-sonnet-4-6"
     user_model[(uid, message.chat.id)] = name
-    user_sessions.pop((uid, message.chat.id), None)
     save_sessions()
     try:
-        bot.reply_to(message, f"🤖 Model → `{name}` (session cleared)", parse_mode="Markdown")
+        bot.reply_to(message, f"🤖 Model → `{name}`", parse_mode="Markdown")
         print(f"[CMD_SONNET] reply_to OK", flush=True)
     except Exception as e:
         print(f"[CMD_SONNET] reply_to FAILED: {e!r}", flush=True)
