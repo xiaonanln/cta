@@ -79,7 +79,7 @@ Sessions and working directories persist in `~/.cta/sessions.json` and survive r
 | `/clear` | Reset conversation |
 | `/cd <path>` | Change Claude's working directory |
 | `/pwd` | Show current working directory |
-| `/model <name>` | Switch Claude model |
+| `/model <name>` | Switch Claude model (clears current session) |
 | `/status` | Show model, cwd, and session info |
 
 ## How It Works
