@@ -10,6 +10,7 @@ import logging
 import os
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -65,6 +66,7 @@ TIMEOUT = 600
 MODEL = "claude-sonnet-4-6"
 WEB_PORT = 17488
 DEFAULT_CWD = os.getcwd()
+CLAUDE_BIN = shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
 SESSIONS_PATH = os.path.join(CTA_HOME, "agents.json")
 MEMORY_DIR = os.path.join(CTA_HOME, "memory")
 CRONS_DIR = os.path.join(CTA_HOME, "crons")
@@ -1628,7 +1630,7 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
     Retries up to max_retries times on transient failures (empty/error response).
     """
     cwd = cwd or DEFAULT_CWD
-    cmd = ["claude", "--print", "--dangerously-skip-permissions",
+    cmd = [CLAUDE_BIN, "--print", "--dangerously-skip-permissions",
            "--model", model or MODEL, "--output-format", "json", "-p", prompt]
     if session_id:
         cmd += ["--resume", session_id]
