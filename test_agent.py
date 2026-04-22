@@ -1296,6 +1296,32 @@ class TestCronScheduler(unittest.TestCase):
         reloaded = agent._load_cron_jobs(123, 456)
         self.assertGreater(datetime.fromisoformat(reloaded[0]["next_run"]), now)
 
+    def test_cron_tick_defaults_missing_next_run(self):
+        """Jobs without next_run (e.g. written directly to JSON) get auto-defaulted to the next
+        scheduled occurrence and persisted — they should NOT fire immediately."""
+        from datetime import datetime, timedelta
+        # Daily at 09:00. Regardless of 'now', next occurrence is in the future.
+        jobs = [{"id": "no-nr", "schedule": "0 9 * * *", "prompt": "hi"}]
+        self._write_cron_file(123, 456, jobs)
+        before = len(agent._get_user_queue(123, 456).queue) if hasattr(agent._get_user_queue(123, 456), "queue") else 0
+        agent._cron_tick_once(datetime.now())
+        reloaded = agent._load_cron_jobs(123, 456)
+        self.assertIn("next_run", reloaded[0])
+        next_run = datetime.fromisoformat(reloaded[0]["next_run"])
+        self.assertGreater(next_run, datetime.now() - timedelta(seconds=1))
+        # Nothing should have been queued — the default fills next_run for the future, not 'now'.
+        q = agent._get_user_queue(123, 456)
+        self.assertTrue(q.empty())
+
+    def test_cron_tick_defaults_invalid_next_run(self):
+        """Unparseable next_run values should also be defaulted, not crash the scheduler."""
+        from datetime import datetime
+        jobs = [{"id": "bad-nr", "schedule": "0 9 * * *", "prompt": "hi", "next_run": "not-a-date"}]
+        self._write_cron_file(123, 456, jobs)
+        agent._cron_tick_once(datetime.now())
+        reloaded = agent._load_cron_jobs(123, 456)
+        datetime.fromisoformat(reloaded[0]["next_run"])  # must now parse
+
     @patch("agent.call_claude", return_value=("ok", "s"))
     def test_prompt_includes_crons_path(self, mock_claude):
         """Regular messages should reference the crons file path."""
