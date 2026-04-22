@@ -24,6 +24,12 @@ import telegramify_markdown
 from flask import Flask, Response, stream_with_context
 from rich.markup import escape
 
+# Ensure /usr/local/bin is in PATH so shell commands issued by Claude (docker, etc.)
+# work even when agent.py is launched via launchd/systemd with a minimal environment.
+_path_parts = os.environ.get("PATH", "").split(os.pathsep)
+if "/usr/local/bin" not in _path_parts:
+    os.environ["PATH"] = "/usr/local/bin" + os.pathsep + os.environ.get("PATH", "")
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
 CTA_HOME = os.path.expanduser("~/.cta")
