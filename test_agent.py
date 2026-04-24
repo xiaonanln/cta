@@ -1313,6 +1313,32 @@ class TestCronScheduler(unittest.TestCase):
         q = agent._get_user_queue(123, 456)
         self.assertTrue(q.empty())
 
+    def test_crons_parse_error_detection(self):
+        """Broken JSON should be surfaced via _crons_parse_error, not silently hidden."""
+        path = os.path.join(self._tmp_crons, "123:456.json")
+        with open(path, "w") as f:
+            f.write('[{"id": "x", "prompt": "bad "unescaped" quotes"}]')
+        err = agent._crons_parse_error(123, 456)
+        self.assertIsNotNone(err)
+        self.assertIn("line", err)
+        # Valid file returns None
+        agent._save_cron_jobs(123, 456, [{"id": "ok", "schedule": "0 9 * * *", "prompt": "fine"}])
+        self.assertIsNone(agent._crons_parse_error(123, 456))
+        # Missing file returns None
+        self.assertIsNone(agent._crons_parse_error(999, 999))
+
+    @patch("agent.call_claude", return_value=("ok", "s"))
+    def test_broken_cron_file_surfaces_warning_in_preamble(self, mock_claude):
+        """When the cron file is invalid JSON, the next agent turn should see a warning."""
+        path = os.path.join(self._tmp_crons, "123:123.json")
+        with open(path, "w") as f:
+            f.write('[{"id": "x", "prompt": "bad "quotes"}]')
+        agent.handle_message(make_fake_message("hello"))
+        time.sleep(0.5)
+        prompt = mock_claude.call_args[0][0]
+        self.assertIn("INVALID JSON", prompt)
+        self.assertIn("123:123.json", prompt)
+
     def test_cron_tick_defaults_invalid_next_run(self):
         """Unparseable next_run values should also be defaulted, not crash the scheduler."""
         from datetime import datetime

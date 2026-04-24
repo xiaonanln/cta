@@ -229,6 +229,26 @@ def _load_cron_jobs(uid: int, chat_id: int) -> list:
         return []
 
 
+def _crons_parse_error(uid: int, chat_id: int):
+    """Return a short error message if the crons file exists but won't parse, else None.
+
+    Silent parse failures in _load_cron_jobs used to hide broken files from both
+    the agent and the UI. This helper lets callers surface the error (e.g. into
+    the next preamble) so the agent that wrote the bad JSON can self-correct.
+    """
+    path = _cron_path(uid, chat_id)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            json.load(f)
+        return None
+    except json.JSONDecodeError as e:
+        return f"line {e.lineno} col {e.colno}: {e.msg}"
+    except Exception as e:
+        return str(e)
+
+
 def _save_cron_jobs(uid: int, chat_id: int, jobs: list):
     path = _cron_path(uid, chat_id)
     tmp = path + ".tmp"
@@ -1796,10 +1816,14 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
     crons_path = os.path.join(CRONS_DIR, f"{uid}:{chat_id}.json")
     _ensure_cron_file(uid, chat_id)
     custom_preamble = _read_preamble(uid, chat_id)
+    crons_err = _crons_parse_error(uid, chat_id)
+    if crons_err:
+        tui_log(f"[red]⚠ crons parse error {uid}:{chat_id}: {escape(crons_err)}[/]")
     memory_prefix = (
         f"[Agent chat:{uid}:{chat_id} | memory:{memory_path} | crons:{crons_path} | preamble:{_preamble_path(uid, chat_id)}]\n"
         f"Always reply after tool use.\n"
         f"Do NOT use built-in CronCreate, CronList, CronDelete tools. Manage crons by reading/writing the crons JSON file at {crons_path} directly.\n\n"
+        + (f"⚠ Your crons file at {crons_path} is INVALID JSON ({crons_err}). Scheduled jobs in it will NOT run and are hidden from the UI. Fix the JSON syntax (likely unescaped quotes in a prompt string) so your crons work again.\n\n" if crons_err else "")
         + (f"{GLOBAL_PREAMBLE}\n\n" if GLOBAL_PREAMBLE else "")
         + (f"{custom_preamble}\n\n" if custom_preamble else "")
     )
@@ -1928,10 +1952,14 @@ def _process_cron(uid: int, chat_id: int, task: dict, done: threading.Event):
     crons_path = os.path.join(CRONS_DIR, f"{uid}:{chat_id}.json")
     _ensure_cron_file(uid, chat_id)
     custom_preamble = _read_preamble(uid, chat_id)
+    crons_err = _crons_parse_error(uid, chat_id)
+    if crons_err:
+        tui_log(f"[red]⚠ crons parse error {uid}:{chat_id}: {escape(crons_err)}[/]")
     preamble = (
         f"[Agent chat:{uid}:{chat_id} | memory:{memory_path} | crons:{crons_path} | preamble:{_preamble_path(uid, chat_id)}]\n"
         f"Always reply after tool use.\n"
         f"Do NOT use built-in CronCreate, CronList, CronDelete tools. Manage crons by reading/writing the crons JSON file at {crons_path} directly.\n\n"
+        + (f"⚠ Your crons file at {crons_path} is INVALID JSON ({crons_err}). Scheduled jobs in it will NOT run and are hidden from the UI. Fix the JSON syntax (likely unescaped quotes in a prompt string) so your crons work again.\n\n" if crons_err else "")
         + (f"{GLOBAL_PREAMBLE}\n\n" if GLOBAL_PREAMBLE else "")
         + (f"{custom_preamble}\n\n" if custom_preamble else "")
     )
