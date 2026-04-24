@@ -36,6 +36,8 @@ if "/usr/local/bin" not in _existing_path.split(os.pathsep):
 
 CTA_HOME = os.path.expanduser("~/.cta")
 CONFIG_PATH = os.path.join(CTA_HOME, "config.json")
+CTA_ROOT = os.path.dirname(os.path.abspath(__file__))
+CRON_CLI_PATH = os.path.join(CTA_ROOT, "cron.py")
 
 DEFAULT_CONFIG = {
     "telegram_bot_token": "",
@@ -1665,23 +1667,32 @@ def _web_chat_send(uid, chat_id):
 # ── Claude CLI ────────────────────────────────────────────────────────────────
 
 def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str = None,
-                max_retries: int = 2, retry_delay: float = 2.0, timeout: int = None) -> tuple[str, str]:
+                max_retries: int = 2, retry_delay: float = 2.0, timeout: int = None,
+                uid: int = None, chat_id: int = None) -> tuple[str, str]:
     """Call Claude Code CLI. Returns (text, session_id).
 
     Serialized with claude_lock because Max/Pro subscriptions only allow
     one concurrent CLI session — a second call would hang or error.
     Retries up to max_retries times on transient failures (empty/error response).
+
+    When uid/chat_id are provided, sets CTA_UID/CTA_CHAT_ID in the subprocess env
+    so cron.py (and any other helper scripts) can know which chat they're in.
     """
     cwd = cwd or DEFAULT_CWD
     cmd = [CLAUDE_BIN, "--print", "--dangerously-skip-permissions",
            "--model", model or MODEL, "--output-format", "json", "-p", prompt]
     if session_id:
         cmd += ["--resume", session_id]
+    env = os.environ.copy()
+    if uid is not None:
+        env["CTA_UID"] = str(uid)
+    if chat_id is not None:
+        env["CTA_CHAT_ID"] = str(chat_id)
     global _current_proc
     last_error = ""
     for attempt in range(max_retries + 1):
         try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd)
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd, env=env)
             _current_proc = proc
             try:
                 stdout, stderr = proc.communicate(timeout=timeout or TIMEOUT)
@@ -1822,7 +1833,7 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
     memory_prefix = (
         f"[Agent chat:{uid}:{chat_id} | memory:{memory_path} | crons:{crons_path} | preamble:{_preamble_path(uid, chat_id)}]\n"
         f"Always reply after tool use.\n"
-        f"Do NOT use built-in CronCreate, CronList, CronDelete tools. Manage crons by reading/writing the crons JSON file at {crons_path} directly.\n\n"
+        f"Do NOT use built-in CronCreate, CronList, CronDelete tools. Manage crons with: python3 {CRON_CLI_PATH} add|list|remove|update (preferred — avoids JSON escape bugs; CTA_UID/CTA_CHAT_ID are already set in env). File at {crons_path} is fallback for inspection only.\n\n"
         + (f"⚠ Your crons file at {crons_path} is INVALID JSON ({crons_err}). Scheduled jobs in it will NOT run and are hidden from the UI. Fix the JSON syntax (likely unescaped quotes in a prompt string) so your crons work again.\n\n" if crons_err else "")
         + (f"{GLOBAL_PREAMBLE}\n\n" if GLOBAL_PREAMBLE else "")
         + (f"{custom_preamble}\n\n" if custom_preamble else "")
@@ -1912,11 +1923,11 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
         claude_busy_for = username
         claude_busy_key = key
         try:
-            reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=session_id, model=model, timeout=timeout)
+            reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=session_id, model=model, timeout=timeout, uid=uid, chat_id=chat_id)
             if session_id and "No conversation found with session ID" in reply:
                 tui_log(f"[yellow]⚠ stale session for {escape(username)}, retrying fresh[/]")
                 user_sessions.pop(key, None)
-                reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=None, model=model)
+                reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=None, model=model, uid=uid, chat_id=chat_id)
         finally:
             claude_busy_for = None
             claude_busy_key = None
@@ -1958,7 +1969,7 @@ def _process_cron(uid: int, chat_id: int, task: dict, done: threading.Event):
     preamble = (
         f"[Agent chat:{uid}:{chat_id} | memory:{memory_path} | crons:{crons_path} | preamble:{_preamble_path(uid, chat_id)}]\n"
         f"Always reply after tool use.\n"
-        f"Do NOT use built-in CronCreate, CronList, CronDelete tools. Manage crons by reading/writing the crons JSON file at {crons_path} directly.\n\n"
+        f"Do NOT use built-in CronCreate, CronList, CronDelete tools. Manage crons with: python3 {CRON_CLI_PATH} add|list|remove|update (preferred — avoids JSON escape bugs; CTA_UID/CTA_CHAT_ID are already set in env). File at {crons_path} is fallback for inspection only.\n\n"
         + (f"⚠ Your crons file at {crons_path} is INVALID JSON ({crons_err}). Scheduled jobs in it will NOT run and are hidden from the UI. Fix the JSON syntax (likely unescaped quotes in a prompt string) so your crons work again.\n\n" if crons_err else "")
         + (f"{GLOBAL_PREAMBLE}\n\n" if GLOBAL_PREAMBLE else "")
         + (f"{custom_preamble}\n\n" if custom_preamble else "")
@@ -1969,10 +1980,10 @@ def _process_cron(uid: int, chat_id: int, task: dict, done: threading.Event):
         claude_busy_for = f"cron:{job_id}"
         claude_busy_key = key
         try:
-            reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=session_id, model=model, timeout=timeout)
+            reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=session_id, model=model, timeout=timeout, uid=uid, chat_id=chat_id)
             if session_id and "No conversation found with session ID" in reply:
                 user_sessions.pop(key, None)
-                reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=None, model=model, timeout=timeout)
+                reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=None, model=model, timeout=timeout, uid=uid, chat_id=chat_id)
         finally:
             claude_busy_for = None
             claude_busy_key = None
