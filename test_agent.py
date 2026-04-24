@@ -269,6 +269,38 @@ class TestCallClaude(unittest.TestCase):
         self.assertIn("json", args)
 
     @patch("agent.subprocess.Popen")
+    def test_sets_cta_uid_chat_id_env(self, mock_popen):
+        """When uid/chat_id are passed, subprocess env must include CTA_UID/CTA_CHAT_ID
+        so cron.py and other helpers know which chat they're in."""
+        mock_popen.return_value = self._mock_proc()
+        agent.call_claude("hi", uid=2018384667, chat_id=-5112107804)
+        env = mock_popen.call_args[1]["env"]
+        self.assertEqual(env["CTA_UID"], "2018384667")
+        self.assertEqual(env["CTA_CHAT_ID"], "-5112107804")
+
+    @patch("agent.subprocess.Popen")
+    def test_env_preserves_parent_env(self, mock_popen):
+        """CTA_UID/CTA_CHAT_ID must be added without wiping out PATH etc."""
+        mock_popen.return_value = self._mock_proc()
+        agent.call_claude("hi", uid=1, chat_id=2)
+        env = mock_popen.call_args[1]["env"]
+        self.assertIn("PATH", env)
+
+    @patch("agent.subprocess.Popen")
+    def test_no_cta_env_when_uid_missing(self, mock_popen):
+        """Without uid/chat_id, don't add CTA_UID/CTA_CHAT_ID to subprocess env."""
+        mock_popen.return_value = self._mock_proc()
+        # Scrub parent env so the assertion isn't influenced by whether the
+        # test is itself running under an agent.py that already set these.
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CTA_UID", None)
+            os.environ.pop("CTA_CHAT_ID", None)
+            agent.call_claude("hi")
+        env = mock_popen.call_args[1]["env"]
+        self.assertNotIn("CTA_UID", env)
+        self.assertNotIn("CTA_CHAT_ID", env)
+
+    @patch("agent.subprocess.Popen")
     def test_resumes_session(self, mock_popen):
         mock_popen.return_value = self._mock_proc()
         agent.call_claude("hi", session_id="sess-xyz")
