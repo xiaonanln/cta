@@ -1426,6 +1426,21 @@ class TestWebAPI(unittest.TestCase):
         with open(self._tmp_sessions.name, "w") as f:
             json.dump(data, f)
 
+    # ── GET /config ──
+
+    def test_config_returns_system_preamble_template(self):
+        """/config response should include the hardcoded system preamble with placeholders,
+        so the web UI can display it above Global preamble."""
+        r = self.client.get("/config")
+        self.assertEqual(r.status_code, 200)
+        d = r.get_json()
+        self.assertIn("system_preamble", d)
+        sp = d["system_preamble"]
+        self.assertIn("<uid>", sp)
+        self.assertIn("<chat_id>", sp)
+        self.assertIn("Always reply after tool use", sp)
+        self.assertIn("cron.py", sp)
+
     # ── GET /status ──
 
     def test_status_returns_sessions(self):
