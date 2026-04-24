@@ -114,6 +114,22 @@ def _read_global_preamble() -> str:
         return ""
 
 
+def _system_preamble(uid_display, chat_id_display) -> str:
+    """Build the hardcoded preamble prepended to every agent turn.
+
+    Accepts uid/chat_id as stringifiable values so the /config endpoint can
+    render a template with `<uid>` / `<chat_id>` placeholders for display.
+    """
+    memory_path = os.path.join(MEMORY_DIR, f"{uid_display}:{chat_id_display}.md")
+    crons_path = os.path.join(CRONS_DIR, f"{uid_display}:{chat_id_display}.json")
+    preamble_path = os.path.join(PREAMBLE_DIR, f"{uid_display}:{chat_id_display}.md")
+    return (
+        f"[Agent chat:{uid_display}:{chat_id_display} | memory:{memory_path} | crons:{crons_path} | preamble:{preamble_path}]\n"
+        f"Always reply after tool use.\n"
+        f"Do NOT use built-in CronCreate, CronList, CronDelete tools. Manage crons with: python3 {CRON_CLI_PATH} add|list|remove|update (preferred — avoids JSON escape bugs; CTA_UID/CTA_CHAT_ID are already set in env). File at {crons_path} is fallback for inspection only.\n"
+    )
+
+
 def _load_whisper():
     """Lazily load the Whisper model (slow first call, cached after)."""
     global _whisper_model_instance
@@ -716,6 +732,10 @@ _WEB_HTML = """<!DOCTYPE html>
         <input id="cfg-users" type="text" placeholder="comma-separated user IDs, empty = all" />
       </div>
       <div class="cfg-row" style="flex-direction:column;align-items:flex-start;gap:0.4rem;">
+        <label>System preamble <span style="font-weight:400;color:var(--fg3);font-size:.75rem;">(hardcoded; injected before Global preamble on every turn)</span></label>
+        <pre id="cfg-system-preamble" style="width:100%;box-sizing:border-box;font-family:inherit;font-size:0.82rem;background:var(--bg3);color:var(--fg2);border:1px solid var(--border);border-radius:4px;padding:0.5rem;white-space:pre-wrap;word-break:break-word;margin:0;"></pre>
+      </div>
+      <div class="cfg-row" style="flex-direction:column;align-items:flex-start;gap:0.4rem;">
         <label>Global preamble</label>
         <textarea id="cfg-global-preamble" rows="5" style="width:100%;box-sizing:border-box;resize:vertical;font-family:inherit;font-size:0.9rem;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:0.4rem;" placeholder="Instructions injected into every agent's preamble…"></textarea>
       </div>
@@ -1054,6 +1074,7 @@ _WEB_HTML = """<!DOCTYPE html>
       document.getElementById('cfg-port').value = d.web_port ?? '';
       document.getElementById('cfg-cwd').value = d.default_cwd || '';
       document.getElementById('cfg-users').value = (d.allowed_users || []).join(', ');
+      document.getElementById('cfg-system-preamble').textContent = d.system_preamble || '';
       document.getElementById('cfg-global-preamble').value = d.global_preamble || '';
     } catch {}
   }
@@ -1252,6 +1273,7 @@ def _web_get_config():
         "default_cwd": cfg.get("default_cwd", DEFAULT_CWD),
         "allowed_users": cfg.get("allowed_users", list(ALLOWED_USERS)),
         "global_preamble": _read_global_preamble(),
+        "system_preamble": _system_preamble("<uid>", "<chat_id>"),
     }
 
 
@@ -1831,9 +1853,7 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
     if crons_err:
         tui_log(f"[red]⚠ crons parse error {uid}:{chat_id}: {escape(crons_err)}[/]")
     memory_prefix = (
-        f"[Agent chat:{uid}:{chat_id} | memory:{memory_path} | crons:{crons_path} | preamble:{_preamble_path(uid, chat_id)}]\n"
-        f"Always reply after tool use.\n"
-        f"Do NOT use built-in CronCreate, CronList, CronDelete tools. Manage crons with: python3 {CRON_CLI_PATH} add|list|remove|update (preferred — avoids JSON escape bugs; CTA_UID/CTA_CHAT_ID are already set in env). File at {crons_path} is fallback for inspection only.\n\n"
+        _system_preamble(uid, chat_id) + "\n"
         + (f"⚠ Your crons file at {crons_path} is INVALID JSON ({crons_err}). Scheduled jobs in it will NOT run and are hidden from the UI. Fix the JSON syntax (likely unescaped quotes in a prompt string) so your crons work again.\n\n" if crons_err else "")
         + (f"{GLOBAL_PREAMBLE}\n\n" if GLOBAL_PREAMBLE else "")
         + (f"{custom_preamble}\n\n" if custom_preamble else "")
@@ -1967,9 +1987,7 @@ def _process_cron(uid: int, chat_id: int, task: dict, done: threading.Event):
     if crons_err:
         tui_log(f"[red]⚠ crons parse error {uid}:{chat_id}: {escape(crons_err)}[/]")
     preamble = (
-        f"[Agent chat:{uid}:{chat_id} | memory:{memory_path} | crons:{crons_path} | preamble:{_preamble_path(uid, chat_id)}]\n"
-        f"Always reply after tool use.\n"
-        f"Do NOT use built-in CronCreate, CronList, CronDelete tools. Manage crons with: python3 {CRON_CLI_PATH} add|list|remove|update (preferred — avoids JSON escape bugs; CTA_UID/CTA_CHAT_ID are already set in env). File at {crons_path} is fallback for inspection only.\n\n"
+        _system_preamble(uid, chat_id) + "\n"
         + (f"⚠ Your crons file at {crons_path} is INVALID JSON ({crons_err}). Scheduled jobs in it will NOT run and are hidden from the UI. Fix the JSON syntax (likely unescaped quotes in a prompt string) so your crons work again.\n\n" if crons_err else "")
         + (f"{GLOBAL_PREAMBLE}\n\n" if GLOBAL_PREAMBLE else "")
         + (f"{custom_preamble}\n\n" if custom_preamble else "")
