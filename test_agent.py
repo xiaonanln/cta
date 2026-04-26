@@ -860,12 +860,12 @@ class TestCancel(unittest.TestCase):
         agent.ALLOWED_USERS.clear()
         agent.ALLOWED_USERS.add(123)
         agent._cancelled_keys.clear()
-        agent._current_proc = None
+        agent._current_procs.clear()
 
     def tearDown(self):
         agent.ALLOWED_USERS.clear()
         agent._cancelled_keys.clear()
-        agent._current_proc = None
+        agent._current_procs.clear()
         agent.claude_active_keys.discard((123, 123))
         with agent.user_queues_lock:
             agent.user_queues.pop((123, 123), None)
@@ -883,8 +883,7 @@ class TestCancel(unittest.TestCase):
     def test_kills_active_proc_for_this_chat(self):
         """When Claude is running for this chat, the proc is killed."""
         proc = MagicMock()
-        agent._current_proc = proc
-        agent.claude_active_keys.add((123, 123))
+        agent._current_procs[(123, 123)] = proc
         agent.cmd_cancel(make_fake_message("/cancel"))
         proc.kill.assert_called_once()
         self.assertIn((123, 123), agent._cancelled_keys)
@@ -894,11 +893,20 @@ class TestCancel(unittest.TestCase):
     def test_does_not_kill_proc_for_other_chat(self):
         """Active task belongs to a different chat — don't kill it."""
         proc = MagicMock()
-        agent._current_proc = proc
-        agent.claude_active_keys.add((999, 999))
+        agent._current_procs[(999, 999)] = proc
         agent.cmd_cancel(make_fake_message("/cancel"))
         proc.kill.assert_not_called()
         self.assertNotIn((123, 123), agent._cancelled_keys)
+
+    def test_cancel_kills_correct_proc_when_concurrent(self):
+        """With two chats active concurrently, cancel only kills the right one."""
+        proc_a = MagicMock()
+        proc_b = MagicMock()
+        agent._current_procs[(123, 123)] = proc_a
+        agent._current_procs[(456, 456)] = proc_b
+        agent.cmd_cancel(make_fake_message("/cancel"))  # cancels chat (123,123)
+        proc_a.kill.assert_called_once()
+        proc_b.kill.assert_not_called()
 
     def test_drains_pending_queue(self):
         """Pending messages in the queue are removed."""

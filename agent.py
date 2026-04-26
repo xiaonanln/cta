@@ -97,7 +97,7 @@ chat_labels: dict[tuple[int, int], str] = {}   # (uid, chat_id) → "DM" or grou
 msg_counts: dict[tuple[int, int], int] = {}    # (uid, chat_id) → messages processed
 last_reply: dict[tuple[int, int], str] = {}    # (uid, chat_id) → last reply snippet
 claude_active_keys: set = set()  # (uid, chat_id) keys with a running Claude call
-_current_proc: subprocess.Popen = None  # running Claude subprocess (killable)
+_current_procs: dict = {}  # (uid, chat_id) → running Claude subprocess (killable)
 _cancelled_keys: set = set()           # keys that had /cancel; suppresses reply
 chat_history: dict[tuple[int, int], list] = {}  # (uid, chat_id) → [{role,text,ts}]
 _chat_sse: dict[tuple[int, int], list] = {}     # (uid, chat_id) → [Queue]
@@ -1707,16 +1707,18 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
         env["CTA_UID"] = str(uid)
     if chat_id is not None:
         env["CTA_CHAT_ID"] = str(chat_id)
-    global _current_proc
+    key = (uid, chat_id) if uid is not None and chat_id is not None else None
     last_error = ""
     for attempt in range(max_retries + 1):
         try:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd, env=env)
-            _current_proc = proc
+            if key:
+                _current_procs[key] = proc
             try:
                 stdout, stderr = proc.communicate(timeout=timeout or TIMEOUT)
             finally:
-                _current_proc = None
+                if key:
+                    _current_procs.pop(key, None)
             if proc.returncode != 0 or not stdout.strip():
                 last_error = stderr.strip()
             else:
@@ -1726,10 +1728,12 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.communicate()
-            _current_proc = None
+            if key:
+                _current_procs.pop(key, None)
             return "(Claude timed out)", ""
         except FileNotFoundError:
-            _current_proc = None
+            if key:
+                _current_procs.pop(key, None)
             return "(claude CLI not found — install @anthropic-ai/claude-code)", ""
         if attempt < max_retries:
             tui_log(f"[yellow]⚠ empty response, retrying ({attempt + 1}/{max_retries})…[/]")
@@ -2110,8 +2114,9 @@ def cmd_cancel(message):
     uid = message.from_user.id
     key = (uid, message.chat.id)
     parts = []
-    if key in claude_active_keys and _current_proc is not None:
-        _current_proc.kill()
+    proc = _current_procs.get(key)
+    if proc is not None:
+        proc.kill()
         _cancelled_keys.add(key)
         parts.append("current task stopped")
     q = user_queues.get(key)
