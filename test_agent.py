@@ -866,7 +866,7 @@ class TestCancel(unittest.TestCase):
         agent.ALLOWED_USERS.clear()
         agent._cancelled_keys.clear()
         agent._current_proc = None
-        agent.claude_busy_key = None
+        agent.claude_active_keys.discard((123, 123))
         with agent.user_queues_lock:
             agent.user_queues.pop((123, 123), None)
 
@@ -884,7 +884,7 @@ class TestCancel(unittest.TestCase):
         """When Claude is running for this chat, the proc is killed."""
         proc = MagicMock()
         agent._current_proc = proc
-        agent.claude_busy_key = (123, 123)
+        agent.claude_active_keys.add((123, 123))
         agent.cmd_cancel(make_fake_message("/cancel"))
         proc.kill.assert_called_once()
         self.assertIn((123, 123), agent._cancelled_keys)
@@ -895,7 +895,7 @@ class TestCancel(unittest.TestCase):
         """Active task belongs to a different chat — don't kill it."""
         proc = MagicMock()
         agent._current_proc = proc
-        agent.claude_busy_key = (999, 999)
+        agent.claude_active_keys.add((999, 999))
         agent.cmd_cancel(make_fake_message("/cancel"))
         proc.kill.assert_not_called()
         self.assertNotIn((123, 123), agent._cancelled_keys)
@@ -928,12 +928,12 @@ class TestCancel(unittest.TestCase):
 # ── Concurrent users ─────────────────────────────────────────────────────────
 
 class TestConcurrentUsers(unittest.TestCase):
-    """Tests for Claude CLI serialization and queue notification."""
+    """Tests for Claude CLI per-chat serialization and cross-chat concurrency."""
 
     def setUp(self):
         self.bot = setup_fake_bot()
         agent.ALLOWED_USERS.clear()
-        agent.claude_busy_for = None
+        agent.claude_active_keys.clear()
         self._orig_sessions_path = agent.SESSIONS_PATH
         self._tmp_sessions = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
         self._tmp_sessions.close()
@@ -941,46 +941,38 @@ class TestConcurrentUsers(unittest.TestCase):
 
     def tearDown(self):
         agent.ALLOWED_USERS.clear()
-        agent.claude_busy_for = None
+        agent.claude_active_keys.clear()
         agent.SESSIONS_PATH = self._orig_sessions_path
         for path in [self._tmp_sessions.name, self._tmp_sessions.name + ".tmp"]:
             if os.path.exists(path):
                 os.unlink(path)
 
     @patch("agent.call_claude")
-    def test_second_user_gets_queue_notification(self, mock_claude):
-        """When user A is being processed, user B sees a waiting message."""
+    def test_different_chats_run_concurrently(self, mock_claude):
+        """Different chats run their Claude calls concurrently (no global lock)."""
+        started = []
         barrier = threading.Barrier(2, timeout=5)
-        call_count = []
 
         def slow_claude(*args, **kwargs):
-            call_count.append(1)
-            if len(call_count) == 1:
-                barrier.wait()  # first call: wait until second user is queued
-                time.sleep(0.3)  # give time for notification to be sent
+            started.append(1)
+            if len(started) == 1:
+                barrier.wait()  # wait for second call to also start
             return "reply", "sess"
 
         mock_claude.side_effect = slow_claude
 
-        # Start user A (uid=1) — will hold the lock
         msg_a = make_fake_message("hello", user_id=1, username="alice")
-        agent._get_user_queue(1, 1)
-        agent.handle_message(msg_a)
-        time.sleep(0.1)  # let worker thread start
-
-        # Start user B (uid=2) — should get queued
         msg_b = make_fake_message("hi", user_id=2, username="bob")
+        agent._get_user_queue(1, 1)
         agent._get_user_queue(2, 2)
-        agent.handle_message(msg_b)
+        agent.handle_message(msg_a)
         time.sleep(0.1)
-        barrier.wait()  # release first call
+        agent.handle_message(msg_b)
 
-        time.sleep(1.5)  # let both finish
-
-        # User B should have received a "Waiting" notification
-        all_replies = [str(c) for c in self.bot.reply_to.call_args_list]
-        waiting_replies = [r for r in all_replies if "Waiting" in r]
-        self.assertGreaterEqual(len(waiting_replies), 1, "User B should get a waiting notification")
+        # Both calls start concurrently — barrier.wait() would deadlock if serialized
+        barrier.wait()
+        time.sleep(1.0)
+        self.assertEqual(mock_claude.call_count, 2)
 
     @patch("agent.call_claude")
     def test_both_users_get_responses(self, mock_claude):
@@ -1012,8 +1004,8 @@ class TestConcurrentUsers(unittest.TestCase):
         self.assertEqual(mock_claude.call_count, 2, "Both users should get a Claude call")
 
     @patch("agent.call_claude")
-    def test_claude_busy_for_cleared_after_call(self, mock_claude):
-        """claude_busy_for is None after processing completes."""
+    def test_active_keys_cleared_after_call(self, mock_claude):
+        """claude_active_keys is empty after processing completes."""
         mock_claude.return_value = ("ok", "sess")
         agent.ALLOWED_USERS.add(1)
 
@@ -1021,15 +1013,15 @@ class TestConcurrentUsers(unittest.TestCase):
         agent.handle_message(msg)
         time.sleep(0.5)
 
-        self.assertIsNone(agent.claude_busy_for)
+        self.assertNotIn((1, 1), agent.claude_active_keys)
 
     @patch("agent.call_claude")
-    def test_claude_busy_for_set_during_call(self, mock_claude):
-        """claude_busy_for is set to the current user during processing."""
+    def test_active_keys_set_during_call(self, mock_claude):
+        """claude_active_keys contains the chat key during processing."""
         captured = []
 
         def capture_claude(*args, **kwargs):
-            captured.append(agent.claude_busy_for)
+            captured.append((1, 1) in agent.claude_active_keys)
             return "ok", "sess"
 
         mock_claude.side_effect = capture_claude
@@ -1039,7 +1031,7 @@ class TestConcurrentUsers(unittest.TestCase):
         agent.handle_message(msg)
         time.sleep(0.5)
 
-        self.assertEqual(captured, ["alice"])
+        self.assertEqual(captured, [True])
 
     @patch("agent.call_claude")
     def test_same_user_no_queue_notification(self, mock_claude):
@@ -1081,7 +1073,7 @@ class TestMessageBatching(unittest.TestCase):
     def setUp(self):
         self.bot = setup_fake_bot()
         agent.ALLOWED_USERS.clear()
-        agent.claude_busy_for = None
+        agent.claude_active_keys.clear()
         self._orig_sessions_path = agent.SESSIONS_PATH
         self._tmp_sessions = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
         self._tmp_sessions.close()
@@ -1089,7 +1081,7 @@ class TestMessageBatching(unittest.TestCase):
 
     def tearDown(self):
         agent.ALLOWED_USERS.clear()
-        agent.claude_busy_for = None
+        agent.claude_active_keys.clear()
         agent.SESSIONS_PATH = self._orig_sessions_path
         for path in [self._tmp_sessions.name, self._tmp_sessions.name + ".tmp"]:
             if os.path.exists(path):
