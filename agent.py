@@ -126,6 +126,7 @@ def _system_preamble(uid_display, chat_id_display) -> str:
     return (
         f"[Agent chat:{uid_display}:{chat_id_display} | memory:{memory_path} | crons:{crons_path} | preamble:{preamble_path}]\n"
         f"Always reply after tool use.\n"
+        f"Do NOT use Telegram MCP plugin tools — agent.py handles replies.\n"
         f"Do NOT use built-in CronCreate, CronList, CronDelete tools. Manage crons with: python3 {CRON_CLI_PATH} add|list|remove|update (preferred — avoids JSON escape bugs; CTA_UID/CTA_CHAT_ID are already set in env). File at {crons_path} is fallback for inspection only.\n"
     )
 
