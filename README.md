@@ -100,36 +100,26 @@ Open `http://localhost:<web_port>/` while the bot is running:
 
 ## Run as a Service (macOS)
 
-Create `~/Library/LaunchAgents/com.cta.agent.plist`:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.cta.agent</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/path/to/venv/bin/python3</string>
-        <string>/path/to/cta/agent.py</string>
-    </array>
-    <key>WorkingDirectory</key>
-    <string>/path/to/cta</string>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/Users/you/.cta/cta.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Users/you/.cta/cta.err</string>
-</dict>
-</plist>
-```
+A template plist is included at `deploy/com.cta.agent.template.plist`. Install it with one command from the repo root:
 
 ```bash
+sed "s|__CTA_DIR__|$(pwd)|g; s|__HOME__|$HOME|g" \
+    deploy/com.cta.agent.template.plist \
+    > ~/Library/LaunchAgents/com.cta.agent.plist
 launchctl load ~/Library/LaunchAgents/com.cta.agent.plist
+```
+
+The bot starts automatically at login and restarts on crash. Logs go to `~/.cta/cta.log` and `~/.cta/cta.err`.
+
+To restart after an update:
+```bash
+launchctl stop com.cta.agent && launchctl start com.cta.agent
+```
+
+To uninstall:
+```bash
+launchctl unload ~/Library/LaunchAgents/com.cta.agent.plist
+rm ~/Library/LaunchAgents/com.cta.agent.plist
 ```
 
 ## License
