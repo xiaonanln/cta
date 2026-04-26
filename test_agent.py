@@ -1440,6 +1440,7 @@ class TestWebAPI(unittest.TestCase):
         self.assertIn("<chat_id>", sp)
         self.assertIn("Always reply after tool use", sp)
         self.assertIn("cron.py", sp)
+        self.assertIn("Telegram MCP", sp)
 
     # ── GET /status ──
 
