@@ -96,10 +96,8 @@ user_queues_lock = threading.Lock()
 chat_labels: dict[tuple[int, int], str] = {}   # (uid, chat_id) → "DM" or group name
 msg_counts: dict[tuple[int, int], int] = {}    # (uid, chat_id) → messages processed
 last_reply: dict[tuple[int, int], str] = {}    # (uid, chat_id) → last reply snippet
-claude_lock = threading.Lock()  # serialize Claude CLI calls (Max subscription concurrency limit)
-claude_busy_for = None  # username of user currently calling Claude
-claude_busy_key = None  # (uid, chat_id) of active session
-_current_proc: subprocess.Popen = None  # running Claude subprocess (killable)
+claude_active_keys: set = set()  # (uid, chat_id) keys with a running Claude call
+_current_procs: dict = {}  # (uid, chat_id) → running Claude subprocess (killable)
 _cancelled_keys: set = set()           # keys that had /cancel; suppresses reply
 chat_history: dict[tuple[int, int], list] = {}  # (uid, chat_id) → [{role,text,ts}]
 _chat_sse: dict[tuple[int, int], list] = {}     # (uid, chat_id) → [Queue]
@@ -1252,7 +1250,7 @@ def _web_status():
             "model": user_model.get(key, MODEL),
             "cwd": user_cwd.get(key, DEFAULT_CWD).replace(os.path.expanduser("~"), "~", 1),
             "msgs": msg_counts.get(key, 0),
-            "active": key == claude_busy_key,
+            "active": key in claude_active_keys,
             "last_reply": last_reply.get(key, ""),
             "preamble": _read_preamble(uid, chat_id),
         })
@@ -1694,8 +1692,6 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
                 uid: int = None, chat_id: int = None) -> tuple[str, str]:
     """Call Claude Code CLI. Returns (text, session_id).
 
-    Serialized with claude_lock because Max/Pro subscriptions only allow
-    one concurrent CLI session — a second call would hang or error.
     Retries up to max_retries times on transient failures (empty/error response).
 
     When uid/chat_id are provided, sets CTA_UID/CTA_CHAT_ID in the subprocess env
@@ -1711,16 +1707,18 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
         env["CTA_UID"] = str(uid)
     if chat_id is not None:
         env["CTA_CHAT_ID"] = str(chat_id)
-    global _current_proc
+    key = (uid, chat_id) if uid is not None and chat_id is not None else None
     last_error = ""
     for attempt in range(max_retries + 1):
         try:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd, env=env)
-            _current_proc = proc
+            if key:
+                _current_procs[key] = proc
             try:
                 stdout, stderr = proc.communicate(timeout=timeout or TIMEOUT)
             finally:
-                _current_proc = None
+                if key:
+                    _current_procs.pop(key, None)
             if proc.returncode != 0 or not stdout.strip():
                 last_error = stderr.strip()
             else:
@@ -1730,10 +1728,12 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.communicate()
-            _current_proc = None
+            if key:
+                _current_procs.pop(key, None)
             return "(Claude timed out)", ""
         except FileNotFoundError:
-            _current_proc = None
+            if key:
+                _current_procs.pop(key, None)
             return "(claude CLI not found — install @anthropic-ai/claude-code)", ""
         if attempt < max_retries:
             tui_log(f"[yellow]⚠ empty response, retrying ({attempt + 1}/{max_retries})…[/]")
@@ -1828,7 +1828,7 @@ def _typing_loop(chat_id: int, done: threading.Event):
 
 
 def _process_message(uid: int, chat_id: int, message, done: threading.Event):
-    global claude_busy_for, claude_busy_key
+    global claude_active_keys
     key = (uid, chat_id)
     cwd = user_cwd.get(key, DEFAULT_CWD)
     model = user_model.get(key, MODEL)
@@ -1839,11 +1839,6 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
         chat_labels[key] = f"DM:{username}"
     else:
         chat_labels[key] = message.chat.title or str(chat_id)
-
-    # If Claude is busy with another user, notify and wait
-    if claude_lock.locked() and claude_busy_for != username:
-        bot.reply_to(message, f"⏳ Waiting for @{claude_busy_for} to finish...")
-        tui_log(f"[yellow]⏳[/] [bold]{escape(username)}[/] queued (busy: {escape(claude_busy_for or '?')})")
 
     # Build preamble with agent identity and context files
     memory_path = os.path.join(MEMORY_DIR, f"{uid}:{chat_id}.md")
@@ -1940,21 +1935,18 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
             done.set()
             return
 
-    with claude_lock:
-        claude_busy_for = username
-        claude_busy_key = key
-        try:
-            reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=session_id, model=model, timeout=timeout, uid=uid, chat_id=chat_id)
-            if session_id and "No conversation found with session ID" in reply:
-                tui_log(f"[yellow]⚠ stale session for {escape(username)}, retrying fresh[/]")
-                user_sessions.pop(key, None)
-                reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=None, model=model, uid=uid, chat_id=chat_id)
-        finally:
-            claude_busy_for = None
-            claude_busy_key = None
-            done.set()
-            if tmp_photo:
-                os.unlink(tmp_photo)
+    claude_active_keys.add(key)
+    try:
+        reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=session_id, model=model, timeout=timeout, uid=uid, chat_id=chat_id)
+        if session_id and "No conversation found with session ID" in reply:
+            tui_log(f"[yellow]⚠ stale session for {escape(username)}, retrying fresh[/]")
+            user_sessions.pop(key, None)
+            reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=None, model=model, uid=uid, chat_id=chat_id)
+    finally:
+        claude_active_keys.discard(key)
+        done.set()
+        if tmp_photo:
+            os.unlink(tmp_photo)
 
     if key in _cancelled_keys:
         _cancelled_keys.discard(key)
@@ -1972,7 +1964,7 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
 
 
 def _process_cron(uid: int, chat_id: int, task: dict, done: threading.Event):
-    global claude_busy_for, claude_busy_key
+    global claude_active_keys
     key = (uid, chat_id)
     cwd = user_cwd.get(key, DEFAULT_CWD)
     model = user_model.get(key, MODEL)
@@ -1995,18 +1987,15 @@ def _process_cron(uid: int, chat_id: int, task: dict, done: threading.Event):
     )
     prompt = preamble + f"[Scheduled task {job_id}]\n{task['prompt']}"
 
-    with claude_lock:
-        claude_busy_for = f"cron:{job_id}"
-        claude_busy_key = key
-        try:
-            reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=session_id, model=model, timeout=timeout, uid=uid, chat_id=chat_id)
-            if session_id and "No conversation found with session ID" in reply:
-                user_sessions.pop(key, None)
-                reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=None, model=model, timeout=timeout, uid=uid, chat_id=chat_id)
-        finally:
-            claude_busy_for = None
-            claude_busy_key = None
-            done.set()
+    claude_active_keys.add(key)
+    try:
+        reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=session_id, model=model, timeout=timeout, uid=uid, chat_id=chat_id)
+        if session_id and "No conversation found with session ID" in reply:
+            user_sessions.pop(key, None)
+            reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=None, model=model, timeout=timeout, uid=uid, chat_id=chat_id)
+    finally:
+        claude_active_keys.discard(key)
+        done.set()
 
     if key in _cancelled_keys:
         _cancelled_keys.discard(key)
@@ -2125,8 +2114,9 @@ def cmd_cancel(message):
     uid = message.from_user.id
     key = (uid, message.chat.id)
     parts = []
-    if claude_busy_key == key and _current_proc is not None:
-        _current_proc.kill()
+    proc = _current_procs.get(key)
+    if proc is not None:
+        proc.kill()
         _cancelled_keys.add(key)
         parts.append("current task stopped")
     q = user_queues.get(key)
