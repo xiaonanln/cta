@@ -1747,8 +1747,8 @@ def _append_usage_footer(text: str, data: dict) -> str:
                      default=0)
     if ctx_window > 0:
         pct = inp / ctx_window * 100
-        return f"{text}\n\n— ctx: {_format_tokens_k(inp)}/{_format_tokens_k(ctx_window)} ({pct:.0f}%) / out: {out:,}"
-    return f"{text}\n\n— in: {inp:,} / out: {out:,}"
+        return f"{text}\n\n— ctx: {_format_tokens_k(inp)}/{_format_tokens_k(ctx_window)} ({pct:.0f}%) / out: {_format_tokens_k(out)}"
+    return f"{text}\n\n— in: {_format_tokens_k(inp)} / out: {_format_tokens_k(out)}"
 
 
 def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str = None,
