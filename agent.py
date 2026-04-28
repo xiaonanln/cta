@@ -38,6 +38,7 @@ CTA_HOME = os.path.expanduser("~/.cta")
 CONFIG_PATH = os.path.join(CTA_HOME, "config.json")
 CTA_ROOT = os.path.dirname(os.path.abspath(__file__))
 CRON_CLI_PATH = os.path.join(CTA_ROOT, "cron.py")
+NOTIFY_CLI_PATH = os.path.join(CTA_ROOT, "notify.py")
 
 DEFAULT_CONFIG = {
     "telegram_bot_token": "",
@@ -127,6 +128,7 @@ def _system_preamble(uid_display, chat_id_display) -> str:
         f"Always reply after tool use.\n"
         f"Do NOT use Telegram MCP plugin tools — agent.py handles replies.\n"
         f"Do NOT use built-in CronCreate, CronList, CronDelete tools. Manage crons with: python3 {CRON_CLI_PATH} add|list|remove|update (preferred — avoids JSON escape bugs; CTA_UID/CTA_CHAT_ID are already set in env). File at {crons_path} is fallback for inspection only.\n"
+        f"To message another CTA chat: python3 {NOTIFY_CLI_PATH} send --to <label> \"<msg>\" (or --uid X --chat-id Y). Run `notify.py list` to see available chats.\n"
     )
 
 
