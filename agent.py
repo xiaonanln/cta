@@ -42,7 +42,7 @@ CRON_CLI_PATH = os.path.join(CTA_ROOT, "cron.py")
 DEFAULT_CONFIG = {
     "telegram_bot_token": "",
     "allowed_users": [],
-    "claude_timeout": 600,
+    "claude_timeout": 1800,
     "model": "claude-sonnet-4-6",
     "web_port": 17488,
 }
@@ -72,7 +72,7 @@ def load_config() -> dict:
 
 BOT_TOKEN = ""
 ALLOWED_USERS: set[int] = set()
-TIMEOUT = 600
+TIMEOUT = 1800
 MODEL = "claude-sonnet-4-6"
 WEB_PORT = 17488
 DEFAULT_CWD = os.getcwd()
@@ -1083,7 +1083,7 @@ _WEB_HTML = """<!DOCTYPE html>
     const token = document.getElementById('cfg-token').value.trim();
     const body = {
       model: document.getElementById('cfg-model').value,
-      claude_timeout: parseInt(document.getElementById('cfg-timeout').value) || 600,
+      claude_timeout: parseInt(document.getElementById('cfg-timeout').value) || 1800,
       web_port: parseInt(document.getElementById('cfg-port').value) || 17488,
       default_cwd: document.getElementById('cfg-cwd').value.trim(),
       allowed_users: document.getElementById('cfg-users').value
