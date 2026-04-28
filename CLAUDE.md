@@ -16,33 +16,37 @@ Single Python file. Config and sessions in `~/.cta/`.
 # Run the bot (reads ~/.cta/config.json)
 python agent.py
 
-# Run tests (mock only, no Claude calls)
-python -m unittest test_agent.TestConfig test_agent.TestSessionPersistence test_agent.TestCallClaude test_agent.TestSplitReply test_agent.TestSendMarkdown test_agent.TestAllowed test_agent.TestTuiLog test_agent.TestBotHandlers test_agent.TestUserCwd test_agent.TestUserModel test_agent.TestConcurrentUsers -v
+# Run all mock tests (no Claude calls)
+python -m unittest test_agent test_cron test_notify
 
 # Run real Claude integration tests (requires claude CLI authenticated)
 python -m unittest test_agent.TestRealClaude -v
-
-# Run all tests
-python -m unittest test_agent -v
 ```
 
 ## Files
 
 - `agent.py` — Main bot code, single file.
-- `test_agent.py` — Tests (mock + real Claude).
+- `cron.py` — CLI for managing per-chat cron jobs (calls the local web API).
+- `notify.py` — CLI for cross-agent messaging (sends to another chat by label or id).
+- `test_agent.py`, `test_cron.py`, `test_notify.py` — Tests (mock + real Claude).
 - `requirements.txt` — Python dependencies.
 - `~/.cta/config.json` — Bot configuration.
-- `~/.cta/sessions.json` — Session persistence.
+- `~/.cta/agents.json` — Per-chat persistence: Claude session_id, cwd, model, last_active, label.
+- `~/.cta/memory/<uid>:<chat>.md` — Per-chat agent memory.
+- `~/.cta/crons/<uid>:<chat>.json` — Per-chat cron jobs.
+- `~/.cta/preamble/<uid>:<chat>.md` — Per-chat custom preamble.
+- `~/.cta/global_preamble.md` — Preamble injected into every chat.
 
 ## Key Design Decisions
 
 - **`claude --print --dangerously-skip-permissions`** — Full tool access (file read/write, shell commands).
 - **Config** — Always `~/.cta/config.json`. No CLI args, no env vars.
-- **Sessions** — Persisted in `~/.cta/sessions.json`. Survives restarts.
+- **Per-chat persistence** — `~/.cta/agents.json` holds session_id, cwd, model, last_active, and chat label per `(uid, chat_id)`. Survives restarts.
 - **Working directory** — Defaults to `os.getcwd()`. Change with `/cd` command.
 - **User whitelist** — `allowed_users` in config.json. Empty = allow all.
-- **Concurrency** — Claude CLI calls serialized (Max subscription limit). Waiting users notified.
+- **Concurrency** — Claude calls run in parallel across different chats; per-chat they're serialized via `claude_active_keys`. Anthropic rate limits still apply.
 - **Bot initialization** — Lazy (in `create_bot()`) so tests can import without a real token.
+- **CTA_UID / CTA_CHAT_ID env vars** — Injected into every Claude subprocess so helper scripts (`cron.py`, `notify.py`) know which chat is calling them.
 
 ## Telegram Bot Commands
 
@@ -50,8 +54,11 @@ python -m unittest test_agent -v
 - `/clear` — Clear conversation (reset session)
 - `/cd <path>` — Change working directory
 - `/pwd` — Show current working directory
-- `/model <name>` — Switch Claude model (clears session)
+- `/model <name>` — Switch Claude model (keeps session)
+- `/opus`, `/sonnet` — Shortcuts for switching to Opus / Sonnet
+- `/timeout <seconds>` — Override the per-chat Claude timeout
 - `/status` — Show model, cwd, and session info
+- `/cancel` — Kill an in-flight Claude call for this chat
 
 ## Testing
 

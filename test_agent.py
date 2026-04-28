@@ -105,8 +105,8 @@ class TestConfig(unittest.TestCase):
         self.assertTrue(agent.CONFIG_PATH.endswith("config.json"))
 
     def test_sessions_path_is_in_cta_home(self):
-        self.assertTrue(agent.SESSIONS_PATH.startswith(agent.CTA_HOME))
-        self.assertTrue(agent.SESSIONS_PATH.endswith("agents.json"))
+        self.assertTrue(agent.AGENTS_PATH.startswith(agent.CTA_HOME))
+        self.assertTrue(agent.AGENTS_PATH.endswith("agents.json"))
 
 
 # ── Session persistence ───────────────────────────────────────────────────────
@@ -116,17 +116,19 @@ class TestSessionPersistence(unittest.TestCase):
     def setUp(self):
         agent.user_sessions.clear()
         agent.last_active.clear()
+        agent.chat_labels.clear()
         self.tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
         self.tmp.close()
-        self._orig_sessions_path = agent.SESSIONS_PATH
-        agent.SESSIONS_PATH = self.tmp.name
+        self._orig_sessions_path = agent.AGENTS_PATH
+        agent.AGENTS_PATH = self.tmp.name
 
     def tearDown(self):
         agent.user_sessions.clear()
         agent.user_cwd.clear()
         agent.user_model.clear()
         agent.last_active.clear()
-        agent.SESSIONS_PATH = self._orig_sessions_path
+        agent.chat_labels.clear()
+        agent.AGENTS_PATH = self._orig_sessions_path
         agent.init(agent.DEFAULT_CONFIG)
         for path in [self.tmp.name, self.tmp.name + ".tmp"]:
             if os.path.exists(path):
@@ -204,6 +206,15 @@ class TestSessionPersistence(unittest.TestCase):
         with open(self.tmp.name) as f:
             data = json.load(f)
         self.assertEqual(data, {})
+
+    def test_label_roundtrip(self):
+        """chat_labels should survive a save→load cycle so chat names persist
+        across CTA restarts (without needing a Telegram message to repopulate)."""
+        agent.chat_labels[(123, 456)] = "打印机"
+        agent.save_sessions()
+        agent.chat_labels.clear()
+        agent.load_sessions()
+        self.assertEqual(agent.chat_labels.get((123, 456)), "打印机")
 
     def test_last_active_roundtrip(self):
         """last_active should be persisted to sessions.json and reloaded after restart."""
@@ -630,10 +641,10 @@ class TestBotHandlers(unittest.TestCase):
         self.bot = setup_fake_bot()
         agent.ALLOWED_USERS.clear()
         agent.ALLOWED_USERS.add(123)
-        self._orig_sessions_path = agent.SESSIONS_PATH
+        self._orig_sessions_path = agent.AGENTS_PATH
         self._tmp_sessions = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
         self._tmp_sessions.close()
-        agent.SESSIONS_PATH = self._tmp_sessions.name
+        agent.AGENTS_PATH = self._tmp_sessions.name
         self._orig_memory_dir = agent.MEMORY_DIR
         self._tmp_memory_dir = tempfile.mkdtemp()
         agent.MEMORY_DIR = self._tmp_memory_dir
@@ -644,7 +655,7 @@ class TestBotHandlers(unittest.TestCase):
     def tearDown(self):
         import shutil
         agent.ALLOWED_USERS.clear()
-        agent.SESSIONS_PATH = self._orig_sessions_path
+        agent.AGENTS_PATH = self._orig_sessions_path
         agent.MEMORY_DIR = self._orig_memory_dir
         agent.PREAMBLE_DIR = self._orig_preamble_dir
         for path in [self._tmp_sessions.name, self._tmp_sessions.name + ".tmp"]:
@@ -1048,15 +1059,15 @@ class TestConcurrentUsers(unittest.TestCase):
         self.bot = setup_fake_bot()
         agent.ALLOWED_USERS.clear()
         agent.claude_active_keys.clear()
-        self._orig_sessions_path = agent.SESSIONS_PATH
+        self._orig_sessions_path = agent.AGENTS_PATH
         self._tmp_sessions = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
         self._tmp_sessions.close()
-        agent.SESSIONS_PATH = self._tmp_sessions.name
+        agent.AGENTS_PATH = self._tmp_sessions.name
 
     def tearDown(self):
         agent.ALLOWED_USERS.clear()
         agent.claude_active_keys.clear()
-        agent.SESSIONS_PATH = self._orig_sessions_path
+        agent.AGENTS_PATH = self._orig_sessions_path
         for path in [self._tmp_sessions.name, self._tmp_sessions.name + ".tmp"]:
             if os.path.exists(path):
                 os.unlink(path)
@@ -1188,15 +1199,15 @@ class TestMessageBatching(unittest.TestCase):
         self.bot = setup_fake_bot()
         agent.ALLOWED_USERS.clear()
         agent.claude_active_keys.clear()
-        self._orig_sessions_path = agent.SESSIONS_PATH
+        self._orig_sessions_path = agent.AGENTS_PATH
         self._tmp_sessions = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
         self._tmp_sessions.close()
-        agent.SESSIONS_PATH = self._tmp_sessions.name
+        agent.AGENTS_PATH = self._tmp_sessions.name
 
     def tearDown(self):
         agent.ALLOWED_USERS.clear()
         agent.claude_active_keys.clear()
-        agent.SESSIONS_PATH = self._orig_sessions_path
+        agent.AGENTS_PATH = self._orig_sessions_path
         for path in [self._tmp_sessions.name, self._tmp_sessions.name + ".tmp"]:
             if os.path.exists(path):
                 os.unlink(path)
@@ -1381,20 +1392,20 @@ class TestCronScheduler(unittest.TestCase):
         agent.ALLOWED_USERS.add(123)
         self._orig_crons_dir = agent.CRONS_DIR
         self._orig_memory_dir = agent.MEMORY_DIR
-        self._orig_sessions_path = agent.SESSIONS_PATH
+        self._orig_sessions_path = agent.AGENTS_PATH
         self._tmp_crons = tempfile.mkdtemp()
         self._tmp_memory = tempfile.mkdtemp()
         self._tmp_sessions = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
         self._tmp_sessions.close()
         agent.CRONS_DIR = self._tmp_crons
         agent.MEMORY_DIR = self._tmp_memory
-        agent.SESSIONS_PATH = self._tmp_sessions.name
+        agent.AGENTS_PATH = self._tmp_sessions.name
 
     def tearDown(self):
         import shutil
         agent.CRONS_DIR = self._orig_crons_dir
         agent.MEMORY_DIR = self._orig_memory_dir
-        agent.SESSIONS_PATH = self._orig_sessions_path
+        agent.AGENTS_PATH = self._orig_sessions_path
         shutil.rmtree(self._tmp_crons, ignore_errors=True)
         shutil.rmtree(self._tmp_memory, ignore_errors=True)
         for p in [self._tmp_sessions.name, self._tmp_sessions.name + ".tmp"]:
@@ -1541,18 +1552,18 @@ class TestWebAPI(unittest.TestCase):
         agent.ALLOWED_USERS.clear()
         agent.ALLOWED_USERS.add(123)
         self._orig_crons_dir = agent.CRONS_DIR
-        self._orig_sessions_path = agent.SESSIONS_PATH
+        self._orig_sessions_path = agent.AGENTS_PATH
         self._tmp_crons = tempfile.mkdtemp()
         self._tmp_sessions = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
         self._tmp_sessions.close()
         agent.CRONS_DIR = self._tmp_crons
-        agent.SESSIONS_PATH = self._tmp_sessions.name
+        agent.AGENTS_PATH = self._tmp_sessions.name
         self.client = agent.app.test_client()
 
     def tearDown(self):
         import shutil
         agent.CRONS_DIR = self._orig_crons_dir
-        agent.SESSIONS_PATH = self._orig_sessions_path
+        agent.AGENTS_PATH = self._orig_sessions_path
         shutil.rmtree(self._tmp_crons, ignore_errors=True)
         for p in [self._tmp_sessions.name, self._tmp_sessions.name + ".tmp"]:
             if os.path.exists(p):
@@ -1671,11 +1682,11 @@ class TestWebAPI(unittest.TestCase):
     def test_assistant_last_active_persists_to_disk(self, mock_claude):
         """Regression for PR #73 codex P2: last_active for the assistant message
         must be persisted (save_sessions runs after _chat_push, not before)."""
-        # Redirect SESSIONS_PATH to a temp file
+        # Redirect AGENTS_PATH to a temp file
         tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
         tmp.close()
-        orig = agent.SESSIONS_PATH
-        agent.SESSIONS_PATH = tmp.name
+        orig = agent.AGENTS_PATH
+        agent.AGENTS_PATH = tmp.name
         try:
             agent.last_active.clear()
             agent.handle_message(make_fake_message("hello"))
@@ -1687,7 +1698,7 @@ class TestWebAPI(unittest.TestCase):
             self.assertTrue(entries_with_active,
                             f"expected last_active in saved sessions; got {data}")
         finally:
-            agent.SESSIONS_PATH = orig
+            agent.AGENTS_PATH = orig
             agent.last_active.clear()
             os.unlink(tmp.name)
 
