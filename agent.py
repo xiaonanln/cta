@@ -1744,6 +1744,13 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
             else:
                 data = json.loads(stdout)
                 text = (data.get("result") or "").strip() or "(empty response)"
+                usage = data.get("usage") or {}
+                inp = (usage.get("input_tokens", 0)
+                       + usage.get("cache_creation_input_tokens", 0)
+                       + usage.get("cache_read_input_tokens", 0))
+                out = usage.get("output_tokens", 0)
+                if inp or out:
+                    text = f"{text}\n\n— in: {inp:,} / out: {out:,}"
                 return text, data.get("session_id", "")
         except subprocess.TimeoutExpired:
             proc.kill()
