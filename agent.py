@@ -336,6 +336,21 @@ def _cron_scheduler():
         _cron_tick_once(datetime.now())
 
 
+def _polling_loop():
+    """Run bot.infinity_polling in a loop, reconnecting after errors.
+
+    Errno 49 ('can't assign address') and other transient network failures
+    were silently killing the polling daemon thread. This wraps the call so
+    the bot reconnects automatically after a 10-second backoff.
+    """
+    while True:
+        try:
+            bot.infinity_polling()
+        except Exception as e:
+            tui_log(f"[yellow]Polling error ({type(e).__name__}): {escape(str(e))} — retrying in 10s[/]")
+            time.sleep(10)
+
+
 # ── Web interface ─────────────────────────────────────────────────────────────
 
 _log_entries: deque[tuple[str, str]] = deque(maxlen=200)
@@ -2406,7 +2421,7 @@ if __name__ == "__main__":
         except Exception as e:
             tui_log(f"[red]Could not notify {uid}: {escape(str(e))}[/]")
 
-    threading.Thread(target=bot.infinity_polling, daemon=True).start()
+    threading.Thread(target=_polling_loop, daemon=True).start()
     threading.Thread(target=_cron_scheduler, daemon=True).start()
     tui_log(f"[dim]Web UI → http://localhost:{WEB_PORT}/[/]")
     app.run(host="0.0.0.0", port=WEB_PORT, threaded=True, debug=False, use_reloader=False)
