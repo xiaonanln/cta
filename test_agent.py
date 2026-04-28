@@ -234,6 +234,41 @@ class TestCallClaude(unittest.TestCase):
         return proc
 
     @patch("agent.subprocess.Popen")
+    def test_appends_token_counts_when_usage_present(self, mock_popen):
+        """When the JSON response has usage data, the reply text should end with
+        '— in: X / out: Y' so users can see token consumption per turn."""
+        proc = MagicMock()
+        proc.communicate.return_value = (
+            json.dumps({
+                "result": "Hi there",
+                "session_id": "s",
+                "is_error": False,
+                "usage": {
+                    "input_tokens": 3,
+                    "cache_creation_input_tokens": 100,
+                    "cache_read_input_tokens": 11000,
+                    "output_tokens": 42,
+                },
+            }),
+            "",
+        )
+        proc.returncode = 0
+        mock_popen.return_value = proc
+        text, _ = agent.call_claude("hi")
+        self.assertIn("Hi there", text)
+        self.assertIn("in: 11,103", text)
+        self.assertIn("out: 42", text)
+
+    @patch("agent.subprocess.Popen")
+    def test_no_token_line_when_usage_missing(self, mock_popen):
+        """If usage is missing (older claude versions, edge cases), don't append a
+        misleading 'in: 0 / out: 0' line."""
+        mock_popen.return_value = self._mock_proc("plain reply")
+        text, _ = agent.call_claude("hi")
+        self.assertEqual(text, "plain reply")
+        self.assertNotIn("in: 0", text)
+
+    @patch("agent.subprocess.Popen")
     def test_returns_text_and_session_id(self, mock_popen):
         mock_popen.return_value = self._mock_proc("Hello world", "abc-123")
         text, sid = agent.call_claude("hi")
