@@ -1704,6 +1704,38 @@ def _web_chat_send(uid, chat_id):
 
 # ── Claude CLI ────────────────────────────────────────────────────────────────
 
+def _format_tokens_k(n: int) -> str:
+    """Format a token count as a human-readable string (e.g. 17K, 1.2K, 42)."""
+    if n < 1000:
+        return str(n)
+    if n < 10000:
+        return f"{n/1000:.1f}K"
+    return f"{n/1000:.0f}K"
+
+
+def _append_usage_footer(text: str, data: dict) -> str:
+    """Append a context-window + output-tokens footer to a Claude reply.
+
+    Format: '— ctx: 17K/200K (8%) / out: 42'. The ctx number is total input
+    tokens (fresh + cache_creation + cache_read) since all of it occupies the
+    model's context window. Falls back to a simple in/out line if the JSON
+    response is missing modelUsage.contextWindow (older claude-code versions).
+    """
+    usage = data.get("usage") or {}
+    inp = (usage.get("input_tokens", 0)
+           + usage.get("cache_creation_input_tokens", 0)
+           + usage.get("cache_read_input_tokens", 0))
+    out = usage.get("output_tokens", 0)
+    if not inp and not out:
+        return text
+    ctx_window = max((m.get("contextWindow", 0) for m in (data.get("modelUsage") or {}).values()),
+                     default=0)
+    if ctx_window > 0:
+        pct = inp / ctx_window * 100
+        return f"{text}\n\n— ctx: {_format_tokens_k(inp)}/{_format_tokens_k(ctx_window)} ({pct:.0f}%) / out: {out:,}"
+    return f"{text}\n\n— in: {inp:,} / out: {out:,}"
+
+
 def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str = None,
                 max_retries: int = 2, retry_delay: float = 2.0, timeout: int = None,
                 uid: int = None, chat_id: int = None) -> tuple[str, str]:
@@ -1744,13 +1776,7 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
             else:
                 data = json.loads(stdout)
                 text = (data.get("result") or "").strip() or "(empty response)"
-                usage = data.get("usage") or {}
-                inp = (usage.get("input_tokens", 0)
-                       + usage.get("cache_creation_input_tokens", 0)
-                       + usage.get("cache_read_input_tokens", 0))
-                out = usage.get("output_tokens", 0)
-                if inp or out:
-                    text = f"{text}\n\n— in: {inp:,} / out: {out:,}"
+                text = _append_usage_footer(text, data)
                 return text, data.get("session_id", "")
         except subprocess.TimeoutExpired:
             proc.kill()
