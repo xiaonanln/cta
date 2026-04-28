@@ -1567,6 +1567,84 @@ class TestWebAPI(unittest.TestCase):
         with open(self._tmp_sessions.name, "w") as f:
             json.dump(data, f)
 
+    # ── DELETE /chat/<uid>/<chat_id> ──
+
+    def _setup_purge_dirs(self):
+        """Redirect MEMORY_DIR / PREAMBLE_DIR to tempdirs so _purge_chat is hermetic."""
+        import shutil
+        self._tmp_memory = tempfile.mkdtemp()
+        self._tmp_preamble = tempfile.mkdtemp()
+        self._orig_memory = agent.MEMORY_DIR
+        self._orig_preamble = agent.PREAMBLE_DIR
+        agent.MEMORY_DIR = self._tmp_memory
+        agent.PREAMBLE_DIR = self._tmp_preamble
+        self.addCleanup(lambda: setattr(agent, "MEMORY_DIR", self._orig_memory))
+        self.addCleanup(lambda: setattr(agent, "PREAMBLE_DIR", self._orig_preamble))
+        self.addCleanup(lambda: shutil.rmtree(self._tmp_memory, ignore_errors=True))
+        self.addCleanup(lambda: shutil.rmtree(self._tmp_preamble, ignore_errors=True))
+
+    def test_purge_chat_clears_in_memory_state(self):
+        self._setup_purge_dirs()
+        key = (789, 1011)
+        agent.user_sessions[key] = "sess-x"
+        agent.user_cwd[key] = "/tmp"
+        agent.user_model[key] = "claude-opus-4-7"
+        agent.msg_counts[key] = 5
+        agent.last_reply[key] = "hi"
+        agent.last_active[key] = 1735000000.0
+        agent.chat_labels[key] = "DM:tester"
+        agent.chat_history[key] = [{"role": "user", "text": "x", "ts": 1.0}]
+
+        agent._purge_chat(*key)
+
+        for d_name in ("user_sessions", "user_cwd", "user_model", "msg_counts",
+                       "last_reply", "last_active", "chat_labels", "chat_history"):
+            self.assertNotIn(key, getattr(agent, d_name), f"{d_name} not cleared")
+
+    def test_purge_chat_deletes_files(self):
+        self._setup_purge_dirs()
+        uid, chat_id = 789, 1011
+        memory_path = os.path.join(self._tmp_memory, f"{uid}:{chat_id}.md")
+        crons_path = os.path.join(self._tmp_crons, f"{uid}:{chat_id}.json")
+        preamble_path = os.path.join(self._tmp_preamble, f"{uid}:{chat_id}.md")
+        for p, content in [(memory_path, "remember me"),
+                           (crons_path, "[]"),
+                           (preamble_path, "be nice")]:
+            with open(p, "w") as f:
+                f.write(content)
+
+        agent._purge_chat(uid, chat_id)
+
+        for p in (memory_path, crons_path, preamble_path):
+            self.assertFalse(os.path.exists(p), f"{p} still exists")
+
+    def test_purge_chat_idempotent_when_files_missing(self):
+        """Should not raise if files don't exist (e.g. fresh chat with no memory/cron yet)."""
+        self._setup_purge_dirs()
+        agent._purge_chat(404, 404)  # never had any state — must not error
+
+    def test_delete_chat_endpoint(self):
+        self._setup_purge_dirs()
+        key = (789, 1011)
+        agent.user_sessions[key] = "sess-x"
+        agent.msg_counts[key] = 1
+        r = self.client.delete("/chat/789/1011")
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn(key, agent.user_sessions)
+        self.assertNotIn(key, agent.msg_counts)
+
+    def test_delete_chat_refuses_when_active(self):
+        self._setup_purge_dirs()
+        key = (789, 1011)
+        agent.user_sessions[key] = "sess-x"
+        agent.claude_active_keys.add(key)
+        try:
+            r = self.client.delete("/chat/789/1011")
+            self.assertEqual(r.status_code, 409)
+            self.assertIn(key, agent.user_sessions, "must NOT delete state when chat is active")
+        finally:
+            agent.claude_active_keys.discard(key)
+
     def test_status_includes_last_active(self):
         """/status response should include last_active per session for the chats UI."""
         agent.last_active.clear()

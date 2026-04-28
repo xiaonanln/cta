@@ -206,6 +206,34 @@ def save_sessions():
         tui_log(f"[red]Warning: could not save sessions: {escape(str(e))}[/]")
 
 
+def _purge_chat(uid: int, chat_id: int):
+    """Hard-delete all state for a chat: in-memory dicts + on-disk files
+    (memory, crons, preamble). The chat disappears from the UI; if the user
+    sends another message in that Telegram chat later, a fresh session is
+    created from scratch."""
+    key = (uid, chat_id)
+    for d in (user_sessions, user_cwd, user_model, user_timeout,
+              msg_counts, last_reply, last_active, chat_labels, chat_history):
+        d.pop(key, None)
+    with _chat_sse_lock:
+        _chat_sse.pop(key, None)
+    with user_queues_lock:
+        user_queues.pop(key, None)
+    for path in (
+        os.path.join(MEMORY_DIR, f"{uid}:{chat_id}.md"),
+        os.path.join(CRONS_DIR, f"{uid}:{chat_id}.json"),
+        os.path.join(PREAMBLE_DIR, f"{uid}:{chat_id}.md"),
+    ):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            tui_log(f"[red]Warning: could not delete {path}: {escape(str(e))}[/]")
+    save_sessions()
+    tui_log(f"[red]🗑 chat removed: {uid}:{chat_id}[/]")
+
+
 # ── Cron scheduler ────────────────────────────────────────────────────────────
 
 def _cron_path(uid: int, chat_id: int) -> str:
@@ -512,6 +540,10 @@ _WEB_HTML = """<!DOCTYPE html>
                background: none; border: 1px solid var(--accent); border-radius: 4px;
                color: var(--accent); font-size: .72rem; cursor: pointer; }
     .cc-open:hover { background: var(--accent); color: var(--bg); }
+    .cc-delete { margin-top: .35rem; margin-left: auto; padding: .3rem .7rem;
+                 background: none; border: 1px solid #e64553; border-radius: 4px;
+                 color: #e64553; font-size: .72rem; cursor: pointer; }
+    .cc-delete:hover { background: #e64553; color: #fff; }
     #no-cards { padding: 1rem; font-size: .82rem; color: var(--fg3); }
 
     /* crons view */
@@ -866,6 +898,20 @@ _WEB_HTML = """<!DOCTYPE html>
     }
   });
 
+  async function deleteChat(uid, chat_id, label) {
+    if (!confirm(`Delete "${label}"?\n\nThis removes session, messages, memory, crons, and preamble for this chat. The Telegram chat itself is unaffected — sending another message there will start fresh.`)) return;
+    const r = await fetch(`/chat/${uid}/${chat_id}`, {method: 'DELETE'});
+    if (r.status === 409) {
+      alert('Chat is busy with a running Claude turn. Try again after it finishes.');
+      return;
+    }
+    if (!r.ok) {
+      alert('Delete failed: HTTP ' + r.status);
+      return;
+    }
+    tick();
+  }
+
   async function savePreamble(btn) {
     const card = btn.closest('.chat-card');
     const ta = card.querySelector('.cc-preamble');
@@ -915,6 +961,7 @@ _WEB_HTML = """<!DOCTYPE html>
               <button class="cc-save" onclick="savePreamble(this)">Save preamble</button>
               <span class="cc-saved">Saved ✓</span>
               <button class="cc-open" onclick="openChat(${s.uid},${s.chat_id},'${esc(s.label).replace(/'/g,"\\'")}')">Open chat</button>
+              <button class="cc-delete" onclick="deleteChat(${s.uid},${s.chat_id},'${esc(s.label).replace(/'/g,"\\'")}')">Delete</button>
             </div>
           </div>`;
         }).join('');
@@ -1714,6 +1761,18 @@ def _web_chat_send(uid, chat_id):
     _chat_push(uid, chat_id, "user", text)
     msg = _WebMessage(uid, chat_id, text)
     _get_user_queue(uid, chat_id).put(msg)
+    return {"ok": True}
+
+
+@app.route("/chat/<sint:uid>/<sint:chat_id>", methods=["DELETE"])
+def _web_chat_delete(uid, chat_id):
+    """Hard-delete all state for a chat (sessions, in-memory dicts, and the
+    memory/crons/preamble files on disk). Refuses if Claude is currently
+    running for this chat to avoid corrupting an in-flight turn."""
+    key = (uid, chat_id)
+    if key in claude_active_keys:
+        return {"error": "chat is busy — try again after the current turn"}, 409
+    _purge_chat(uid, chat_id)
     return {"ok": True}
 
 
