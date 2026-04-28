@@ -1711,6 +1711,9 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
     last_error = ""
     for attempt in range(max_retries + 1):
         try:
+            label = chat_labels.get(key, f"{uid}:{chat_id}") if key else "—"
+            attempt_str = f" (retry {attempt}/{max_retries})" if attempt > 0 else ""
+            tui_log(f"[blue]→ claude[/] {escape(label)} model={escape(model or MODEL)} chars={len(prompt)} session={'resume' if session_id else 'new'}{attempt_str}")
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd, env=env)
             if key:
                 _current_procs[key] = proc

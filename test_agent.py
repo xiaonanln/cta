@@ -269,6 +269,17 @@ class TestCallClaude(unittest.TestCase):
         self.assertIn("json", args)
 
     @patch("agent.subprocess.Popen")
+    @patch("agent.tui_log")
+    def test_logs_send_to_claude(self, mock_log, mock_popen):
+        """Each subprocess launch should log a '→ claude' line so wait/run timing
+        is visible separately from message receipt (HANDLE_MSG)."""
+        mock_popen.return_value = self._mock_proc()
+        agent.call_claude("hi", uid=123, chat_id=456, model="claude-opus-4-7")
+        log_lines = [args[0][0] for args in mock_log.call_args_list]
+        self.assertTrue(any("→ claude" in line for line in log_lines))
+        self.assertTrue(any("claude-opus-4-7" in line for line in log_lines))
+
+    @patch("agent.subprocess.Popen")
     def test_sets_cta_uid_chat_id_env(self, mock_popen):
         """When uid/chat_id are passed, subprocess env must include CTA_UID/CTA_CHAT_ID
         so cron.py and other helpers know which chat they're in."""
