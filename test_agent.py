@@ -57,7 +57,7 @@ class TestConfig(unittest.TestCase):
         config = agent.DEFAULT_CONFIG
         self.assertEqual(config["telegram_bot_token"], "")
         self.assertEqual(config["allowed_users"], [])
-        self.assertEqual(config["claude_timeout"], 600)
+        self.assertEqual(config["claude_timeout"], 1800)
         self.assertEqual(config["model"], "claude-sonnet-4-6")
 
     def test_load_from_file(self):
@@ -72,12 +72,12 @@ class TestConfig(unittest.TestCase):
             os.unlink(name)
         self.assertEqual(config["telegram_bot_token"], "abc:123")
         self.assertEqual(config["allowed_users"], [111])
-        self.assertEqual(config["claude_timeout"], 600)  # default preserved
+        self.assertEqual(config["claude_timeout"], 1800)  # default preserved
 
     def test_missing_file_uses_defaults(self):
         with patch.object(agent, "CONFIG_PATH", "/nonexistent/config.json"):
             config = agent.load_config()
-        self.assertEqual(config["claude_timeout"], 600)
+        self.assertEqual(config["claude_timeout"], 1800)
 
     def test_init_applies_all_fields(self):
         config = {
