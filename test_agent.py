@@ -234,9 +234,9 @@ class TestCallClaude(unittest.TestCase):
         return proc
 
     @patch("agent.subprocess.Popen")
-    def test_appends_token_counts_when_usage_present(self, mock_popen):
-        """When the JSON response has usage data, the reply text should end with
-        '— in: X / out: Y' so users can see token consumption per turn."""
+    def test_appends_ctx_footer_with_context_window(self, mock_popen):
+        """When modelUsage carries contextWindow, the footer should show
+        'ctx: <input>/<window> (X%) / out: <output>'."""
         proc = MagicMock()
         proc.communicate.return_value = (
             json.dumps({
@@ -246,8 +246,11 @@ class TestCallClaude(unittest.TestCase):
                 "usage": {
                     "input_tokens": 3,
                     "cache_creation_input_tokens": 100,
-                    "cache_read_input_tokens": 11000,
+                    "cache_read_input_tokens": 17000,
                     "output_tokens": 42,
+                },
+                "modelUsage": {
+                    "claude-sonnet-4-6": {"contextWindow": 200000},
                 },
             }),
             "",
@@ -256,8 +259,30 @@ class TestCallClaude(unittest.TestCase):
         mock_popen.return_value = proc
         text, _ = agent.call_claude("hi")
         self.assertIn("Hi there", text)
-        self.assertIn("in: 11,103", text)
+        self.assertIn("ctx: 17K/200K", text)
+        self.assertIn("(9%)", text)  # 17103/200000 = 8.55% → rounds to 9%
         self.assertIn("out: 42", text)
+
+    @patch("agent.subprocess.Popen")
+    def test_falls_back_to_in_out_when_context_window_missing(self, mock_popen):
+        """If modelUsage.contextWindow is absent, fall back to the simple
+        'in: X / out: Y' format rather than divide-by-zero."""
+        proc = MagicMock()
+        proc.communicate.return_value = (
+            json.dumps({
+                "result": "Hi",
+                "session_id": "s",
+                "is_error": False,
+                "usage": {"input_tokens": 100, "output_tokens": 5},
+            }),
+            "",
+        )
+        proc.returncode = 0
+        mock_popen.return_value = proc
+        text, _ = agent.call_claude("hi")
+        self.assertIn("in: 100", text)
+        self.assertIn("out: 5", text)
+        self.assertNotIn("ctx:", text)
 
     @patch("agent.subprocess.Popen")
     def test_no_token_line_when_usage_missing(self, mock_popen):
