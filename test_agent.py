@@ -264,6 +264,31 @@ class TestCallClaude(unittest.TestCase):
         self.assertIn("out: 42", text)
 
     @patch("agent.subprocess.Popen")
+    def test_output_uses_K_format_when_large(self, mock_popen):
+        """Output >= 1000 should be formatted as e.g. '1.2K', not '1,242'."""
+        proc = MagicMock()
+        proc.communicate.return_value = (
+            json.dumps({
+                "result": "Big reply",
+                "session_id": "s",
+                "is_error": False,
+                "usage": {
+                    "input_tokens": 0,
+                    "cache_read_input_tokens": 17000,
+                    "output_tokens": 1242,
+                },
+                "modelUsage": {"claude-sonnet-4-6": {"contextWindow": 200000}},
+            }),
+            "",
+        )
+        proc.returncode = 0
+        mock_popen.return_value = proc
+        text, _ = agent.call_claude("hi")
+        self.assertIn("out: 1.2K", text)
+        self.assertNotIn("out: 1,242", text)
+        self.assertNotIn("out: 1242", text)
+
+    @patch("agent.subprocess.Popen")
     def test_falls_back_to_in_out_when_context_window_missing(self, mock_popen):
         """If modelUsage.contextWindow is absent, fall back to the simple
         'in: X / out: Y' format rather than divide-by-zero."""
