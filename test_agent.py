@@ -115,6 +115,7 @@ class TestSessionPersistence(unittest.TestCase):
 
     def setUp(self):
         agent.user_sessions.clear()
+        agent.last_active.clear()
         self.tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
         self.tmp.close()
         self._orig_sessions_path = agent.SESSIONS_PATH
@@ -124,6 +125,7 @@ class TestSessionPersistence(unittest.TestCase):
         agent.user_sessions.clear()
         agent.user_cwd.clear()
         agent.user_model.clear()
+        agent.last_active.clear()
         agent.SESSIONS_PATH = self._orig_sessions_path
         agent.init(agent.DEFAULT_CONFIG)
         for path in [self.tmp.name, self.tmp.name + ".tmp"]:
@@ -202,6 +204,14 @@ class TestSessionPersistence(unittest.TestCase):
         with open(self.tmp.name) as f:
             data = json.load(f)
         self.assertEqual(data, {})
+
+    def test_last_active_roundtrip(self):
+        """last_active should be persisted to sessions.json and reloaded after restart."""
+        agent.last_active[(123, 456)] = 1735000000.0
+        agent.save_sessions()
+        agent.last_active.clear()
+        agent.load_sessions()
+        self.assertEqual(agent.last_active.get((123, 456)), 1735000000.0)
 
 
 # ── call_claude ───────────────────────────────────────────────────────────────
@@ -1436,6 +1446,52 @@ class TestWebAPI(unittest.TestCase):
     def _write_sessions(self, data):
         with open(self._tmp_sessions.name, "w") as f:
             json.dump(data, f)
+
+    def test_status_includes_last_active(self):
+        """/status response should include last_active per session for the chats UI."""
+        agent.last_active.clear()
+        agent.last_active[(123, 456)] = 1735000000.0
+        agent.msg_counts[(123, 456)] = 1
+        r = self.client.get("/status")
+        d = r.get_json()
+        sess = next((s for s in d["sessions"] if s["uid"] == 123 and s["chat_id"] == 456), None)
+        self.assertIsNotNone(sess)
+        self.assertEqual(sess["last_active"], 1735000000.0)
+        agent.last_active.clear()
+        agent.msg_counts.pop((123, 456), None)
+
+    def test_chat_push_updates_last_active(self):
+        """Sending or receiving a message should bump last_active."""
+        agent.last_active.clear()
+        before = time.time()
+        agent._chat_push(123, 456, "user", "hi")
+        self.assertIn((123, 456), agent.last_active)
+        self.assertGreaterEqual(agent.last_active[(123, 456)], before)
+        agent.last_active.clear()
+
+    @patch("agent.call_claude", return_value=("hi back", "sess-new"))
+    def test_assistant_last_active_persists_to_disk(self, mock_claude):
+        """Regression for PR #73 codex P2: last_active for the assistant message
+        must be persisted (save_sessions runs after _chat_push, not before)."""
+        # Redirect SESSIONS_PATH to a temp file
+        tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+        tmp.close()
+        orig = agent.SESSIONS_PATH
+        agent.SESSIONS_PATH = tmp.name
+        try:
+            agent.last_active.clear()
+            agent.handle_message(make_fake_message("hello"))
+            time.sleep(0.5)
+            # last_active should now be in sessions.json on disk
+            with open(tmp.name) as f:
+                data = json.load(f)
+            entries_with_active = [e for e in data.values() if "last_active" in e]
+            self.assertTrue(entries_with_active,
+                            f"expected last_active in saved sessions; got {data}")
+        finally:
+            agent.SESSIONS_PATH = orig
+            agent.last_active.clear()
+            os.unlink(tmp.name)
 
     # ── GET /config ──
 

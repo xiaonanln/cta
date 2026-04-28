@@ -96,6 +96,7 @@ user_queues_lock = threading.Lock()
 chat_labels: dict[tuple[int, int], str] = {}   # (uid, chat_id) → "DM" or group name
 msg_counts: dict[tuple[int, int], int] = {}    # (uid, chat_id) → messages processed
 last_reply: dict[tuple[int, int], str] = {}    # (uid, chat_id) → last reply snippet
+last_active: dict[tuple[int, int], float] = {} # (uid, chat_id) → epoch seconds of last user/assistant message
 claude_active_keys: set = set()  # (uid, chat_id) keys with a running Claude call
 _current_procs: dict = {}  # (uid, chat_id) → running Claude subprocess (killable)
 _cancelled_keys: set = set()           # keys that had /cancel; suppresses reply
@@ -174,6 +175,8 @@ def load_sessions():
                     user_cwd[key] = entry["cwd"]
                 if entry.get("model"):
                     user_model[key] = entry["model"]
+                if entry.get("last_active"):
+                    last_active[key] = entry["last_active"]
         tui_log(f"[dim]Loaded {len(data)} session(s) from {SESSIONS_PATH}[/]")
     except Exception as e:
         tui_log(f"[red]Warning: could not load sessions: {escape(str(e))}[/]")
@@ -182,7 +185,7 @@ def load_sessions():
 def save_sessions():
     tmp = SESSIONS_PATH + ".tmp"
     try:
-        all_keys = set(user_sessions) | set(user_cwd) | set(user_model)
+        all_keys = set(user_sessions) | set(user_cwd) | set(user_model) | set(last_active)
         data = {}
         for key in all_keys:
             uid, chat_id = key
@@ -193,6 +196,8 @@ def save_sessions():
                 entry["cwd"] = user_cwd[key]
             if key in user_model:
                 entry["model"] = user_model[key]
+            if key in last_active:
+                entry["last_active"] = last_active[key]
             data[f"{uid}:{chat_id}"] = entry
         with open(tmp, "w") as f:
             json.dump(data, f, indent=2)
@@ -468,6 +473,7 @@ _WEB_HTML = """<!DOCTYPE html>
     .cc-val { color: var(--fg); font-family: monospace; font-size: .72rem;
               max-width: 180px; overflow: hidden;
               text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+    .cc-val.stale { color: #e64553; }
     .cc-preview { margin-top: .65rem; padding-top: .6rem;
                   border-top: 1px solid var(--border);
                   font-size: .75rem; color: var(--preview); line-height: 1.55;
@@ -752,6 +758,15 @@ _WEB_HTML = """<!DOCTYPE html>
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
 
+  function timeAgo(epochSec) {
+    if (!epochSec) return '—';
+    const sec = Math.max(0, Math.floor(Date.now()/1000 - epochSec));
+    if (sec < 60) return `${sec}s ago`;
+    if (sec < 3600) return `${Math.floor(sec/60)}m ago`;
+    if (sec < 86400) return `${Math.floor(sec/3600)}h ago`;
+    return `${Math.floor(sec/86400)}d ago`;
+  }
+
   // ── Nav switching ──
   let currentView = 'chats';
   let chatUid = null, chatChatId = null, chatES = null;
@@ -877,6 +892,7 @@ _WEB_HTML = """<!DOCTYPE html>
             <div class="cc-row"><span class="cc-key">model</span><span class="cc-val" title="${esc(s.model)}">${esc(s.model)}</span></div>
             <div class="cc-row"><span class="cc-key">cwd</span><span class="cc-val" title="${esc(s.cwd)}">${esc(s.cwd)}</span></div>
             <div class="cc-row"><span class="cc-key">msgs</span><span class="cc-val">${s.msgs}</span></div>
+            <div class="cc-row"><span class="cc-key">active</span><span class="cc-val${s.last_active && (Date.now()/1000 - s.last_active) > 7*86400 ? ' stale' : ''}">${timeAgo(s.last_active)}</span></div>
             ${s.last_reply ? `<div class="cc-preview">${esc(s.last_reply)}</div>` : ''}
             <div class="cc-preamble-label">Custom preamble</div>
             <textarea class="cc-preamble" data-uid="${s.uid}" data-chat="${s.chat_id}">${esc(preambleVal)}</textarea>
@@ -1251,6 +1267,7 @@ def _web_status():
             "cwd": user_cwd.get(key, DEFAULT_CWD).replace(os.path.expanduser("~"), "~", 1),
             "msgs": msg_counts.get(key, 0),
             "active": key in claude_active_keys,
+            "last_active": last_active.get(key, 0),
             "last_reply": last_reply.get(key, ""),
             "preamble": _read_preamble(uid, chat_id),
         })
@@ -1751,7 +1768,9 @@ _CHAT_HISTORY_MAX = 200
 def _chat_push(uid: int, chat_id: int, role: str, text: str):
     """Append a message to per-chat history and broadcast to web chat SSE subscribers."""
     key = (uid, chat_id)
-    entry = {"role": role, "text": text, "ts": time.time()}
+    now = time.time()
+    last_active[key] = now
+    entry = {"role": role, "text": text, "ts": now}
     history = chat_history.setdefault(key, [])
     history.append(entry)
     if len(history) > _CHAT_HISTORY_MAX:
@@ -1956,12 +1975,14 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
         return
     if new_session_id:
         user_sessions[key] = new_session_id
-        save_sessions()
     msg_counts[key] = msg_counts.get(key, 0) + 1
     last_reply[key] = reply[:300]
     preview = reply[:120].replace("\n", " ")
     tui_log(f"[blue]←[/] [bold]{escape(username)}[/] {escape(preview)}{'…' if len(reply) > 120 else ''}")
     _chat_push(uid, chat_id, "assistant", reply)
+    # Persist after the assistant _chat_push so its last_active timestamp is captured;
+    # also runs on failed/timeout turns (reply is the error string) so user activity isn't lost.
+    save_sessions()
     for chunk in _split_reply(reply):
         _send_markdown(message, chunk)
 
@@ -2005,12 +2026,12 @@ def _process_cron(uid: int, chat_id: int, task: dict, done: threading.Event):
         return
     if new_session_id:
         user_sessions[key] = new_session_id
-        save_sessions()
     msg_counts[key] = msg_counts.get(key, 0) + 1
     last_reply[key] = reply[:300]
     preview = reply[:120].replace("\n", " ")
     tui_log(f"[magenta]←[/] [bold]cron:{job_id}[/] {escape(preview)}{'…' if len(reply) > 120 else ''}")
     _chat_push(uid, chat_id, "assistant", reply)
+    save_sessions()
     for chunk in _split_reply(reply):
         bot.send_message(chat_id, telegramify_markdown.markdownify(chunk), parse_mode="MarkdownV2")
 
