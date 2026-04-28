@@ -1311,6 +1311,41 @@ class TestUserModel(unittest.TestCase):
         self.assertEqual(agent.user_model[(2, 2)], "model-b")
 
 
+# ── Polling loop ─────────────────────────────────────────────────────────────
+
+class TestPollingLoop(unittest.TestCase):
+    """Tests for _polling_loop, the wrapper around bot.infinity_polling that
+    reconnects on transient network errors (Errno 49 etc.)."""
+
+    def test_retries_on_connection_error(self):
+        """A transient exception from infinity_polling should not kill the loop —
+        it should sleep and retry."""
+        calls = []
+
+        def fake_polling():
+            calls.append(1)
+            if len(calls) >= 3:
+                raise SystemExit  # bypasses 'except Exception' to break the loop
+            raise ConnectionError(f"transient #{len(calls)}")
+
+        fake_bot = MagicMock()
+        fake_bot.infinity_polling = fake_polling
+        with patch("agent.bot", fake_bot), patch("agent.time.sleep") as mock_sleep:
+            with self.assertRaises(SystemExit):
+                agent._polling_loop()
+        self.assertEqual(len(calls), 3, "loop should have retried 3 times before SystemExit")
+        # Two retries between three attempts → two sleep(10) calls
+        self.assertEqual(mock_sleep.call_args_list, [call(10), call(10)])
+
+    def test_does_not_swallow_keyboardinterrupt(self):
+        """KeyboardInterrupt / SystemExit must propagate so shutdown works."""
+        fake_bot = MagicMock()
+        fake_bot.infinity_polling = MagicMock(side_effect=KeyboardInterrupt)
+        with patch("agent.bot", fake_bot), patch("agent.time.sleep"):
+            with self.assertRaises(KeyboardInterrupt):
+                agent._polling_loop()
+
+
 # ── Cron scheduler ───────────────────────────────────────────────────────────
 
 class TestCronScheduler(unittest.TestCase):
