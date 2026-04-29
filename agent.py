@@ -11,6 +11,7 @@ import os
 import queue
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1843,7 +1844,7 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
             attempt_str = f" (retry {attempt}/{max_retries})" if attempt > 0 else ""
             tui_log(f"[blue]→ claude[/] {escape(label)} model={escape(model or MODEL)} chars={len(prompt)} session={'resume' if session_id else 'new'}{attempt_str}")
             print(f"[POPEN] uid={uid} chat={chat_id} attempt={attempt} cmd={cmd[0]}", flush=True)
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True, cwd=cwd, env=env)
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True, cwd=cwd, env=env, start_new_session=True)
             print(f"[POPEN_OK] uid={uid} chat={chat_id} pid={proc.pid}", flush=True)
             if key:
                 _current_procs[key] = proc
@@ -2266,7 +2267,12 @@ def cmd_cancel(message):
     parts = []
     proc = _current_procs.get(key)
     if proc is not None:
-        proc.kill()
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            print(f"[CANCEL] killpg pid={proc.pid} key={key}", flush=True)
+        except (ProcessLookupError, PermissionError) as e:
+            print(f"[CANCEL] killpg failed pid={proc.pid}: {e!r}; falling back to proc.kill()", flush=True)
+            proc.kill()
         _cancelled_keys.add(key)
         parts.append("current task stopped")
     q = user_queues.get(key)

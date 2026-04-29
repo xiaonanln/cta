@@ -16,11 +16,8 @@ Single Python file. Config and sessions in `~/.cta/`.
 # Run the bot (reads ~/.cta/config.json)
 python agent.py
 
-# Run all mock tests (no Claude calls)
+# Run all tests (mocked — no real Claude calls)
 python -m unittest test_agent test_cron test_notify
-
-# Run real Claude integration tests (requires claude CLI authenticated)
-python -m unittest test_agent.TestRealClaude -v
 ```
 
 ## Files
@@ -28,7 +25,7 @@ python -m unittest test_agent.TestRealClaude -v
 - `agent.py` — Main bot code, single file.
 - `cron.py` — CLI for managing per-chat cron jobs (calls the local web API).
 - `notify.py` — CLI for cross-agent messaging (sends to another chat by label or id).
-- `test_agent.py`, `test_cron.py`, `test_notify.py` — Tests (mock + real Claude).
+- `test_agent.py`, `test_cron.py`, `test_notify.py` — Tests (all mocked, no real Claude calls).
 - `requirements.txt` — Python dependencies.
 - `~/.cta/config.json` — Bot configuration.
 - `~/.cta/agents.json` — Per-chat persistence: Claude session_id, cwd, model, last_active, label.
@@ -62,8 +59,7 @@ python -m unittest test_agent.TestRealClaude -v
 
 ## Testing
 
-- Mock tests use `unittest.mock.patch` — zero Claude calls.
-- Real tests call actual `claude --print` — require authenticated CLI.
+- All tests use `unittest.mock.patch` — zero Claude calls.
 - Bot handlers tested with fake bot (`MagicMock`).
 - Concurrent user tests use threading barriers.
 

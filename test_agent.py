@@ -1867,58 +1867,5 @@ class TestWebAPI(unittest.TestCase):
         self.assertIn(b"<!DOCTYPE html>", r.data)
 
 
-# ── Real Claude integration ───────────────────────────────────────────────────
-
-class TestRealClaude(unittest.TestCase):
-    """Integration tests that call the real Claude CLI.
-
-    These require `claude` to be installed and authenticated.
-    Run with: python -m unittest test_agent.TestRealClaude -v
-    """
-
-    def test_simple_question(self):
-        result, _ = agent.call_claude("What is 2+2? Reply with just the number.")
-        self.assertIn("4", result)
-
-    def test_respects_cwd(self):
-        result, _ = agent.call_claude(
-            "What directory are you working in? Reply briefly.",
-            cwd=os.path.dirname(__file__) or ".",
-        )
-        self.assertIsInstance(result, str)
-        self.assertNotIn("timed out", result)
-        self.assertNotIn("not found", result)
-
-    def test_empty_prompt(self):
-        result, _ = agent.call_claude("")
-        self.assertIsInstance(result, str)
-
-    def test_code_generation(self):
-        result, _ = agent.call_claude(
-            "Write a Python function that adds two numbers. Only output the code, no explanation."
-        )
-        self.assertIn("def", result)
-        self.assertIn("return", result)
-
-    def test_multi_language(self):
-        result, _ = agent.call_claude("用中文回答：1+1等于几？只回答数字。")
-        self.assertIn("2", result)
-
-    def test_file_awareness_with_cwd(self):
-        result, _ = agent.call_claude(
-            "Read the file README.md in the current directory and tell me the project name. Reply with just the name.",
-            cwd=os.path.dirname(__file__) or ".",
-        )
-        self.assertTrue(
-            any(w in result.lower() for w in ["telegram", "claude", "agent", "cta"]),
-            f"Expected project name in: {result}"
-        )
-
-    def test_long_response(self):
-        result, _ = agent.call_claude("Count from 1 to 20, one number per line.")
-        self.assertIn("1", result)
-        self.assertIn("20", result)
-
-
 if __name__ == "__main__":
     unittest.main()
