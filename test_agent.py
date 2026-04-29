@@ -671,6 +671,61 @@ class TestBotHandlers(unittest.TestCase):
         self.assertNotIn((123, 123), agent.user_sessions)
         self.bot.reply_to.assert_called_once()
 
+    def test_pty_status_default_off(self):
+        agent.user_pty_mode.pop((123, 123), None)
+        agent.cmd_pty(make_fake_message("/pty"))
+        reply = self.bot.reply_to.call_args[0][1]
+        self.assertIn("off", reply)
+
+    def test_pty_on_sets_flag(self):
+        agent.user_pty_mode.pop((123, 123), None)
+        agent.cmd_pty(make_fake_message("/pty on"))
+        self.assertTrue(agent.user_pty_mode.get((123, 123)))
+        self.assertIn("on", self.bot.reply_to.call_args[0][1])
+
+    def test_pty_off_clears_flag_and_stops_instance(self):
+        agent.user_pty_mode[(123, 123)] = True
+        fake_cc = MagicMock()
+        agent.claude_code_instances[(123, 123)] = fake_cc
+        agent.cmd_pty(make_fake_message("/pty off"))
+        self.assertNotIn((123, 123), agent.user_pty_mode)
+        self.assertNotIn((123, 123), agent.claude_code_instances)
+        fake_cc.stop.assert_called_once()
+
+    def test_pty_invalid_arg_shows_usage(self):
+        agent.cmd_pty(make_fake_message("/pty wat"))
+        self.assertIn("Usage", self.bot.reply_to.call_args[0][1])
+
+    def test_pty_blocked_unknown_user(self):
+        agent.cmd_pty(make_fake_message("/pty on", user_id=999))
+        self.bot.reply_to.assert_not_called()
+
+    def test_clear_stops_pty_instance(self):
+        fake_cc = MagicMock()
+        agent.claude_code_instances[(123, 123)] = fake_cc
+        agent.cmd_clear(make_fake_message("/clear"))
+        fake_cc.stop.assert_called_once()
+        self.assertNotIn((123, 123), agent.claude_code_instances)
+
+    def test_model_change_stops_pty_instance(self):
+        fake_cc = MagicMock()
+        agent.claude_code_instances[(123, 123)] = fake_cc
+        agent.cmd_model(make_fake_message("/model claude-opus-4-6"))
+        fake_cc.stop.assert_called_once()
+        self.assertNotIn((123, 123), agent.claude_code_instances)
+
+    @patch("agent.call_claude_pty", return_value=("hi from pty", ""))
+    @patch("agent.call_claude")
+    def test_pty_mode_routes_to_call_claude_pty(self, mock_print, mock_pty):
+        agent.user_pty_mode[(123, 123)] = True
+        try:
+            agent.handle_message(make_fake_message("hello"))
+            time.sleep(0.5)
+            mock_pty.assert_called_once()
+            mock_print.assert_not_called()
+        finally:
+            agent.user_pty_mode.pop((123, 123), None)
+
     def test_cd_clears_session(self):
         agent.user_sessions[(123, 123)] = "old-sess"
         agent.cmd_cd(make_fake_message(f"/cd {os.getcwd()}"))

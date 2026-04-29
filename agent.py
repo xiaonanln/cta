@@ -25,6 +25,8 @@ import telegramify_markdown
 from flask import Flask, Response, stream_with_context
 from rich.markup import escape
 
+from claude_code import ClaudeCode, ClaudeNotReady, ClaudeStalled
+
 # Ensure /usr/local/bin is in PATH so shell commands issued by Claude (docker, etc.)
 # work even when agent.py is launched via launchd/systemd with a minimal environment.
 # If PATH is unset, fall back to standard system dirs (not "" — which resolves to CWD).
@@ -94,6 +96,8 @@ user_sessions: dict[tuple[int, int], str] = {}  # (uid, chat_id) → Claude sess
 user_cwd: dict[tuple[int, int], str] = {}  # (uid, chat_id) → working directory
 user_model: dict[tuple[int, int], str] = {}  # (uid, chat_id) → model override
 user_timeout: dict[tuple[int, int], int] = {}  # (uid, chat_id) → timeout override (seconds)
+user_pty_mode: dict[tuple[int, int], bool] = {}  # (uid, chat_id) → True = use ClaudeCode PTY
+claude_code_instances: dict = {}  # (uid, chat_id) → live ClaudeCode (lazy, PTY mode only)
 user_queues: dict[tuple[int, int], queue.Queue] = {}
 user_queues_lock = threading.Lock()
 chat_labels: dict[tuple[int, int], str] = {}   # (uid, chat_id) → "DM" or group name
@@ -183,6 +187,8 @@ def load_sessions():
                     last_active[key] = entry["last_active"]
                 if entry.get("label"):
                     chat_labels[key] = entry["label"]
+                if entry.get("pty_mode"):
+                    user_pty_mode[key] = True
         tui_log(f"[dim]Loaded {len(data)} agent(s) from {AGENTS_PATH}[/]")
     except Exception as e:
         tui_log(f"[red]Warning: could not load sessions: {escape(str(e))}[/]")
@@ -206,6 +212,8 @@ def save_sessions():
                 entry["last_active"] = last_active[key]
             if key in chat_labels:
                 entry["label"] = chat_labels[key]
+            if user_pty_mode.get(key):
+                entry["pty_mode"] = True
             data[f"{uid}:{chat_id}"] = entry
         with open(tmp, "w") as f:
             json.dump(data, f, indent=2)
@@ -220,7 +228,8 @@ def _purge_chat(uid: int, chat_id: int):
     sends another message in that Telegram chat later, a fresh session is
     created from scratch."""
     key = (uid, chat_id)
-    for d in (user_sessions, user_cwd, user_model, user_timeout,
+    _stop_pty(key)
+    for d in (user_sessions, user_cwd, user_model, user_timeout, user_pty_mode,
               msg_counts, last_reply, last_active, chat_labels, chat_history):
         d.pop(key, None)
     with _chat_sse_lock:
@@ -1871,6 +1880,68 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
     return text, data.get("session_id", "")
 
 
+# ── PTY mode (ClaudeCode wrapper) ─────────────────────────────────────────────
+
+def _get_or_create_pty(key: tuple[int, int]) -> ClaudeCode:
+    """Return the live ClaudeCode for this chat, spawning if needed.
+
+    A new instance is started lazily on the first message after toggling
+    PTY mode on (or after /clear, /cd, /model, which all stop the prior
+    instance so the next call respawns with the right state).
+    """
+    cc = claude_code_instances.get(key)
+    if cc is not None and cc.proc is not None and cc.proc.poll() is None:
+        return cc
+    cwd = user_cwd.get(key, DEFAULT_CWD)
+    model = user_model.get(key, MODEL)
+    cc = ClaudeCode(cwd=cwd, model=model)
+    print(f"[PTY] spawning ClaudeCode for {key} cwd={cwd} model={model}", flush=True)
+    cc.start(ready_timeout=45)
+    claude_code_instances[key] = cc
+    print(f"[PTY] ready for {key}", flush=True)
+    return cc
+
+
+def _stop_pty(key: tuple[int, int]) -> None:
+    """Stop and forget the chat's ClaudeCode instance, if any."""
+    cc = claude_code_instances.pop(key, None)
+    if cc is None:
+        return
+    print(f"[PTY] stopping ClaudeCode for {key}", flush=True)
+    try:
+        cc.stop()
+    except Exception as e:
+        tui_log(f"[red]⚠ pty stop error for {key}: {escape(str(e))}[/]")
+
+
+def call_claude_pty(prompt: str, key: tuple[int, int],
+                    timeout: int | None = None) -> tuple[str, str]:
+    """PTY-mode equivalent of call_claude. Returns (text, session_id="").
+
+    Uses a long-lived ClaudeCode per chat; preserves conversation context
+    across messages within the same process lifetime, so we don't need to
+    pass --resume.
+    """
+    cc = _get_or_create_pty(key)
+    try:
+        text = cc.send(
+            prompt,
+            response_timeout=float(timeout or TIMEOUT),
+            stall_timeout=90.0,
+        )
+        return text or "(empty response)", ""
+    except (ClaudeStalled, TimeoutError) as e:
+        # Stream stalled — kill the process so the next message respawns.
+        _stop_pty(key)
+        return f"[Error] PTY stalled: {e}", ""
+    except ClaudeNotReady as e:
+        _stop_pty(key)
+        return f"[Error] PTY not ready: {e}", ""
+    except Exception as e:
+        _stop_pty(key)
+        return f"[Error] PTY error: {type(e).__name__}: {e}", ""
+
+
 # ── Web chat history & SSE ────────────────────────────────────────────────────
 
 _CHAT_HISTORY_MAX = 200
@@ -2068,14 +2139,18 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
             done.set()
             return
 
-    print(f"[CALL_CLAUDE] uid={uid} chat={chat_id} model={model} cwd={cwd}", flush=True)
+    pty_mode = user_pty_mode.get(key, False)
+    print(f"[CALL_CLAUDE] uid={uid} chat={chat_id} model={model} cwd={cwd} mode={'pty' if pty_mode else 'print'}", flush=True)
     claude_active_keys.add(key)
     try:
-        reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=session_id, model=model, timeout=timeout, uid=uid, chat_id=chat_id)
-        if session_id and "No conversation found with session ID" in reply:
-            tui_log(f"[yellow]⚠ stale session for {escape(username)}, retrying fresh[/]")
-            user_sessions.pop(key, None)
-            reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=None, model=model, uid=uid, chat_id=chat_id)
+        if pty_mode:
+            reply, new_session_id = call_claude_pty(prompt, key, timeout=timeout)
+        else:
+            reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=session_id, model=model, timeout=timeout, uid=uid, chat_id=chat_id)
+            if session_id and "No conversation found with session ID" in reply:
+                tui_log(f"[yellow]⚠ stale session for {escape(username)}, retrying fresh[/]")
+                user_sessions.pop(key, None)
+                reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=None, model=model, uid=uid, chat_id=chat_id)
     finally:
         claude_active_keys.discard(key)
         done.set()
@@ -2241,13 +2316,16 @@ def cmd_help(message):
         "/opus — switch to latest Opus model (clears session)\n"
         "/sonnet — switch to latest Sonnet model (clears session)\n"
         "/timeout `<seconds>` — set per-chat Claude timeout (or `reset`)\n"
+        "/pty `on|off|status` — toggle ClaudeCode PTY mode (default: off)\n"
         "/status — show model, cwd, timeout, and session info"
     ), parse_mode="Markdown")
 
 
 def cmd_clear(message):
     if not _allowed(message): return
-    user_sessions.pop((message.from_user.id, message.chat.id), None)
+    key = (message.from_user.id, message.chat.id)
+    user_sessions.pop(key, None)
+    _stop_pty(key)
     save_sessions()
     bot.reply_to(message, "🧹 Conversation cleared.")
 
@@ -2267,6 +2345,15 @@ def cmd_cancel(message):
             proc.kill()
         _cancelled_keys.add(key)
         parts.append("current task stopped")
+    elif user_pty_mode.get(key) and key in claude_code_instances:
+        # PTY mode: interrupt the in-flight generation, keep the process.
+        try:
+            claude_code_instances[key].cancel()
+            _cancelled_keys.add(key)
+            parts.append("current task stopped (pty)")
+            print(f"[CANCEL] pty cancel key={key}", flush=True)
+        except Exception as e:
+            print(f"[CANCEL] pty cancel failed key={key}: {e!r}", flush=True)
     q = user_queues.get(key)
     drained = 0
     if q:
@@ -2300,8 +2387,10 @@ def cmd_cd(message):
         except OSError as e:
             bot.reply_to(message, f"❌ Could not create directory: `{e}`", parse_mode="Markdown")
             return
-    user_cwd[(uid, message.chat.id)] = expanded
-    user_sessions.pop((uid, message.chat.id), None)
+    key = (uid, message.chat.id)
+    user_cwd[key] = expanded
+    user_sessions.pop(key, None)
+    _stop_pty(key)
     save_sessions()
     suffix = " (created)" if created else ""
     bot.reply_to(message, f"📂 → `{expanded}`{suffix} (session cleared)", parse_mode="Markdown")
@@ -2319,7 +2408,9 @@ def cmd_model(message):
     if not name:
         bot.reply_to(message, f"🤖 Model: `{user_model.get((uid, message.chat.id), MODEL)}`", parse_mode="Markdown")
         return
-    user_model[(uid, message.chat.id)] = name
+    key = (uid, message.chat.id)
+    user_model[key] = name
+    _stop_pty(key)
     save_sessions()
     bot.reply_to(message, f"🤖 Model → `{name}`", parse_mode="Markdown")
 
@@ -2331,7 +2422,9 @@ def cmd_opus(message):
         return
     uid = message.from_user.id
     name = "claude-opus-4-7"
-    user_model[(uid, message.chat.id)] = name
+    key = (uid, message.chat.id)
+    user_model[key] = name
+    _stop_pty(key)
     save_sessions()
     try:
         bot.reply_to(message, f"🤖 Model → `{name}`", parse_mode="Markdown")
@@ -2347,13 +2440,45 @@ def cmd_sonnet(message):
         return
     uid = message.from_user.id
     name = "claude-sonnet-4-6"
-    user_model[(uid, message.chat.id)] = name
+    key = (uid, message.chat.id)
+    user_model[key] = name
+    _stop_pty(key)
     save_sessions()
     try:
         bot.reply_to(message, f"🤖 Model → `{name}`", parse_mode="Markdown")
         print(f"[CMD_SONNET] reply_to OK", flush=True)
     except Exception as e:
         print(f"[CMD_SONNET] reply_to FAILED: {e!r}", flush=True)
+
+
+def cmd_pty(message):
+    """/pty [on|off|status] — toggle ClaudeCode PTY mode for this chat.
+
+    Default is `--print` mode (the existing subprocess-per-message path).
+    PTY mode keeps a long-lived `claude` interactive process per chat and
+    drives it via the TUI; this avoids `--print`'s known tool-use streaming
+    hangs but is newer code and may have rough edges.
+    """
+    if not _allowed(message): return
+    uid = message.from_user.id
+    key = (uid, message.chat.id)
+    arg = message.text.replace("/pty", "", 1).strip().lower()
+    if arg in ("", "status"):
+        on = user_pty_mode.get(key, False)
+        bot.reply_to(message, f"🧪 PTY mode: `{'on' if on else 'off'}`", parse_mode="Markdown")
+        return
+    if arg == "on":
+        user_pty_mode[key] = True
+        save_sessions()
+        bot.reply_to(message, "🧪 PTY mode → `on` (using ClaudeCode wrapper)", parse_mode="Markdown")
+        return
+    if arg == "off":
+        user_pty_mode.pop(key, None)
+        _stop_pty(key)
+        save_sessions()
+        bot.reply_to(message, "🧪 PTY mode → `off` (using `claude --print`)", parse_mode="Markdown")
+        return
+    bot.reply_to(message, "Usage: `/pty on|off|status`", parse_mode="Markdown")
 
 
 def cmd_timeout(message):
@@ -2468,6 +2593,7 @@ def create_bot():
     bot.message_handler(commands=["model"])(cmd_model)
     bot.message_handler(commands=["opus"])(cmd_opus)
     bot.message_handler(commands=["sonnet"])(cmd_sonnet)
+    bot.message_handler(commands=["pty"])(cmd_pty)
     bot.message_handler(commands=["timeout"])(cmd_timeout)
     bot.message_handler(commands=["status"])(cmd_status)
     bot.message_handler(func=lambda m: m.text and not m.text.startswith("/"))(handle_message)
