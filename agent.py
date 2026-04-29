@@ -83,6 +83,7 @@ AGENTS_PATH = os.path.join(CTA_HOME, "agents.json")
 MEMORY_DIR = os.path.join(CTA_HOME, "memory")
 CRONS_DIR = os.path.join(CTA_HOME, "crons")
 PREAMBLE_DIR = os.path.join(CTA_HOME, "preamble")
+DEBUG_DIR = os.path.join(CTA_HOME, "debug")
 GLOBAL_PREAMBLE_PATH = os.path.join(CTA_HOME, "global_preamble.md")
 GLOBAL_PREAMBLE = ""
 WHISPER_MODEL = "base"
@@ -157,6 +158,7 @@ def init(config: dict):
     os.makedirs(MEMORY_DIR, exist_ok=True)
     os.makedirs(CRONS_DIR, exist_ok=True)
     os.makedirs(PREAMBLE_DIR, exist_ok=True)
+    os.makedirs(DEBUG_DIR, exist_ok=True)
 
 
 def load_sessions():
@@ -1825,8 +1827,13 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
     so cron.py (and any other helper scripts) can know which chat they're in.
     """
     cwd = cwd or DEFAULT_CWD
+    debug_path = os.path.join(
+        DEBUG_DIR,
+        f"{uid or 'x'}-{chat_id or 'x'}-{int(time.time())}.log",
+    )
     cmd = [CLAUDE_BIN, "--print", "--dangerously-skip-permissions",
-           "--model", model or MODEL, "--output-format", "json", "-p", prompt]
+           "--model", model or MODEL, "--output-format", "json",
+           "--debug-file", debug_path, "-p", prompt]
     if session_id:
         cmd += ["--resume", session_id]
     env = os.environ.copy()
@@ -1836,8 +1843,8 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
         env["CTA_CHAT_ID"] = str(chat_id)
     key = (uid, chat_id) if uid is not None and chat_id is not None else None
     label = chat_labels.get(key, f"{uid}:{chat_id}") if key else "—"
-    tui_log(f"[blue]→ claude[/] {escape(label)} model={escape(model or MODEL)} chars={len(prompt)} session={'resume' if session_id else 'new'}")
-    print(f"[POPEN] uid={uid} chat={chat_id} cmd={cmd[0]}", flush=True)
+    tui_log(f"[blue]→ claude[/] {escape(label)} model={escape(model or MODEL)} chars={len(prompt)} session={'resume' if session_id else 'new'} debug={escape(debug_path)}")
+    print(f"[POPEN] uid={uid} chat={chat_id} cmd={cmd[0]} debug={debug_path}", flush=True)
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True, cwd=cwd, env=env, start_new_session=True)
     except FileNotFoundError:
