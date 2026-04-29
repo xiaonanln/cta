@@ -60,7 +60,7 @@ def _resolve_chat(args) -> tuple:
     if args.uid is not None and args.chat_id is not None:
         return args.uid, args.chat_id
     if args.to:
-        sessions = _request("GET", "/status").get("sessions", [])
+        sessions = _request("GET", "/chats").get("chats", [])
         matches = [s for s in sessions if s.get("label") == args.to]
         if not matches:
             sys.exit(f"error: no chat with label {args.to!r}. Try `notify.py list`.")
@@ -79,7 +79,7 @@ def cmd_send(args):
 
 
 def cmd_list(args):
-    sessions = _request("GET", "/status").get("sessions", [])
+    sessions = _request("GET", "/chats").get("chats", [])
     if not sessions:
         print("(no chats)")
         return

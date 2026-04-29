@@ -30,10 +30,10 @@ class TestNotifyCli(unittest.TestCase):
         self.assertEqual(body, {"text": "hello there"})
 
     @patch("notify.urllib.request.urlopen")
-    def test_send_with_to_label_resolves_via_status(self, mock_urlopen):
-        # First call: GET /status returns sessions; second call: POST send
+    def test_send_with_to_label_resolves_via_chats(self, mock_urlopen):
+        # First call: GET /chats returns chats; second call: POST send
         mock_urlopen.side_effect = [
-            _fake_response({"sessions": [
+            _fake_response({"chats": [
                 {"label": "CTA", "uid": 100, "chat_id": -200},
                 {"label": "OtherChat", "uid": 100, "chat_id": -300},
             ]}),
@@ -48,7 +48,7 @@ class TestNotifyCli(unittest.TestCase):
 
     @patch("notify.urllib.request.urlopen")
     def test_send_to_unknown_label_exits(self, mock_urlopen):
-        mock_urlopen.return_value = _fake_response({"sessions": [
+        mock_urlopen.return_value = _fake_response({"chats": [
             {"label": "OtherChat", "uid": 100, "chat_id": -300},
         ]})
         with self.assertRaises(SystemExit) as ctx:
@@ -59,7 +59,7 @@ class TestNotifyCli(unittest.TestCase):
     @patch("notify.urllib.request.urlopen")
     def test_send_to_ambiguous_label_exits(self, mock_urlopen):
         """Two chats with the same label is ambiguous — must error rather than guess."""
-        mock_urlopen.return_value = _fake_response({"sessions": [
+        mock_urlopen.return_value = _fake_response({"chats": [
             {"label": "Bot", "uid": 100, "chat_id": -1},
             {"label": "Bot", "uid": 100, "chat_id": -2},
         ]})
@@ -76,7 +76,7 @@ class TestNotifyCli(unittest.TestCase):
 
     @patch("notify.urllib.request.urlopen")
     def test_list_prints_all_chats(self, mock_urlopen):
-        mock_urlopen.return_value = _fake_response({"sessions": [
+        mock_urlopen.return_value = _fake_response({"chats": [
             {"label": "CTA", "uid": 100, "chat_id": -200},
             {"label": "GoVerse", "uid": 100, "chat_id": -300},
         ]})
@@ -89,7 +89,7 @@ class TestNotifyCli(unittest.TestCase):
 
     @patch("notify.urllib.request.urlopen")
     def test_uses_config_web_port(self, mock_urlopen):
-        mock_urlopen.return_value = _fake_response({"sessions": []})
+        mock_urlopen.return_value = _fake_response({"chats": []})
         with patch("notify._base_url", return_value="http://127.0.0.1:17488"):
             with patch("sys.stdout", new_callable=io.StringIO):
                 notify.main(["list"])

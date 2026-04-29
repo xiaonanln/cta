@@ -78,7 +78,7 @@ MODEL = "claude-sonnet-4-6"
 WEB_PORT = 17488
 DEFAULT_CWD = os.getcwd()
 CLAUDE_BIN = shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
-SESSIONS_PATH = os.path.join(CTA_HOME, "agents.json")
+AGENTS_PATH = os.path.join(CTA_HOME, "agents.json")
 MEMORY_DIR = os.path.join(CTA_HOME, "memory")
 CRONS_DIR = os.path.join(CTA_HOME, "crons")
 PREAMBLE_DIR = os.path.join(CTA_HOME, "preamble")
@@ -160,10 +160,10 @@ def init(config: dict):
 
 
 def load_sessions():
-    if not os.path.exists(SESSIONS_PATH):
+    if not os.path.exists(AGENTS_PATH):
         return
     try:
-        with open(SESSIONS_PATH) as f:
+        with open(AGENTS_PATH) as f:
             data = json.load(f)
         for key_str, entry in data.items():
             uid_str, chat_str = key_str.split(":", 1)
@@ -179,15 +179,17 @@ def load_sessions():
                     user_model[key] = entry["model"]
                 if entry.get("last_active"):
                     last_active[key] = entry["last_active"]
-        tui_log(f"[dim]Loaded {len(data)} session(s) from {SESSIONS_PATH}[/]")
+                if entry.get("label"):
+                    chat_labels[key] = entry["label"]
+        tui_log(f"[dim]Loaded {len(data)} agent(s) from {AGENTS_PATH}[/]")
     except Exception as e:
         tui_log(f"[red]Warning: could not load sessions: {escape(str(e))}[/]")
 
 
 def save_sessions():
-    tmp = SESSIONS_PATH + ".tmp"
+    tmp = AGENTS_PATH + ".tmp"
     try:
-        all_keys = set(user_sessions) | set(user_cwd) | set(user_model) | set(last_active)
+        all_keys = set(user_sessions) | set(user_cwd) | set(user_model) | set(last_active) | set(chat_labels)
         data = {}
         for key in all_keys:
             uid, chat_id = key
@@ -200,10 +202,12 @@ def save_sessions():
                 entry["model"] = user_model[key]
             if key in last_active:
                 entry["last_active"] = last_active[key]
+            if key in chat_labels:
+                entry["label"] = chat_labels[key]
             data[f"{uid}:{chat_id}"] = entry
         with open(tmp, "w") as f:
             json.dump(data, f, indent=2)
-        os.replace(tmp, SESSIONS_PATH)
+        os.replace(tmp, AGENTS_PATH)
     except Exception as e:
         tui_log(f"[red]Warning: could not save sessions: {escape(str(e))}[/]")
 
@@ -1537,9 +1541,9 @@ def _web_update_cronjob(uid, chat_id, job_id):
 def _web_chats():
     """Return all known chats from agents.json for the cronjob chat picker."""
     chats = []
-    if os.path.exists(SESSIONS_PATH):
+    if os.path.exists(AGENTS_PATH):
         try:
-            with open(SESSIONS_PATH) as f:
+            with open(AGENTS_PATH) as f:
                 data = json.load(f)
             for key_str, entry in data.items():
                 uid_str, chat_str = key_str.split(":", 1)
