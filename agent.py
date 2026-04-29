@@ -2098,6 +2098,7 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
     last_reply[key] = reply[:300]
     preview = reply[:120].replace("\n", " ")
     tui_log(f"[blue]←[/] [bold]{escape(username)}[/] {escape(preview)}{'…' if len(reply) > 120 else ''}")
+    print(f"[CLAUDE_OUTPUT] uid={uid} chat={chat_id}\n{reply}", flush=True)
     _chat_push(uid, chat_id, "assistant", reply)
     # Persist after the assistant _chat_push so its last_active timestamp is captured;
     # also runs on failed/timeout turns (reply is the error string) so user activity isn't lost.
