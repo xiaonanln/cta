@@ -751,10 +751,10 @@ class TestBotHandlers(unittest.TestCase):
         agent.cmd_model(make_fake_message("/model claude-sonnet-4-6"))
         self.assertEqual(agent.user_model[(123, 123)], "claude-sonnet-4-6")
 
-    def test_model_preserves_session(self):
+    def test_model_clears_session(self):
         agent.user_sessions[(123, 123)] = "old-session"
         agent.cmd_model(make_fake_message("/model claude-sonnet-4-6"))
-        self.assertEqual(agent.user_sessions[(123, 123)], "old-session")
+        self.assertNotIn((123, 123), agent.user_sessions)
 
     def test_model_blocked_unknown_user(self):
         agent.cmd_model(make_fake_message("/model opus", user_id=999))

@@ -2321,7 +2321,9 @@ def cmd_model(message):
     if not name:
         bot.reply_to(message, f"🤖 Model: `{user_model.get((uid, message.chat.id), MODEL)}`", parse_mode="Markdown")
         return
-    user_model[(uid, message.chat.id)] = name
+    key = (uid, message.chat.id)
+    user_model[key] = name
+    user_sessions.pop(key, None)
     save_sessions()
     bot.reply_to(message, f"🤖 Model → `{name}`", parse_mode="Markdown")
 
@@ -2333,7 +2335,9 @@ def cmd_opus(message):
         return
     uid = message.from_user.id
     name = "claude-opus-4-7"
-    user_model[(uid, message.chat.id)] = name
+    key = (uid, message.chat.id)
+    user_model[key] = name
+    user_sessions.pop(key, None)
     save_sessions()
     try:
         bot.reply_to(message, f"🤖 Model → `{name}`", parse_mode="Markdown")
@@ -2349,7 +2353,9 @@ def cmd_sonnet(message):
         return
     uid = message.from_user.id
     name = "claude-sonnet-4-6"
-    user_model[(uid, message.chat.id)] = name
+    key = (uid, message.chat.id)
+    user_model[key] = name
+    user_sessions.pop(key, None)
     save_sessions()
     try:
         bot.reply_to(message, f"🤖 Model → `{name}`", parse_mode="Markdown")
