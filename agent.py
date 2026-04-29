@@ -1855,6 +1855,8 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
                     _current_procs.pop(key, None)
             if proc.returncode != 0 or not stdout.strip():
                 last_error = stderr.strip()
+                if "No conversation found with session ID" in last_error:
+                    break  # non-retriable; caller will retry with fresh session
             else:
                 data = json.loads(stdout)
                 text = (data.get("result") or "").strip() or "(empty response)"
