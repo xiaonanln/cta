@@ -1843,7 +1843,9 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
             label = chat_labels.get(key, f"{uid}:{chat_id}") if key else "—"
             attempt_str = f" (retry {attempt}/{max_retries})" if attempt > 0 else ""
             tui_log(f"[blue]→ claude[/] {escape(label)} model={escape(model or MODEL)} chars={len(prompt)} session={'resume' if session_id else 'new'}{attempt_str}")
+            print(f"[POPEN] uid={uid} chat={chat_id} attempt={attempt} cmd={cmd[0]}", flush=True)
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd, env=env)
+            print(f"[POPEN_OK] uid={uid} chat={chat_id} pid={proc.pid}", flush=True)
             if key:
                 _current_procs[key] = proc
             try:
@@ -1964,6 +1966,7 @@ def _typing_loop(chat_id: int, done: threading.Event):
 
 
 def _process_message(uid: int, chat_id: int, message, done: threading.Event):
+    print(f"[PROCESS_MSG] uid={uid} chat={chat_id}", flush=True)
     global claude_active_keys
     key = (uid, chat_id)
     cwd = user_cwd.get(key, DEFAULT_CWD)
@@ -2071,6 +2074,7 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
             done.set()
             return
 
+    print(f"[CALL_CLAUDE] uid={uid} chat={chat_id} model={model} cwd={cwd}", flush=True)
     claude_active_keys.add(key)
     try:
         reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=session_id, model=model, timeout=timeout, uid=uid, chat_id=chat_id)
@@ -2165,6 +2169,7 @@ def _is_plain_text(item) -> bool:
 def _user_worker(uid: int, chat_id: int, q: queue.Queue):
     while True:
         item = q.get()
+        print(f"[WORKER_DEQUEUE] uid={uid} chat={chat_id} type={'cron' if isinstance(item, dict) else 'msg'}", flush=True)
         done = threading.Event()
         threading.Thread(target=_typing_loop, args=(chat_id, done), daemon=True).start()
         try:
@@ -2192,6 +2197,7 @@ def _user_worker(uid: int, chat_id: int, q: queue.Queue):
                             f"[Message {i+1}]: {t}" for i, t in enumerate(all_texts)
                         )
                         tui_log(f"[cyan]batched {len(all_texts)} messages for {uid}:{chat_id}[/]")
+                print(f"[WORKER_DISPATCH] uid={uid} chat={chat_id} calling _process_message", flush=True)
                 _process_message(uid, chat_id, item, done)
         except Exception as e:
             done.set()
