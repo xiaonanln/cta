@@ -1828,7 +1828,8 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
     """
     cwd = cwd or DEFAULT_CWD
     cmd = [CLAUDE_BIN, "--print", "--dangerously-skip-permissions",
-           "--model", model or MODEL, "--output-format", "json", "-p", prompt]
+           "--model", model or MODEL, "--output-format", "json",
+           "--strict-mcp-config", "-p", prompt]
     if session_id:
         cmd += ["--resume", session_id]
     env = os.environ.copy()
