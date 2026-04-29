@@ -5,6 +5,8 @@ Telegram bot powered by Claude Code CLI.
 Uses Max subscription — no API tokens needed.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os
@@ -25,7 +27,7 @@ import telegramify_markdown
 from flask import Flask, Response, stream_with_context
 from rich.markup import escape
 
-from claude_code import ClaudeCode, ClaudeNotReady, ClaudeStalled
+import claude_code
 
 # Ensure /usr/local/bin is in PATH so shell commands issued by Claude (docker, etc.)
 # work even when agent.py is launched via launchd/systemd with a minimal environment.
@@ -197,7 +199,8 @@ def load_sessions():
 def save_sessions():
     tmp = AGENTS_PATH + ".tmp"
     try:
-        all_keys = set(user_sessions) | set(user_cwd) | set(user_model) | set(last_active) | set(chat_labels)
+        all_keys = (set(user_sessions) | set(user_cwd) | set(user_model)
+                    | set(last_active) | set(chat_labels) | set(user_pty_mode))
         data = {}
         for key in all_keys:
             uid, chat_id = key
@@ -1882,7 +1885,7 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
 
 # ── PTY mode (ClaudeCode wrapper) ─────────────────────────────────────────────
 
-def _get_or_create_pty(key: tuple[int, int]) -> ClaudeCode:
+def _get_or_create_pty(key: tuple[int, int]) -> claude_code.ClaudeCode:
     """Return the live ClaudeCode for this chat, spawning if needed.
 
     A new instance is started lazily on the first message after toggling
@@ -1892,11 +1895,36 @@ def _get_or_create_pty(key: tuple[int, int]) -> ClaudeCode:
     cc = claude_code_instances.get(key)
     if cc is not None and cc.proc is not None and cc.proc.poll() is None:
         return cc
+    # Cached instance is dead — clean it up so we don't leak its master_fd.
+    if cc is not None:
+        try:
+            cc.stop()
+        except Exception:
+            pass
+        claude_code_instances.pop(key, None)
+    uid, chat_id = key
     cwd = user_cwd.get(key, DEFAULT_CWD)
     model = user_model.get(key, MODEL)
-    cc = ClaudeCode(cwd=cwd, model=model)
+    cc = claude_code.ClaudeCode(
+        cwd=cwd,
+        model=model,
+        # Helpers like cron.py / notify.py read these to learn which chat
+        # they're being invoked from. Without them, those scripts exit unless
+        # the agent passes --uid/--chat-id flags explicitly.
+        extra_env={"CTA_UID": str(uid), "CTA_CHAT_ID": str(chat_id)},
+    )
     print(f"[PTY] spawning ClaudeCode for {key} cwd={cwd} model={model}", flush=True)
-    cc.start(ready_timeout=45)
+    try:
+        cc.start(ready_timeout=45)
+    except Exception:
+        # If start() raises (e.g. ClaudeNotReady), the subprocess and master_fd
+        # would leak — clean them up before propagating so a retry doesn't pile
+        # up orphaned claude processes.
+        try:
+            cc.stop()
+        except Exception:
+            pass
+        raise
     claude_code_instances[key] = cc
     print(f"[PTY] ready for {key}", flush=True)
     return cc
@@ -1930,11 +1958,11 @@ def call_claude_pty(prompt: str, key: tuple[int, int],
             stall_timeout=90.0,
         )
         return text or "(empty response)", ""
-    except (ClaudeStalled, TimeoutError) as e:
+    except (claude_code.ClaudeStalled, TimeoutError) as e:
         # Stream stalled — kill the process so the next message respawns.
         _stop_pty(key)
         return f"[Error] PTY stalled: {e}", ""
-    except ClaudeNotReady as e:
+    except claude_code.ClaudeNotReady as e:
         _stop_pty(key)
         return f"[Error] PTY not ready: {e}", ""
     except Exception as e:

@@ -14,6 +14,7 @@ from unittest.mock import patch, MagicMock, call
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-token")
 
 import agent
+import claude_code
 
 agent.init(agent.DEFAULT_CONFIG)
 
@@ -215,6 +216,20 @@ class TestSessionPersistence(unittest.TestCase):
         agent.chat_labels.clear()
         agent.load_sessions()
         self.assertEqual(agent.chat_labels.get((123, 456)), "打印机")
+
+    def test_pty_mode_only_chat_persists(self):
+        """A chat with only `/pty on` (no session/cwd/model/label/last_active) must
+        still get serialized so the toggle survives restart. Regression for the case
+        where save_sessions' all_keys union excluded user_pty_mode."""
+        agent.user_pty_mode[(789, 101)] = True
+        try:
+            agent.save_sessions()
+            with open(self.tmp.name) as f:
+                data = json.load(f)
+            self.assertIn("789:101", data)
+            self.assertTrue(data["789:101"].get("pty_mode"))
+        finally:
+            agent.user_pty_mode.pop((789, 101), None)
 
     def test_last_active_roundtrip(self):
         """last_active should be persisted to sessions.json and reloaded after restart."""
@@ -714,6 +729,58 @@ class TestBotHandlers(unittest.TestCase):
         fake_cc.stop.assert_called_once()
         self.assertNotIn((123, 123), agent.claude_code_instances)
 
+    @patch("agent.claude_code.ClaudeCode")
+    def test_get_or_create_pty_passes_cta_env(self, mock_cc_class):
+        """ClaudeCode should be constructed with CTA_UID/CTA_CHAT_ID in extra_env so
+        cron.py / notify.py invoked from inside the PTY chat can identify themselves.
+        Without this, those scripts exit unless --uid/--chat-id flags are passed."""
+        agent.claude_code_instances.pop((123, 456), None)
+        mock_instance = MagicMock()
+        mock_instance.proc = None
+        mock_cc_class.return_value = mock_instance
+        try:
+            agent._get_or_create_pty((123, 456))
+        finally:
+            agent.claude_code_instances.pop((123, 456), None)
+        kwargs = mock_cc_class.call_args[1]
+        self.assertIn("extra_env", kwargs)
+        self.assertEqual(kwargs["extra_env"]["CTA_UID"], "123")
+        self.assertEqual(kwargs["extra_env"]["CTA_CHAT_ID"], "456")
+
+    @patch("agent.claude_code.ClaudeCode")
+    def test_get_or_create_pty_cleans_up_when_start_raises(self, mock_cc_class):
+        """If cc.start() raises (e.g. ClaudeNotReady), the half-started instance
+        must be stopped so we don't leak the subprocess + master_fd, and it
+        must NOT be registered in claude_code_instances (so the next attempt
+        spawns fresh)."""
+        agent.claude_code_instances.pop((123, 456), None)
+        mock_instance = MagicMock()
+        mock_instance.proc = None
+        mock_instance.start.side_effect = claude_code.ClaudeNotReady("setup failed")
+        mock_cc_class.return_value = mock_instance
+        try:
+            with self.assertRaises(claude_code.ClaudeNotReady):
+                agent._get_or_create_pty((123, 456))
+            mock_instance.stop.assert_called_once()
+            self.assertNotIn((123, 456), agent.claude_code_instances)
+        finally:
+            agent.claude_code_instances.pop((123, 456), None)
+
+    @patch("agent.claude_code.ClaudeCode")
+    def test_get_or_create_pty_stops_dead_instance_before_respawn(self, mock_cc_class):
+        """If the cached ClaudeCode has died (proc.poll() != None), the old instance
+        must be stopped before spawning a replacement — otherwise the dead PTY's
+        master_fd leaks. Long-running deployments could exhaust file descriptors."""
+        dead_cc = MagicMock()
+        dead_cc.proc.poll.return_value = 1  # process exited
+        agent.claude_code_instances[(123, 456)] = dead_cc
+        mock_cc_class.return_value = MagicMock(proc=None)
+        try:
+            agent._get_or_create_pty((123, 456))
+        finally:
+            agent.claude_code_instances.pop((123, 456), None)
+        dead_cc.stop.assert_called_once()
+
     @patch("agent.call_claude_pty", return_value=("hi from pty", ""))
     @patch("agent.call_claude")
     def test_pty_mode_routes_to_call_claude_pty(self, mock_print, mock_pty):
@@ -732,6 +799,70 @@ class TestBotHandlers(unittest.TestCase):
         self.assertNotIn((123, 123), agent.user_sessions)
         reply = self.bot.reply_to.call_args[0][1]
         self.assertIn("session cleared", reply)
+
+    def test_cd_stops_pty_instance(self):
+        """Like /clear and /model, /cd must stop the PTY so the next message
+        respawns with the new cwd. Otherwise a stale ClaudeCode keeps
+        running in the old directory."""
+        fake_cc = MagicMock()
+        agent.claude_code_instances[(123, 123)] = fake_cc
+        agent.cmd_cd(make_fake_message(f"/cd {os.getcwd()}"))
+        fake_cc.stop.assert_called_once()
+        self.assertNotIn((123, 123), agent.claude_code_instances)
+
+    @patch("agent._get_or_create_pty")
+    def test_call_claude_pty_returns_send_result(self, mock_get):
+        cc = MagicMock()
+        cc.send.return_value = "hi from pty"
+        mock_get.return_value = cc
+        text, sid = agent.call_claude_pty("ping", (123, 123), timeout=10)
+        self.assertEqual(text, "hi from pty")
+        self.assertEqual(sid, "")  # PTY mode never returns a session_id
+        cc.send.assert_called_once()
+
+    @patch("agent._get_or_create_pty")
+    def test_call_claude_pty_returns_empty_response_placeholder(self, mock_get):
+        """An empty string from cc.send should surface as '(empty response)' so
+        the user gets *something*, not blank."""
+        cc = MagicMock()
+        cc.send.return_value = ""
+        mock_get.return_value = cc
+        text, _ = agent.call_claude_pty("ping", (123, 123))
+        self.assertEqual(text, "(empty response)")
+
+    @patch("agent._stop_pty")
+    @patch("agent._get_or_create_pty")
+    def test_call_claude_pty_stalls_kill_pty(self, mock_get, mock_stop):
+        """ClaudeStalled / TimeoutError must kill the PTY so the next message
+        respawns fresh — otherwise a wedged process keeps blocking the chat."""
+        cc = MagicMock()
+        cc.send.side_effect = claude_code.ClaudeStalled("stream went silent")
+        mock_get.return_value = cc
+        text, _ = agent.call_claude_pty("ping", (123, 123))
+        self.assertIn("stalled", text.lower())
+        mock_stop.assert_called_once_with((123, 123))
+
+    @patch("agent._stop_pty")
+    @patch("agent._get_or_create_pty")
+    def test_call_claude_pty_not_ready_kill_pty(self, mock_get, mock_stop):
+        cc = MagicMock()
+        cc.send.side_effect = claude_code.ClaudeNotReady("setup never finished")
+        mock_get.return_value = cc
+        text, _ = agent.call_claude_pty("ping", (123, 123))
+        self.assertIn("not ready", text.lower())
+        mock_stop.assert_called_once_with((123, 123))
+
+    @patch("agent._stop_pty")
+    @patch("agent._get_or_create_pty")
+    def test_call_claude_pty_generic_error_kill_pty(self, mock_get, mock_stop):
+        """Any unexpected exception from cc.send should still trigger
+        _stop_pty so we don't leak a broken instance."""
+        cc = MagicMock()
+        cc.send.side_effect = RuntimeError("something weird")
+        mock_get.return_value = cc
+        text, _ = agent.call_claude_pty("ping", (123, 123))
+        self.assertIn("RuntimeError", text)
+        mock_stop.assert_called_once_with((123, 123))
 
     def test_clear_blocked_unknown_user(self):
         agent.cmd_clear(make_fake_message("/clear", user_id=999))
