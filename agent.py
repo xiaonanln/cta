@@ -1863,6 +1863,7 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
             proc.communicate()
             if key:
                 _current_procs.pop(key, None)
+            tui_log(f"[yellow]⏱ claude timeout[/] {escape(chat_labels.get(key, str(key)))}")
             return "(Claude timed out)", ""
         except FileNotFoundError:
             if key:
@@ -2195,6 +2196,10 @@ def _user_worker(uid: int, chat_id: int, q: queue.Queue):
         except Exception as e:
             done.set()
             tui_log(f"[red][worker:{uid}:{chat_id}] error: {escape(str(e))}[/]")
+            try:
+                bot.send_message(chat_id, f"❌ Internal error: {e}")
+            except Exception:
+                pass
         finally:
             q.task_done()
 
