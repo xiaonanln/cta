@@ -435,7 +435,7 @@ class TestCallClaude(unittest.TestCase):
     @patch("agent.subprocess.Popen")
     def test_stderr_returned_on_empty_stdout(self, mock_popen):
         mock_popen.return_value = self._mock_proc_error("something broke")
-        text, sid = agent.call_claude("hi", max_retries=0)
+        text, sid = agent.call_claude("hi")
         self.assertIn("Error", text)
         self.assertIn("something broke", text)
         self.assertEqual(sid, "")
@@ -443,7 +443,7 @@ class TestCallClaude(unittest.TestCase):
     @patch("agent.subprocess.Popen")
     def test_empty_stdout_and_stderr(self, mock_popen):
         mock_popen.return_value = self._mock_proc_error("")
-        text, _ = agent.call_claude("hi", max_retries=0)
+        text, _ = agent.call_claude("hi")
         self.assertEqual(text, "(empty response)")
 
     @patch("agent.subprocess.Popen")
@@ -466,36 +466,17 @@ class TestCallClaude(unittest.TestCase):
         text, _ = agent.call_claude("hi")
         self.assertIn("not found", text)
 
-    @patch("agent.time.sleep")
     @patch("agent.subprocess.Popen")
-    def test_retries_on_empty_response(self, mock_popen, mock_sleep):
-        mock_popen.side_effect = [self._mock_proc_error(""), self._mock_proc("recovered", "sid-ok")]
-        text, sid = agent.call_claude("hi", max_retries=1, retry_delay=0)
-        self.assertEqual(text, "recovered")
-        self.assertEqual(sid, "sid-ok")
-        self.assertEqual(mock_popen.call_count, 2)
-
-    @patch("agent.time.sleep")
-    @patch("agent.subprocess.Popen")
-    def test_returns_error_after_all_retries_exhausted(self, mock_popen, mock_sleep):
+    def test_returns_error_on_failure(self, mock_popen):
         mock_popen.return_value = self._mock_proc_error("transient error")
-        text, sid = agent.call_claude("hi", max_retries=2, retry_delay=0)
+        text, sid = agent.call_claude("hi")
         self.assertIn("transient error", text)
         self.assertEqual(sid, "")
-        self.assertEqual(mock_popen.call_count, 3)
-
-    @patch("agent.subprocess.Popen")
-    def test_no_retry_on_timeout(self, mock_popen):
-        proc = MagicMock()
-        proc.communicate.side_effect = [subprocess.TimeoutExpired("claude", 600), ("", "")]
-        mock_popen.return_value = proc
-        text, _ = agent.call_claude("hi", max_retries=2)
-        self.assertIn("timed out", text)
         self.assertEqual(mock_popen.call_count, 1)
 
     @patch("agent.subprocess.Popen", side_effect=FileNotFoundError)
     def test_no_retry_on_file_not_found(self, mock_popen):
-        text, _ = agent.call_claude("hi", max_retries=2)
+        text, _ = agent.call_claude("hi")
         self.assertIn("not found", text)
         self.assertEqual(mock_popen.call_count, 1)
 
