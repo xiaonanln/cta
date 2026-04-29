@@ -1817,11 +1817,9 @@ def _append_usage_footer(text: str, data: dict) -> str:
 
 
 def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str = None,
-                max_retries: int = 2, retry_delay: float = 2.0, timeout: int = None,
+                timeout: int = None,
                 uid: int = None, chat_id: int = None) -> tuple[str, str]:
     """Call Claude Code CLI. Returns (text, session_id).
-
-    Retries up to max_retries times on transient failures (empty/error response).
 
     When uid/chat_id are provided, sets CTA_UID/CTA_CHAT_ID in the subprocess env
     so cron.py (and any other helper scripts) can know which chat they're in.
@@ -1837,46 +1835,33 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
     if chat_id is not None:
         env["CTA_CHAT_ID"] = str(chat_id)
     key = (uid, chat_id) if uid is not None and chat_id is not None else None
-    last_error = ""
-    for attempt in range(max_retries + 1):
+    label = chat_labels.get(key, f"{uid}:{chat_id}") if key else "—"
+    tui_log(f"[blue]→ claude[/] {escape(label)} model={escape(model or MODEL)} chars={len(prompt)} session={'resume' if session_id else 'new'}")
+    print(f"[POPEN] uid={uid} chat={chat_id} cmd={cmd[0]}", flush=True)
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True, cwd=cwd, env=env, start_new_session=True)
+    except FileNotFoundError:
+        return "(claude CLI not found — install @anthropic-ai/claude-code)", ""
+    print(f"[POPEN_OK] uid={uid} chat={chat_id} pid={proc.pid}", flush=True)
+    if key:
+        _current_procs[key] = proc
+    try:
         try:
-            label = chat_labels.get(key, f"{uid}:{chat_id}") if key else "—"
-            attempt_str = f" (retry {attempt}/{max_retries})" if attempt > 0 else ""
-            tui_log(f"[blue]→ claude[/] {escape(label)} model={escape(model or MODEL)} chars={len(prompt)} session={'resume' if session_id else 'new'}{attempt_str}")
-            print(f"[POPEN] uid={uid} chat={chat_id} attempt={attempt} cmd={cmd[0]}", flush=True)
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True, cwd=cwd, env=env, start_new_session=True)
-            print(f"[POPEN_OK] uid={uid} chat={chat_id} pid={proc.pid}", flush=True)
-            if key:
-                _current_procs[key] = proc
-            try:
-                stdout, stderr = proc.communicate(timeout=timeout or TIMEOUT)
-            finally:
-                if key:
-                    _current_procs.pop(key, None)
-            if proc.returncode != 0 or not stdout.strip():
-                last_error = stderr.strip()
-                if "No conversation found with session ID" in last_error:
-                    break  # non-retriable; caller will retry with fresh session
-            else:
-                data = json.loads(stdout)
-                text = (data.get("result") or "").strip() or "(empty response)"
-                text = _append_usage_footer(text, data)
-                return text, data.get("session_id", "")
+            stdout, stderr = proc.communicate(timeout=timeout or TIMEOUT)
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.communicate()
-            if key:
-                _current_procs.pop(key, None)
-            tui_log(f"[yellow]⏱ claude timeout[/] {escape(chat_labels.get(key, str(key)))}")
+            tui_log(f"[yellow]⏱ claude timeout[/] {escape(label)}")
             return "(Claude timed out)", ""
-        except FileNotFoundError:
-            if key:
-                _current_procs.pop(key, None)
-            return "(claude CLI not found — install @anthropic-ai/claude-code)", ""
-        if attempt < max_retries:
-            tui_log(f"[yellow]⚠ empty response, retrying ({attempt + 1}/{max_retries})…[/]")
-            time.sleep(retry_delay)
-    return (f"[Error] {last_error}" if last_error else "(empty response)"), ""
+    finally:
+        if key:
+            _current_procs.pop(key, None)
+    if proc.returncode != 0 or not stdout.strip():
+        return f"[Error] {stderr.strip()}" if stderr.strip() else "(empty response)", ""
+    data = json.loads(stdout)
+    text = (data.get("result") or "").strip() or "(empty response)"
+    text = _append_usage_footer(text, data)
+    return text, data.get("session_id", "")
 
 
 # ── Web chat history & SSE ────────────────────────────────────────────────────
