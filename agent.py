@@ -1844,7 +1844,7 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
             attempt_str = f" (retry {attempt}/{max_retries})" if attempt > 0 else ""
             tui_log(f"[blue]→ claude[/] {escape(label)} model={escape(model or MODEL)} chars={len(prompt)} session={'resume' if session_id else 'new'}{attempt_str}")
             print(f"[POPEN] uid={uid} chat={chat_id} attempt={attempt} cmd={cmd[0]}", flush=True)
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd, env=env)
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True, cwd=cwd, env=env)
             print(f"[POPEN_OK] uid={uid} chat={chat_id} pid={proc.pid}", flush=True)
             if key:
                 _current_procs[key] = proc
