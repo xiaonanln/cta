@@ -46,6 +46,7 @@ DEFAULT_CONFIG = {
     "claude_timeout": 1800,
     "model": "claude-sonnet-4-6",
     "web_port": 17488,
+    "max_concurrent_claude": 1,
 }
 
 
@@ -99,6 +100,8 @@ msg_counts: dict[tuple[int, int], int] = {}    # (uid, chat_id) → messages pro
 last_reply: dict[tuple[int, int], str] = {}    # (uid, chat_id) → last reply snippet
 last_active: dict[tuple[int, int], float] = {} # (uid, chat_id) → epoch seconds of last user/assistant message
 claude_active_keys: set = set()  # (uid, chat_id) keys with a running Claude call
+MAX_CONCURRENT_CLAUDE = 1
+_claude_semaphore = threading.Semaphore(MAX_CONCURRENT_CLAUDE)
 _current_procs: dict = {}  # (uid, chat_id) → running Claude subprocess (killable)
 _cancelled_keys: set = set()           # keys that had /cancel; suppresses reply
 chat_history: dict[tuple[int, int], list] = {}  # (uid, chat_id) → [{role,text,ts}]
@@ -144,12 +147,15 @@ def _load_whisper():
 
 def init(config: dict):
     global BOT_TOKEN, ALLOWED_USERS, TIMEOUT, MODEL, WEB_PORT, DEFAULT_CWD, GLOBAL_PREAMBLE, WHISPER_MODEL
+    global MAX_CONCURRENT_CLAUDE, _claude_semaphore
     BOT_TOKEN = config["telegram_bot_token"]
     ALLOWED_USERS = set(config["allowed_users"])
     TIMEOUT = config["claude_timeout"]
     MODEL = config.get("model", "claude-sonnet-4-6")
     WEB_PORT = config.get("web_port", 17488)
     WHISPER_MODEL = config.get("whisper_model", "base")
+    MAX_CONCURRENT_CLAUDE = max(1, int(config.get("max_concurrent_claude", 1)))
+    _claude_semaphore = threading.Semaphore(MAX_CONCURRENT_CLAUDE)
     if config.get("default_cwd"):
         DEFAULT_CWD = os.path.expanduser(config["default_cwd"])
     GLOBAL_PREAMBLE = _read_global_preamble()
@@ -777,6 +783,10 @@ _WEB_HTML = """<!DOCTYPE html>
         <input id="cfg-timeout" type="number" min="10" />
       </div>
       <div class="cfg-row">
+        <label>Max concurrent agents</label>
+        <input id="cfg-concurrent" type="number" min="1" max="20" />
+      </div>
+      <div class="cfg-row">
         <label>Web port</label>
         <input id="cfg-port" type="number" min="1024" max="65535" />
       </div>
@@ -1153,6 +1163,7 @@ _WEB_HTML = """<!DOCTYPE html>
         modelSel.value = d.model;
       }
       document.getElementById('cfg-timeout').value = d.claude_timeout ?? '';
+      document.getElementById('cfg-concurrent').value = d.max_concurrent_claude ?? 1;
       document.getElementById('cfg-port').value = d.web_port ?? '';
       document.getElementById('cfg-cwd').value = d.default_cwd || '';
       document.getElementById('cfg-users').value = (d.allowed_users || []).join(', ');
@@ -1167,6 +1178,7 @@ _WEB_HTML = """<!DOCTYPE html>
     const body = {
       model: document.getElementById('cfg-model').value,
       claude_timeout: parseInt(document.getElementById('cfg-timeout').value) || 1800,
+      max_concurrent_claude: parseInt(document.getElementById('cfg-concurrent').value) || 1,
       web_port: parseInt(document.getElementById('cfg-port').value) || 17488,
       default_cwd: document.getElementById('cfg-cwd').value.trim(),
       allowed_users: document.getElementById('cfg-users').value
@@ -1355,6 +1367,7 @@ def _web_get_config():
         "web_port": cfg.get("web_port", WEB_PORT),
         "default_cwd": cfg.get("default_cwd", DEFAULT_CWD),
         "allowed_users": cfg.get("allowed_users", list(ALLOWED_USERS)),
+        "max_concurrent_claude": cfg.get("max_concurrent_claude", MAX_CONCURRENT_CLAUDE),
         "global_preamble": _read_global_preamble(),
         "system_preamble": _system_preamble("<uid>", "<chat_id>"),
     }
@@ -1363,6 +1376,7 @@ def _web_get_config():
 @app.route("/config", methods=["POST"])
 def _web_set_config():
     global BOT_TOKEN, MODEL, TIMEOUT, DEFAULT_CWD, ALLOWED_USERS, GLOBAL_PREAMBLE
+    global MAX_CONCURRENT_CLAUDE, _claude_semaphore
     from flask import request
     data = request.get_json(silent=True) or {}
     try:
@@ -1388,6 +1402,10 @@ def _web_set_config():
     if "allowed_users" in data:
         cfg["allowed_users"] = [int(u) for u in data["allowed_users"] if str(u).strip()]
         ALLOWED_USERS = set(cfg["allowed_users"])
+    if "max_concurrent_claude" in data and int(data["max_concurrent_claude"]) >= 1:
+        MAX_CONCURRENT_CLAUDE = int(data["max_concurrent_claude"])
+        _claude_semaphore = threading.Semaphore(MAX_CONCURRENT_CLAUDE)
+        cfg["max_concurrent_claude"] = MAX_CONCURRENT_CLAUDE
     if "global_preamble" in data:
         text = data["global_preamble"].strip()
         if text:
@@ -1837,45 +1855,49 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
         env["CTA_CHAT_ID"] = str(chat_id)
     key = (uid, chat_id) if uid is not None and chat_id is not None else None
     last_error = ""
-    for attempt in range(max_retries + 1):
-        try:
-            label = chat_labels.get(key, f"{uid}:{chat_id}") if key else "—"
-            attempt_str = f" (retry {attempt}/{max_retries})" if attempt > 0 else ""
-            tui_log(f"[blue]→ claude[/] {escape(label)} model={escape(model or MODEL)} chars={len(prompt)} session={'resume' if session_id else 'new'}{attempt_str}")
-            print(f"[POPEN] uid={uid} chat={chat_id} attempt={attempt} cmd={cmd[0]}", flush=True)
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True, cwd=cwd, env=env)
-            print(f"[POPEN_OK] uid={uid} chat={chat_id} pid={proc.pid}", flush=True)
-            if key:
-                _current_procs[key] = proc
+    _claude_semaphore.acquire()
+    try:
+        for attempt in range(max_retries + 1):
             try:
-                stdout, stderr = proc.communicate(timeout=timeout or TIMEOUT)
-            finally:
+                label = chat_labels.get(key, f"{uid}:{chat_id}") if key else "—"
+                attempt_str = f" (retry {attempt}/{max_retries})" if attempt > 0 else ""
+                tui_log(f"[blue]→ claude[/] {escape(label)} model={escape(model or MODEL)} chars={len(prompt)} session={'resume' if session_id else 'new'}{attempt_str}")
+                print(f"[POPEN] uid={uid} chat={chat_id} attempt={attempt} cmd={cmd[0]}", flush=True)
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True, cwd=cwd, env=env)
+                print(f"[POPEN_OK] uid={uid} chat={chat_id} pid={proc.pid}", flush=True)
+                if key:
+                    _current_procs[key] = proc
+                try:
+                    stdout, stderr = proc.communicate(timeout=timeout or TIMEOUT)
+                finally:
+                    if key:
+                        _current_procs.pop(key, None)
+                if proc.returncode != 0 or not stdout.strip():
+                    last_error = stderr.strip()
+                    if "No conversation found with session ID" in last_error:
+                        break  # non-retriable; caller will retry with fresh session
+                else:
+                    data = json.loads(stdout)
+                    text = (data.get("result") or "").strip() or "(empty response)"
+                    text = _append_usage_footer(text, data)
+                    return text, data.get("session_id", "")
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()
                 if key:
                     _current_procs.pop(key, None)
-            if proc.returncode != 0 or not stdout.strip():
-                last_error = stderr.strip()
-                if "No conversation found with session ID" in last_error:
-                    break  # non-retriable; caller will retry with fresh session
-            else:
-                data = json.loads(stdout)
-                text = (data.get("result") or "").strip() or "(empty response)"
-                text = _append_usage_footer(text, data)
-                return text, data.get("session_id", "")
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
-            if key:
-                _current_procs.pop(key, None)
-            tui_log(f"[yellow]⏱ claude timeout[/] {escape(chat_labels.get(key, str(key)))}")
-            return "(Claude timed out)", ""
-        except FileNotFoundError:
-            if key:
-                _current_procs.pop(key, None)
-            return "(claude CLI not found — install @anthropic-ai/claude-code)", ""
-        if attempt < max_retries:
-            tui_log(f"[yellow]⚠ empty response, retrying ({attempt + 1}/{max_retries})…[/]")
-            time.sleep(retry_delay)
-    return (f"[Error] {last_error}" if last_error else "(empty response)"), ""
+                tui_log(f"[yellow]⏱ claude timeout[/] {escape(chat_labels.get(key, str(key)))}")
+                return "(Claude timed out)", ""
+            except FileNotFoundError:
+                if key:
+                    _current_procs.pop(key, None)
+                return "(claude CLI not found — install @anthropic-ai/claude-code)", ""
+            if attempt < max_retries:
+                tui_log(f"[yellow]⚠ empty response, retrying ({attempt + 1}/{max_retries})…[/]")
+                time.sleep(retry_delay)
+        return (f"[Error] {last_error}" if last_error else "(empty response)"), ""
+    finally:
+        _claude_semaphore.release()
 
 
 # ── Web chat history & SSE ────────────────────────────────────────────────────
