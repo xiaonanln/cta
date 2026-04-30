@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 import time
+from typing import Callable, Optional
 
 import claude_code
 
@@ -26,6 +27,9 @@ class PtyBackend(ClaudeBackend):
         self._last_activity: float = 0.0
         self._typing_stop: threading.Event | None = None
         self._typing_thread: threading.Thread | None = None
+        # Set by agent to supply (cwd, model) at PTY start time without
+        # the backend needing to import agent.
+        self.start_config: Optional[Callable[[], tuple[str, str]]] = None
 
     @property
     def cc(self) -> claude_code.ClaudeCode | None:
@@ -38,17 +42,20 @@ class PtyBackend(ClaudeBackend):
                 and self._cc.proc is not None
                 and self._cc.proc.poll() is None)
 
-    def _ensure_started(self) -> None:
-        import agent
+    def _log(self, msg: str) -> None:
+        if self.on_log:
+            self.on_log(msg)
+        else:
+            print(msg, flush=True)
 
+    def _ensure_started(self) -> None:
         if self.is_running:
             return
         # Dead-but-cached instance — clean up before respawning so master_fd
         # and the old reader thread don't leak.
         if self._cc is not None:
             self._teardown()
-        cwd = agent.user_cwd.get(self.key, agent.DEFAULT_CWD)
-        model = agent.user_model.get(self.key, agent.MODEL)
+        cwd, model = self.start_config() if self.start_config else ("", "")
         cc = claude_code.ClaudeCode(
             cwd=cwd, model=model,
             extra_env={"CTA_UID": str(self.uid), "CTA_CHAT_ID": str(self.chat_id)},
@@ -74,9 +81,6 @@ class PtyBackend(ClaudeBackend):
 
     def _reader_loop(self) -> None:
         """Long-lived: read new lines from the PTY and forward via on_output."""
-        import agent
-        from rich.markup import escape
-
         cc = self._cc
         stop_event = self._stop_event
         while not stop_event.is_set():
@@ -85,7 +89,7 @@ class PtyBackend(ClaudeBackend):
             try:
                 new_lines = cc.read_new_output(timeout=0.5)
             except Exception as e:
-                agent.tui_log(f"[red]pty reader read error {self.key}: {escape(str(e))}[/]")
+                self._log(f"[red]pty reader read error {self.key}: {e}[/]")
                 break
             # Sync activity from raw PTY bytes — covers noise/redraw-only frames
             # where new_lines is empty but Claude is still actively generating.
@@ -102,7 +106,7 @@ class PtyBackend(ClaudeBackend):
             try:
                 cb(text)
             except Exception as e:
-                agent.tui_log(f"[red]pty reader on_output error {self.key}: {escape(str(e))}[/]")
+                self._log(f"[red]pty reader on_output error {self.key}: {e}[/]")
 
     def send(self, prompt: str) -> None:
         self._ensure_started()
@@ -125,13 +129,12 @@ class PtyBackend(ClaudeBackend):
         self._typing_thread = t
 
     def _typing_loop(self, stop: threading.Event) -> None:
-        import agent
-
         def pulse() -> None:
-            try:
-                agent.bot.send_chat_action(self.chat_id, "typing")
-            except Exception:
-                pass
+            if self.on_typing:
+                try:
+                    self.on_typing()
+                except Exception:
+                    pass
 
         pulse()
         while not stop.wait(timeout=_TYPING_PULSE_SECONDS):
@@ -155,9 +158,6 @@ class PtyBackend(ClaudeBackend):
         self._teardown()
 
     def _teardown(self) -> None:
-        import agent
-        from rich.markup import escape
-
         if self._typing_stop is not None:
             self._typing_stop.set()
         self._typing_stop = None
@@ -171,7 +171,7 @@ class PtyBackend(ClaudeBackend):
             try:
                 self._cc.stop()
             except Exception as e:
-                agent.tui_log(f"[red]⚠ pty stop error for {self.key}: {escape(str(e))}[/]")
+                self._log(f"[red]⚠ pty stop error for {self.key}: {e}[/]")
         self._cc = None
         self._reader = None
         self._stop_event = None

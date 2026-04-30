@@ -570,6 +570,13 @@ def _get_backend(key: tuple[int, int]) -> "backends.ClaudeBackend":
         b.stop()
     uid, chat_id = key
     b = desired_cls(uid, chat_id)
+    b.on_log = tui_log
+    if isinstance(b, backends.PtyBackend):
+        b.on_typing = lambda: bot.send_chat_action(chat_id, "typing")
+        b.start_config = lambda: (
+            user_cwd.get(key, DEFAULT_CWD),
+            user_model.get(key, MODEL),
+        )
     _backends[key] = b
     return b
 
