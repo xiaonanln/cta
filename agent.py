@@ -581,6 +581,10 @@ def _get_backend(key: tuple[int, int]) -> "backends.ClaudeBackend":
             user_model.get(key, MODEL),
             user_sessions.get(key),
         )
+        def _on_invalid_session(k=key) -> None:
+            user_sessions.pop(k, None)
+            save_sessions()
+        b.on_invalid_session = _on_invalid_session
     _backends[key] = b
     return b
 

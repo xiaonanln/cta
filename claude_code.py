@@ -327,7 +327,12 @@ class ClaudeCode:
         """If claude is showing the 'Resume from summary vs full session' menu,
         navigate to option 2 ('Resume full session as-is') and confirm.
         Returns True if the menu was detected and handled."""
-        if 'Resume from summary' not in self._screen_text():
+        # Check both the pyte-rendered screen and the raw buffer (with spaces
+        # collapsed), because claude's complex ANSI sequences can confuse pyte
+        # and leave the screen blank while the stripped buffer still has the text.
+        screen_has_menu = 'Resume from summary' in self._screen_text()
+        buffer_has_menu = 'Resumefromsummary' in self._buffer_clean.replace(' ', '')
+        if not screen_has_menu and not buffer_has_menu:
             return False
         # Option 1 is selected by default; press down to reach option 2, then Enter.
         os.write(self.master_fd, b'\x1b[B')  # down arrow
