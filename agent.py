@@ -28,6 +28,7 @@ from rich.markup import escape
 
 import claude_code
 import backends
+import web
 from web import app, tui_log, _LogHandler, _WebMessage
 
 # Ensure /usr/local/bin is in PATH so shell commands issued by Claude (docker, etc.)
@@ -1240,6 +1241,7 @@ def create_bot():
 if __name__ == "__main__":
     config = load_config()
     init(config)
+    web.init(sys.modules[__name__])
 
     if not BOT_TOKEN:
         print(f"Error: telegram_bot_token not set in {CONFIG_PATH}")

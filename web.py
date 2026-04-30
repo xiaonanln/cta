@@ -1,9 +1,4 @@
-"""Web UI for CTA — Flask routes, SSE log/chat broadcast, and HTML templates.
-
-Imports `agent` at module load time and references `agent.<global>` lazily
-inside route handlers. The reverse arrow (`agent` ← `web`) is also lazy:
-agent imports `app` and `tui_log` from this module to mount them.
-"""
+"""Web UI for CTA — Flask routes, SSE log/chat broadcast, and HTML templates."""
 
 from __future__ import annotations
 
@@ -19,16 +14,12 @@ from datetime import datetime
 from flask import Flask, Response, request, stream_with_context
 from werkzeug.routing import BaseConverter
 
-class _LazyAgent:
-    """Defers 'import agent' until first attribute access to break the __main__ circular import."""
-    def __getattr__(self, name):
-        import agent as _m
-        return getattr(_m, name)
-    def __setattr__(self, name, value):
-        import agent as _m
-        setattr(_m, name, value)
+# Set by agent.py via web.init() after its globals are fully initialised.
+agent = None
 
-agent = _LazyAgent()
+def init(agent_module) -> None:
+    global agent
+    agent = agent_module
 
 # ── Logging primitives ─────────────────────────────────────────────────────────
 
