@@ -33,13 +33,8 @@ def show(label: str, text: str, head: int = 600, tail: int = 600):
 
 
 def scenario_basic(cwd: str):
-    """Send a simple math question and verify the reply contains the answer.
-
-    Using '2+2' lets us assert the actual answer ('4') is in the reply rather
-    than just eyeballing what came back. Catches the "input echo returned as
-    response" class of bug where cc.send returns the typed prompt instead of
-    claude's output.
-    """
+    """Streaming-API smoke test: send a math question, collect new output
+    until quiet, verify the answer ('4') is in the new lines."""
     cc = ClaudeCode(cwd=cwd, model='claude-sonnet-4-6')
     print(f'[basic] starting claude in {cwd}…')
     t0 = time.time()
@@ -49,16 +44,25 @@ def scenario_basic(cwd: str):
     print(f'[basic] sending: {prompt!r}')
     t0 = time.time()
     try:
-        reply = cc.send(prompt, response_timeout=60, stall_timeout=30)
+        cc.send_input(prompt)
+        chunks: list[str] = []
+        deadline = time.time() + 60
+        last_activity = time.time()
+        quiet_window = 5.0
+        while time.time() < deadline:
+            new_lines = cc.read_new_output(timeout=0.5)
+            now = time.time()
+            if new_lines:
+                chunks.extend(new_lines)
+                last_activity = now
+            elif now - last_activity > quiet_window:
+                break
         elapsed = time.time() - t0
-        print(f'[basic] got reply in {elapsed:.1f}s')
+        reply = '\n'.join(chunks).strip()
+        print(f'[basic] collected {len(chunks)} new line(s) in {elapsed:.1f}s')
         show('reply', reply, head=1500, tail=1500)
-        # Assertions — failures here mean PTY capture is broken.
         assert '4' in reply, f'FAIL: reply does not contain "4". reply={reply!r}'
-        assert elapsed > 0.5, f'FAIL: reply came back too fast ({elapsed:.2f}s) — likely captured input echo before claude responded'
-        # Soft warn if input echo leaked into reply (extraction bug, separate from completion-detection bug).
-        if prompt in reply or 'reply with just the digit' in reply:
-            print('[basic] WARN: reply contains input echo — extraction may need work')
+        assert elapsed > 0.5, f'FAIL: returned too fast ({elapsed:.2f}s)'
         print('[basic] ✅ PASS')
     finally:
         cc.stop()

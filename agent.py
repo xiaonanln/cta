@@ -2036,22 +2036,30 @@ def call_claude_pty(prompt: str, key: tuple[int, int],
                     timeout: int | None = None) -> tuple[str, str]:
     """PTY-mode equivalent of call_claude. Returns (text, session_id="").
 
-    Uses a long-lived ClaudeCode per chat; preserves conversation context
-    across messages within the same process lifetime, so we don't need to
-    pass --resume.
+    Adapter over the streaming ClaudeCode API: write the prompt, then
+    collect new output lines until claude has been quiet for a window
+    (treats that as "this turn is done"). The streaming layer itself
+    has no completion concept — this adapter imposes one for callers
+    that still expect a single reply per Telegram message.
     """
     cc = _get_or_create_pty(key)
     try:
-        text = cc.send(
-            prompt,
-            response_timeout=float(timeout or TIMEOUT),
-            stall_timeout=90.0,
-        )
-        return text or "(empty response)", ""
-    except (claude_code.ClaudeStalled, TimeoutError) as e:
-        # Stream stalled — kill the process so the next message respawns.
-        _stop_pty(key)
-        return f"[Error] PTY stalled: {e}", ""
+        cc.send_input(prompt)
+        deadline = time.time() + float(timeout or TIMEOUT)
+        last_activity = time.time()
+        quiet_window = 8.0  # no new output for 8s → consider turn done
+        chunks: list[str] = []
+        while time.time() < deadline:
+            new_lines = cc.read_new_output(timeout=0.5)
+            now = time.time()
+            if new_lines:
+                chunks.extend(new_lines)
+                last_activity = now
+            elif now - last_activity > quiet_window:
+                break
+        if not chunks:
+            return "(empty response)", ""
+        return "\n".join(chunks).strip() or "(empty response)", ""
     except claude_code.ClaudeNotReady as e:
         _stop_pty(key)
         return f"[Error] PTY not ready: {e}", ""

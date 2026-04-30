@@ -811,42 +811,36 @@ class TestBotHandlers(unittest.TestCase):
         self.assertNotIn((123, 123), agent.claude_code_instances)
 
     @patch("agent._get_or_create_pty")
-    def test_call_claude_pty_returns_send_result(self, mock_get):
+    def test_call_claude_pty_collects_streamed_lines(self, mock_get):
+        """Adapter writes the prompt via send_input then drains read_new_output
+        until quiet, joining the new lines into the returned text."""
         cc = MagicMock()
-        cc.send.return_value = "hi from pty"
+        # First two calls yield content, the rest are quiet. Use a callable
+        # so MagicMock keeps returning [] forever instead of StopIteration.
+        chunks = iter([["line one"], ["line two"]])
+        cc.read_new_output.side_effect = lambda timeout=0.5: next(chunks, [])
         mock_get.return_value = cc
-        text, sid = agent.call_claude_pty("ping", (123, 123), timeout=10)
-        self.assertEqual(text, "hi from pty")
+        text, sid = agent.call_claude_pty("ping", (123, 123), timeout=1)
+        self.assertIn("line one", text)
+        self.assertIn("line two", text)
         self.assertEqual(sid, "")  # PTY mode never returns a session_id
-        cc.send.assert_called_once()
+        cc.send_input.assert_called_once_with("ping")
 
     @patch("agent._get_or_create_pty")
     def test_call_claude_pty_returns_empty_response_placeholder(self, mock_get):
-        """An empty string from cc.send should surface as '(empty response)' so
-        the user gets *something*, not blank."""
+        """If nothing comes out of read_new_output before the deadline, the
+        adapter should return the '(empty response)' marker."""
         cc = MagicMock()
-        cc.send.return_value = ""
+        cc.read_new_output.side_effect = lambda timeout=0.5: []
         mock_get.return_value = cc
-        text, _ = agent.call_claude_pty("ping", (123, 123))
+        text, _ = agent.call_claude_pty("ping", (123, 123), timeout=1)
         self.assertEqual(text, "(empty response)")
-
-    @patch("agent._stop_pty")
-    @patch("agent._get_or_create_pty")
-    def test_call_claude_pty_stalls_kill_pty(self, mock_get, mock_stop):
-        """ClaudeStalled / TimeoutError must kill the PTY so the next message
-        respawns fresh — otherwise a wedged process keeps blocking the chat."""
-        cc = MagicMock()
-        cc.send.side_effect = claude_code.ClaudeStalled("stream went silent")
-        mock_get.return_value = cc
-        text, _ = agent.call_claude_pty("ping", (123, 123))
-        self.assertIn("stalled", text.lower())
-        mock_stop.assert_called_once_with((123, 123))
 
     @patch("agent._stop_pty")
     @patch("agent._get_or_create_pty")
     def test_call_claude_pty_not_ready_kill_pty(self, mock_get, mock_stop):
         cc = MagicMock()
-        cc.send.side_effect = claude_code.ClaudeNotReady("setup never finished")
+        cc.send_input.side_effect = claude_code.ClaudeNotReady("setup never finished")
         mock_get.return_value = cc
         text, _ = agent.call_claude_pty("ping", (123, 123))
         self.assertIn("not ready", text.lower())
@@ -855,10 +849,10 @@ class TestBotHandlers(unittest.TestCase):
     @patch("agent._stop_pty")
     @patch("agent._get_or_create_pty")
     def test_call_claude_pty_generic_error_kill_pty(self, mock_get, mock_stop):
-        """Any unexpected exception from cc.send should still trigger
-        _stop_pty so we don't leak a broken instance."""
+        """Any unexpected exception from send_input/read_new_output should
+        still trigger _stop_pty so we don't leak a broken instance."""
         cc = MagicMock()
-        cc.send.side_effect = RuntimeError("something weird")
+        cc.send_input.side_effect = RuntimeError("something weird")
         mock_get.return_value = cc
         text, _ = agent.call_claude_pty("ping", (123, 123))
         self.assertIn("RuntimeError", text)
