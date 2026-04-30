@@ -221,7 +221,8 @@ class ClaudeCode:
         r'|.*\d+/\d+\(esc\)'                         # interrupt hint variant
         r'|.*\(ctrl\+o to expand\)'                  # collapsed tool-output hint
         r'|❯?\s*Press up to edit queued messages'    # queued-message hint
-        r'|⎿\s+Running…\s*\([^)]*\)'                 # tool-call running spinner: ⎿ Running… (5s)
+        r'|⎿\s+Running…(?:\s*\([^)]*\))?'             # tool-call running spinner: ⎿ Running…  /  ⎿ Running… (5s)
+        r'|⎿\s+Tip:.*'                                # tool-block tip hint: ⎿ Tip: …
         r'|(?:[·✻✶✽✳✢]\s+|\.{3,}\s*)[A-Za-z\']{1,32}(?:…|\.{3,})(?:\s*\(.*)?'  # spinner: glyph + word + …
         r')\s*$',
         re.IGNORECASE,

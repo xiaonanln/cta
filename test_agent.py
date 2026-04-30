@@ -2473,13 +2473,25 @@ class TestNoiseLineFilter(unittest.TestCase):
             self.assertFalse(self.cc._is_noise_line(line), f"should NOT filter: {line!r}")
 
     def test_filters_tool_running_spinner(self):
-        # The "⎿  Running… (Ns)" line is the tool-call in-progress spinner,
+        # The "⎿  Running…" line is the tool-call in-progress spinner,
         # not the completed tool output — filter so it doesn't repeatedly
-        # show up while the tool is still running.
+        # show up while the tool is still running. The parenthetical with
+        # elapsed time only appears after a few seconds; the bare form
+        # leaks through during the first frames if not handled.
         for line in [
+            "⎿  Running…",
             "⎿  Running… (5s)",
             "⎿  Running… (17s)",
             "⎿  Running… (1m 49s)",
+        ]:
+            self.assertTrue(self.cc._is_noise_line(line), f"should filter: {line!r}")
+
+    def test_filters_tool_tip_hint(self):
+        # Tool blocks sometimes render a "⎿  Tip: …" hint line that's TUI
+        # chrome, not real assistant content.
+        for line in [
+            "⎿  Tip: Send messages to Claude while it works to steer Claude in real-time",
+            "  ⎿  Tip: Use /memory to view the contents",
         ]:
             self.assertTrue(self.cc._is_noise_line(line), f"should filter: {line!r}")
 
