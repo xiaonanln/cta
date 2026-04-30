@@ -57,7 +57,24 @@ DEFAULT_CONFIG = {
     "max_concurrent_claude": 1,
     "model": "claude-sonnet-4-6",
     "web_port": 17488,
+    "path_prefix": "",
 }
+
+
+def _apply_path_prefix(prefix: str) -> None:
+    """Prepend `prefix` (os.pathsep-separated) to PATH, expanding ~ and skipping dupes."""
+    if not prefix:
+        return
+    existing = os.environ.get("PATH", "")
+    existing_parts = existing.split(os.pathsep) if existing else []
+    new_parts = []
+    for p in prefix.split(os.pathsep):
+        p = os.path.expanduser(p.strip())
+        if p and p not in existing_parts and p not in new_parts:
+            new_parts.append(p)
+    if new_parts:
+        base = existing or "/usr/bin:/bin:/usr/sbin:/sbin"
+        os.environ["PATH"] = os.pathsep.join(new_parts) + os.pathsep + base
 
 
 def load_config() -> dict:
@@ -169,6 +186,7 @@ def init(config: dict):
     MODEL = config.get("model", "claude-sonnet-4-6")
     WEB_PORT = config.get("web_port", 17488)
     WHISPER_MODEL = config.get("whisper_model", "base")
+    _apply_path_prefix(config.get("path_prefix", ""))
     if config.get("default_cwd"):
         DEFAULT_CWD = os.path.expanduser(config["default_cwd"])
     GLOBAL_PREAMBLE = _read_global_preamble()

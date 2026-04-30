@@ -108,6 +108,57 @@ class TestConfig(unittest.TestCase):
         self.assertTrue(agent.CONFIG_PATH.startswith(agent.CTA_HOME))
         self.assertTrue(agent.CONFIG_PATH.endswith("config.json"))
 
+    def test_default_path_prefix_is_empty(self):
+        self.assertEqual(agent.DEFAULT_CONFIG["path_prefix"], "")
+
+    def test_init_prepends_path_prefix(self):
+        original_path = os.environ.get("PATH", "")
+        try:
+            os.environ["PATH"] = "/usr/bin:/bin"
+            agent.init({**agent.DEFAULT_CONFIG, "path_prefix": "/opt/foo:/opt/bar"})
+            parts = os.environ["PATH"].split(os.pathsep)
+            self.assertEqual(parts[0], "/opt/foo")
+            self.assertEqual(parts[1], "/opt/bar")
+            self.assertIn("/usr/bin", parts)
+        finally:
+            os.environ["PATH"] = original_path
+            agent.init(agent.DEFAULT_CONFIG)
+
+    def test_init_path_prefix_expands_tilde(self):
+        original_path = os.environ.get("PATH", "")
+        try:
+            os.environ["PATH"] = "/usr/bin"
+            agent.init({**agent.DEFAULT_CONFIG, "path_prefix": "~/mybin"})
+            parts = os.environ["PATH"].split(os.pathsep)
+            self.assertEqual(parts[0], os.path.expanduser("~/mybin"))
+            self.assertNotIn("~/mybin", parts)
+        finally:
+            os.environ["PATH"] = original_path
+            agent.init(agent.DEFAULT_CONFIG)
+
+    def test_init_path_prefix_skips_duplicates(self):
+        original_path = os.environ.get("PATH", "")
+        try:
+            os.environ["PATH"] = "/opt/foo:/usr/bin"
+            agent.init({**agent.DEFAULT_CONFIG, "path_prefix": "/opt/foo:/opt/bar"})
+            parts = os.environ["PATH"].split(os.pathsep)
+            # /opt/foo already present — only /opt/bar is prepended
+            self.assertEqual(parts[0], "/opt/bar")
+            self.assertEqual(parts.count("/opt/foo"), 1)
+        finally:
+            os.environ["PATH"] = original_path
+            agent.init(agent.DEFAULT_CONFIG)
+
+    def test_init_empty_path_prefix_leaves_path_unchanged(self):
+        original_path = os.environ.get("PATH", "")
+        try:
+            os.environ["PATH"] = "/usr/bin:/bin"
+            agent.init({**agent.DEFAULT_CONFIG, "path_prefix": ""})
+            self.assertEqual(os.environ["PATH"], "/usr/bin:/bin")
+        finally:
+            os.environ["PATH"] = original_path
+            agent.init(agent.DEFAULT_CONFIG)
+
     def test_sessions_path_is_in_cta_home(self):
         self.assertTrue(agent.AGENTS_PATH.startswith(agent.CTA_HOME))
         self.assertTrue(agent.AGENTS_PATH.endswith("agents.json"))
