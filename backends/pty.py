@@ -87,9 +87,11 @@ class PtyBackend(ClaudeBackend):
             except Exception as e:
                 agent.tui_log(f"[red]pty reader read error {self.key}: {escape(str(e))}[/]")
                 break
+            # Sync activity from raw PTY bytes — covers noise/redraw-only frames
+            # where new_lines is empty but Claude is still actively generating.
+            self._last_activity = cc.last_pty_bytes
             if not new_lines:
                 continue
-            self._last_activity = time.time()
             text = "\n".join(new_lines).strip()
             if not text:
                 continue

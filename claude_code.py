@@ -102,6 +102,10 @@ class ClaudeCode:
         # Hashes of lines we've already returned via read_new_output, so
         # we don't re-emit them on every screen redraw. Reset on start().
         self._yielded_line_hashes: set[int] = set()
+        # Timestamp of the last raw PTY bytes received (any bytes, including
+        # noise/redraws). Used by PtyBackend to keep the typing indicator alive
+        # during long tool phases that produce only filtered-out screen churn.
+        self.last_pty_bytes: float = 0.0
 
     # ── lifecycle ────────────────────────────────────────────────────────
     def start(self, ready_timeout: float = 30.0) -> None:
@@ -277,6 +281,7 @@ class ClaudeCode:
         text = data.decode('utf-8', errors='replace')
         self._buffer_raw += text
         self._buffer_clean = strip_ansi(self._buffer_raw)
+        self.last_pty_bytes = time.time()
         # Feed bytes into the virtual terminal so it tracks current screen.
         self._stream.feed(data)
         return text
