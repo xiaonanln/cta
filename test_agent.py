@@ -825,9 +825,11 @@ class TestBotHandlers(unittest.TestCase):
         fake_backend.stop.assert_called_once()
         self.assertNotIn((123, 123), agent._backends)
 
-    def test_pty_backend_reader_forwards_chunks_via_callback(self):
-        """The reader loop forwards each batch of new lines through on_output.
-        Validates the streaming pipeline without spinning a real PTY."""
+    def test_pty_backend_reader_coalesces_chunks_within_quiet_window(self):
+        """Lines that arrive back-to-back within the coalesce window are
+        emitted as a single combined message. The reader_loop holds output
+        until either a quiet period passes or the loop exits — whichever
+        happens first — to avoid flooding Telegram with one message per line."""
         cc = MagicMock()
         cc.proc.poll.return_value = None
         chunks = iter([["hello"], ["second batch"], ["third"]])
@@ -845,7 +847,75 @@ class TestBotHandlers(unittest.TestCase):
         sent: list[str] = []
         b.on_output = lambda text: sent.append(text)
         b._reader_loop()
-        self.assertEqual(sent, ["hello", "second batch", "third"])
+        self.assertEqual(sent, ["hello\nsecond batch\nthird"])
+
+    def test_pty_backend_reader_flushes_after_quiet_window(self):
+        """Once the coalesce window elapses with no new content, pending lines
+        flush — even though the loop is still running."""
+        cc = MagicMock()
+        cc.proc.poll.return_value = None
+        stop_event = threading.Event()
+        # Sequence: one batch, then ~10 empty polls (> coalesce window) → flush,
+        # then stop. Empty polls simulate "no new content lines" — the timer
+        # should still fire and emit the pending content.
+        calls = {"n": 0}
+        def fake_read(timeout=0.5):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return ["only"]
+            if calls["n"] > 12:
+                stop_event.set()
+            return []
+        cc.read_new_output.side_effect = fake_read
+        b = backends.PtyBackend(123, 123)
+        b._cc = cc
+        b._stop_event = stop_event
+        sent: list[str] = []
+        b.on_output = lambda text: sent.append(text)
+        # Patch the coalesce window short, and step the clock deterministically
+        # so we cross the threshold on the second poll.
+        time_seq = iter([100.0, 100.20])
+        with patch("backends.pty._OUTPUT_COALESCE_SECONDS", 0.05), \
+             patch("backends.pty._now", side_effect=lambda: next(time_seq)):
+            b._reader_loop()
+        self.assertEqual(sent, ["only"])
+
+    def test_pty_backend_reader_noise_does_not_reset_coalesce_timer(self):
+        """Empty (noise-only) frames must not push out the coalesce deadline.
+        After one real batch followed by noise-only frames, content still
+        flushes once the timer elapses."""
+        cc = MagicMock()
+        cc.proc.poll.return_value = None
+        stop_event = threading.Event()
+        # Real content on first poll, noise (empty) on every subsequent poll.
+        # last_pty_bytes ticks each time so we can prove noise activity is
+        # observed but doesn't affect the coalesce timer.
+        calls = {"n": 0}
+        def fake_read(timeout=0.5):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                cc.last_pty_bytes = 100.0
+                return ["real content"]
+            if calls["n"] > 8:
+                stop_event.set()
+            cc.last_pty_bytes = 100.0 + calls["n"]
+            return []
+        cc.read_new_output.side_effect = fake_read
+        b = backends.PtyBackend(123, 123)
+        b._cc = cc
+        b._stop_event = stop_event
+        sent: list[str] = []
+        b.on_output = lambda text: sent.append(text)
+        # Patch wall-clock so iter 1 sets last_content_time = 100.0,
+        # iter 2 (noise) checks at 100.05 → no flush, iter 3 (noise) at 100.20 → flush.
+        # (Values pad past the 0.1 threshold to avoid float-comparison flakiness.)
+        time_seq = iter([100.0, 100.05, 100.20])
+        with patch("backends.pty._OUTPUT_COALESCE_SECONDS", 0.1), \
+             patch("backends.pty._now", side_effect=lambda: next(time_seq)):
+            b._reader_loop()
+        self.assertEqual(sent, ["real content"])
+        # Noise was observed and bumped activity (typing indicator stays alive).
+        self.assertGreater(b._last_activity, 100.0)
 
     def test_pty_backend_reader_updates_activity_for_noise_only_frames(self):
         """When all output was filtered as noise (read_new_output returns []),
@@ -2370,9 +2440,26 @@ class TestNoiseLineFilter(unittest.TestCase):
         ]:
             self.assertTrue(self.cc._is_noise_line(line), f"should filter: {line!r}")
 
+    def test_filters_ctrl_o_to_expand_hint(self):
+        # Tool blocks are rendered collapsed with a "(ctrl+o to expand)" hint;
+        # filter so the hint never gets relayed to Telegram.
+        for line in [
+            "  ⎿  Read 42 lines (ctrl+o to expand)",
+            "Some preview … (ctrl+o to expand)",
+            "(ctrl+o to expand)",
+        ]:
+            self.assertTrue(self.cc._is_noise_line(line), f"should filter: {line!r}")
+
+    def test_filters_press_up_to_edit_queued_messages_hint(self):
+        for line in [
+            "❯ Press up to edit queued messages",
+            "Press up to edit queued messages",
+        ]:
+            self.assertTrue(self.cc._is_noise_line(line), f"should filter: {line!r}")
+
     def test_does_not_filter_real_content_or_tool_lines(self):
-        # ⎿-prefixed lines (tool indicator / command echo / output) are
-        # intentionally NOT filtered — they carry useful information.
+        # ⎿-prefixed lines for tool command echo / output are intentionally
+        # NOT filtered — they carry the actual tool result.
         for line in [
             "Hello, here is the answer.",
             "Let me think about that…",  # ellipsis at end without spinner glyph
@@ -2380,11 +2467,21 @@ class TestNoiseLineFilter(unittest.TestCase):
             "```python",
             "✻ this has a glyph but no ellipsis so is not the spinner",
             "...continued from where we left off",  # leading dots but no Unicode … after one word
-            "⎿  Running… (5s)",  # tool spinner — keep, user wants visibility
             "⎿  $ tail -20 /Users/alex/projects/cta/test_agent.py",
             "⎿ output preview",
         ]:
             self.assertFalse(self.cc._is_noise_line(line), f"should NOT filter: {line!r}")
+
+    def test_filters_tool_running_spinner(self):
+        # The "⎿  Running… (Ns)" line is the tool-call in-progress spinner,
+        # not the completed tool output — filter so it doesn't repeatedly
+        # show up while the tool is still running.
+        for line in [
+            "⎿  Running… (5s)",
+            "⎿  Running… (17s)",
+            "⎿  Running… (1m 49s)",
+        ]:
+            self.assertTrue(self.cc._is_noise_line(line), f"should filter: {line!r}")
 
 
 class TestReadNewOutputBottomLineHold(unittest.TestCase):
