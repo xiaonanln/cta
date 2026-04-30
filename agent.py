@@ -579,6 +579,7 @@ def _get_backend(key: tuple[int, int]) -> "backends.ClaudeBackend":
         b.start_config = lambda: (
             user_cwd.get(key, DEFAULT_CWD),
             user_model.get(key, MODEL),
+            user_sessions.get(key),
         )
     _backends[key] = b
     return b

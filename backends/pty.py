@@ -29,9 +29,11 @@ class PtyBackend(ClaudeBackend):
         self._last_activity: float = 0.0
         self._typing_stop: threading.Event | None = None
         self._typing_thread: threading.Thread | None = None
-        # Set by agent to supply (cwd, model) at PTY start time without
-        # the backend needing to import agent.
-        self.start_config: Optional[Callable[[], tuple[str, str]]] = None
+        # Set by agent to supply (cwd, model, session_id) at PTY start time
+        # without the backend needing to import agent. session_id is the
+        # session recorded by the print backend; when truthy, ClaudeCode
+        # passes `-c` so the PTY continues that conversation.
+        self.start_config: Optional[Callable[[], tuple[str, str, Optional[str]]]] = None
 
     @property
     def cc(self) -> claude_code.ClaudeCode | None:
@@ -57,12 +59,12 @@ class PtyBackend(ClaudeBackend):
         # and the old reader thread don't leak.
         if self._cc is not None:
             self._teardown()
-        cwd, model = self.start_config() if self.start_config else ("", "")
+        cwd, model, session_id = self.start_config() if self.start_config else ("", "", None)
         cc = claude_code.ClaudeCode(
-            cwd=cwd, model=model,
+            cwd=cwd, model=model, session_id=session_id,
             extra_env={"CTA_UID": str(self.uid), "CTA_CHAT_ID": str(self.chat_id)},
         )
-        print(f"[PTY] spawning ClaudeCode for {self.key} cwd={cwd} model={model}", flush=True)
+        print(f"[PTY] spawning ClaudeCode for {self.key} cwd={cwd} model={model} continue={'yes' if session_id else 'no'}", flush=True)
         try:
             cc.start(ready_timeout=45)
         except Exception:

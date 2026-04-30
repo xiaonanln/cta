@@ -108,16 +108,26 @@ class ClaudeCode:
         self.last_pty_bytes: float = 0.0
 
     # ── lifecycle ────────────────────────────────────────────────────────
-    def start(self, ready_timeout: float = 30.0) -> None:
-        # Fresh process → fresh dedup state.
-        self._yielded_line_hashes = set()
+    def _build_cmd(self) -> list[str]:
+        # `-c` continues the most recent conversation in `cwd`. We use it
+        # (instead of `--resume <id>`) so a PTY can pick up where the print
+        # backend left off — the session_id stored by print mode is the most
+        # recent transcript in that cwd, so `-c` lands on it. Treating
+        # session_id as a boolean trigger sidesteps the print-vs-PTY
+        # session-id divergence that interactive mode introduces.
         cmd = [self.claude_bin, '--dangerously-skip-permissions']
         if self.model:
             cmd += ['--model', self.model]
         if self.session_id:
-            cmd += ['resume', self.session_id]
+            cmd += ['-c']
         if self.debug_log:
             cmd += ['--debug-file', self.debug_log]
+        return cmd
+
+    def start(self, ready_timeout: float = 30.0) -> None:
+        # Fresh process → fresh dedup state.
+        self._yielded_line_hashes = set()
+        cmd = self._build_cmd()
 
         master_fd, slave_fd = pty.openpty()
         # Set window size BEFORE the child is spawned — many TUIs query

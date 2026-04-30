@@ -774,6 +774,39 @@ class TestBotHandlers(unittest.TestCase):
         self.assertIsNone(b.cc)
 
     @patch("backends.pty.claude_code.ClaudeCode")
+    def test_pty_backend_passes_session_id_from_start_config(self, mock_cc_class):
+        """When start_config returns a session_id, PtyBackend must pass it to
+        ClaudeCode so the spawned `claude` process gets `-c` and continues the
+        previous (print-mode) conversation in this cwd."""
+        mock_instance = MagicMock()
+        mock_instance.proc = None
+        mock_cc_class.return_value = mock_instance
+        b = backends.PtyBackend(123, 456)
+        b.start_config = lambda: ("/tmp", "claude-sonnet-4-6", "sess-abc")
+        try:
+            b._ensure_started()
+        finally:
+            b.stop()
+        kwargs = mock_cc_class.call_args[1]
+        self.assertEqual(kwargs.get("session_id"), "sess-abc")
+        self.assertEqual(kwargs.get("cwd"), "/tmp")
+        self.assertEqual(kwargs.get("model"), "claude-sonnet-4-6")
+
+    @patch("backends.pty.claude_code.ClaudeCode")
+    def test_pty_backend_passes_none_session_id_when_no_print_session(self, mock_cc_class):
+        mock_instance = MagicMock()
+        mock_instance.proc = None
+        mock_cc_class.return_value = mock_instance
+        b = backends.PtyBackend(123, 456)
+        b.start_config = lambda: ("/tmp", "claude-sonnet-4-6", None)
+        try:
+            b._ensure_started()
+        finally:
+            b.stop()
+        kwargs = mock_cc_class.call_args[1]
+        self.assertIsNone(kwargs.get("session_id"))
+
+    @patch("backends.pty.claude_code.ClaudeCode")
     def test_pty_backend_stops_dead_cc_before_respawn(self, mock_cc_class):
         """If the cached ClaudeCode has died (proc.poll() != None), the old instance
         must be stopped before spawning a replacement — otherwise the dead PTY's
@@ -2337,6 +2370,25 @@ class TestGetBackend(unittest.TestCase):
         old.stop.assert_called_once()
         self.assertIsInstance(new, backends.PrintBackend)
 
+    def test_pty_start_config_plumbs_session_id(self):
+        """Once /pty turns PTY on, the backend's start_config must surface the
+        session_id stored by print mode so ClaudeCode launches with `-c` and
+        continues that conversation."""
+        agent.user_pty_mode[(1, 2)] = True
+        agent.user_sessions[(1, 2)] = "sess-from-print"
+        try:
+            b = agent._get_backend((1, 2))
+            cwd, model, sid = b.start_config()
+            self.assertEqual(sid, "sess-from-print")
+        finally:
+            agent.user_sessions.pop((1, 2), None)
+
+    def test_pty_start_config_session_id_none_when_no_session(self):
+        agent.user_pty_mode[(1, 2)] = True
+        b = agent._get_backend((1, 2))
+        cwd, model, sid = b.start_config()
+        self.assertIsNone(sid)
+
 
 class TestPrintBackendSend(unittest.TestCase):
     """Unit tests for PrintBackend.send and PrintBackend.cancel."""
@@ -2409,6 +2461,45 @@ class TestPrintBackendSend(unittest.TestCase):
     def test_cancel_returns_false_when_nothing_active(self):
         b = backends.PrintBackend(1, 2)
         self.assertFalse(b.cancel())
+
+
+class TestClaudeCodeBuildCmd(unittest.TestCase):
+    """ClaudeCode._build_cmd shapes the `claude` argv. Verifying it directly
+    avoids spinning up a real PTY just to inspect the command line."""
+
+    def _make(self, **kwargs):
+        cc = claude_code.ClaudeCode.__new__(claude_code.ClaudeCode)
+        cc.claude_bin = "/fake/claude"
+        cc.model = kwargs.get("model")
+        cc.session_id = kwargs.get("session_id")
+        cc.debug_log = kwargs.get("debug_log")
+        return cc
+
+    def test_no_session_id_no_continue_flag(self):
+        cmd = self._make()._build_cmd()
+        self.assertNotIn("-c", cmd)
+        self.assertNotIn("--continue", cmd)
+        self.assertNotIn("--resume", cmd)
+
+    def test_session_id_adds_continue_flag(self):
+        """When session_id is set, pass `-c` so PTY continues the most recent
+        conversation in cwd — which is the one print mode just wrote."""
+        cmd = self._make(session_id="sess-xyz")._build_cmd()
+        self.assertIn("-c", cmd)
+        # session_id value itself is NOT passed: `-c` takes no arg, and
+        # claude resolves the conversation by cwd recency.
+        self.assertNotIn("sess-xyz", cmd)
+
+    def test_keeps_dangerously_skip_permissions_and_debug_file(self):
+        cmd = self._make(session_id="sess", debug_log="/tmp/x.log")._build_cmd()
+        self.assertIn("--dangerously-skip-permissions", cmd)
+        self.assertIn("--debug-file", cmd)
+        self.assertIn("/tmp/x.log", cmd)
+
+    def test_model_flag_when_set(self):
+        cmd = self._make(model="claude-sonnet-4-6")._build_cmd()
+        self.assertIn("--model", cmd)
+        self.assertIn("claude-sonnet-4-6", cmd)
 
 
 class TestNoiseLineFilter(unittest.TestCase):
