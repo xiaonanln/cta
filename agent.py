@@ -390,6 +390,53 @@ def _cron_scheduler():
         _cron_tick_once(datetime.now())
 
 
+def _kill_tracked_subprocs() -> int:
+    """Send SIGKILL to every subprocess CTA spawned (print mode + PTY mode).
+
+    Only touches PIDs CTA tracks itself (`_current_procs`, `claude_code_instances`)
+    so unrelated `claude` processes started by the user's terminal / IDE / other
+    tools are never killed. Returns number of processes signalled.
+    """
+    n = 0
+    # Print mode: each subprocess is in its own process group (start_new_session=True)
+    for key, proc in list(_current_procs.items()):
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            n += 1
+        except (ProcessLookupError, PermissionError):
+            try:
+                proc.kill()
+                n += 1
+            except Exception:
+                pass
+        _current_procs.pop(key, None)
+    # PTY mode: ClaudeCode.stop() handles the SIGTERM/SIGKILL escalation cleanly.
+    for key, cc in list(claude_code_instances.items()):
+        try:
+            cc.stop()
+            n += 1
+        except Exception:
+            pass
+        claude_code_instances.pop(key, None)
+    return n
+
+
+def _install_shutdown_handler():
+    """Install SIGTERM handler that kills tracked subprocesses before exit.
+
+    launchctl sends SIGTERM before SIGKILL; this gives us a chance to clean up
+    so CTA-spawned claude processes don't get re-parented to launchd as orphans.
+    """
+    def _handler(signum, frame):
+        n = _kill_tracked_subprocs()
+        print(f"[SHUTDOWN] killed {n} tracked subprocess(es) on signal {signum}", flush=True)
+        # Re-raise default behaviour so the process actually exits.
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+    signal.signal(signal.SIGTERM, _handler)
+    signal.signal(signal.SIGINT, _handler)
+
+
 def _polling_loop():
     """Run bot.infinity_polling in a loop, reconnecting after errors.
 
@@ -2691,6 +2738,7 @@ if __name__ == "__main__":
         print(f"Error: telegram_bot_token not set in {CONFIG_PATH}")
         exit(1)
 
+    _install_shutdown_handler()
     load_sessions()
     create_bot()
     tui_log(f"[dim]CTA starting… model=[cyan]{MODEL}[/] cwd=[cyan]{DEFAULT_CWD}[/] users={ALLOWED_USERS or 'all'}[/]")
