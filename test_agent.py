@@ -2502,6 +2502,89 @@ class TestClaudeCodeBuildCmd(unittest.TestCase):
         self.assertIn("claude-sonnet-4-6", cmd)
 
 
+class TestResumeMenuHandler(unittest.TestCase):
+    """_maybe_handle_resume_menu detects the 'Resume from summary vs full
+    session' interactive menu and selects option 2 automatically."""
+
+    def _make_cc(self):
+        cc = claude_code.ClaudeCode.__new__(claude_code.ClaudeCode)
+        cc._screen = unittest.mock.MagicMock()
+        cc.master_fd = 99  # fake fd
+        return cc
+
+    def _set_screen(self, cc, lines):
+        cc._screen.display = lines + [''] * (40 - len(lines))
+
+    def test_returns_false_when_menu_absent(self):
+        cc = self._make_cc()
+        self._set_screen(cc, ['> What should I do next?', 'bypasspermissions'])
+        self.assertFalse(cc._maybe_handle_resume_menu())
+
+    @unittest.mock.patch('os.write')
+    @unittest.mock.patch('time.sleep')
+    def test_returns_true_and_sends_down_then_enter_when_menu_visible(self, mock_sleep, mock_write):
+        cc = self._make_cc()
+        self._set_screen(cc, [
+            'This session is 14h 26m old and 255.7k tokens.',
+            '',
+            '❯ 1. Resume from summary (recommended)',
+            '  2. Resume full session as-is',
+            '  3. Don\'t ask me again',
+            '',
+            'Enter to confirm · Esc to cancel',
+        ])
+        result = cc._maybe_handle_resume_menu()
+        self.assertTrue(result)
+        calls = mock_write.call_args_list
+        # First write: down arrow escape sequence
+        self.assertEqual(calls[0], unittest.mock.call(99, b'\x1b[B'))
+        # Second write: Enter
+        self.assertEqual(calls[1], unittest.mock.call(99, b'\r'))
+
+    @unittest.mock.patch('os.write')
+    @unittest.mock.patch('time.sleep')
+    def test_called_only_once_in_wait_for_prompt(self, mock_sleep, mock_write):
+        """_wait_for_prompt must not send the menu response more than once even
+        if the menu is still visible across multiple read cycles."""
+        cc = claude_code.ClaudeCode.__new__(claude_code.ClaudeCode)
+        cc._screen = unittest.mock.MagicMock()
+        cc.master_fd = 99
+        cc.proc = unittest.mock.MagicMock()
+        cc.proc.poll.return_value = None
+        cc._buffer_raw = ''
+        cc._buffer_clean = ''
+        cc._stream = unittest.mock.MagicMock()
+        cc.last_pty_bytes = 0.0
+
+        menu_lines = [
+            '❯ 1. Resume from summary (recommended)',
+            '  2. Resume full session as-is',
+        ] + [''] * 38
+
+        call_count = [0]
+
+        def fake_read_chunk(timeout):
+            call_count[0] += 1
+            cc._screen.display = menu_lines
+            if call_count[0] >= 3:
+                # After a couple of cycles pretend the real prompt is up
+                cc._buffer_clean = 'bypasspermissions ❯ '
+            return 'some bytes'
+
+        cc._read_chunk = fake_read_chunk
+        # Patch _looks_like_prompt so it returns True on the 3rd cycle
+        original_looks = claude_code.ClaudeCode._looks_like_prompt.__get__(cc, claude_code.ClaudeCode)
+        cc._looks_like_prompt = lambda txt: 'bypasspermissions' in txt and '❯' in txt and 'esctointerrupt' not in txt.replace(' ', '')
+
+        cc._wait_for_prompt(timeout=5.0)
+
+        # Down-arrow + Enter should have been written exactly once
+        down_calls = [c for c in mock_write.call_args_list if c == unittest.mock.call(99, b'\x1b[B')]
+        enter_calls = [c for c in mock_write.call_args_list if c == unittest.mock.call(99, b'\r')]
+        self.assertEqual(len(down_calls), 1)
+        self.assertEqual(len(enter_calls), 1)
+
+
 class TestNoiseLineFilter(unittest.TestCase):
     """The noise filter strips Claude Code TUI chrome — status bar, thinking
     spinner, tool indicator — so PTY mode doesn't forward them to Telegram."""

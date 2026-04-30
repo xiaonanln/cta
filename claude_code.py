@@ -323,8 +323,21 @@ class ClaudeCode:
         """Current screen as a single string with newlines."""
         return '\n'.join(self._screen_lines())
 
+    def _maybe_handle_resume_menu(self) -> bool:
+        """If claude is showing the 'Resume from summary vs full session' menu,
+        navigate to option 2 ('Resume full session as-is') and confirm.
+        Returns True if the menu was detected and handled."""
+        if 'Resume from summary' not in self._screen_text():
+            return False
+        # Option 1 is selected by default; press down to reach option 2, then Enter.
+        os.write(self.master_fd, b'\x1b[B')  # down arrow
+        time.sleep(0.2)
+        os.write(self.master_fd, b'\r')
+        return True
+
     def _wait_for_prompt(self, timeout: float) -> None:
         deadline = time.time() + timeout
+        resume_menu_handled = False
         while time.time() < deadline:
             chunk = self._read_chunk(0.5)
             if chunk is None:
@@ -334,6 +347,8 @@ class ClaudeCode:
                         f'Buffer: {self._buffer_clean[-500:]!r}'
                     )
                 continue
+            if not resume_menu_handled:
+                resume_menu_handled = self._maybe_handle_resume_menu()
             if self._looks_like_prompt(self._buffer_clean):
                 return
         raise ClaudeNotReady(
