@@ -281,6 +281,10 @@ class ClaudeCode:
             now = time.time()
             if chunk:
                 last_activity = now
+                # Track on the cumulative buffer so we don't miss the brief
+                # window where 'esc to interrupt' showed up in an early
+                # frame; absence on the *current screen* is checked separately
+                # by _response_complete.
                 if 'esctointerrupt' in self._buffer_clean.replace(' ', ''):
                     seen_generating = True
                 # Only treat "no esc-to-interrupt" as completion AFTER we've
@@ -311,32 +315,39 @@ class ClaudeCode:
     #     box-drawing compacts text horizontally, words may run together
     #     ('esctointerrupt'), so check both forms.
     #   'bypass permissions' (or 'bypasspermissions') is in the status bar
+    # Claude TUI's thinking footer line. Format observed:
+    #     ✻ <verb>… (4s · ↓ 132 tokens · thought for 2s)
+    # The verb varies a lot (Contemplating, Synthesizing, Pondering, …) so
+    # we match on the parenthesized timing/tokens signature instead of the
+    # specific verb.
+    _THINKING_RE = re.compile(r'\([^)]*tokens[^)]*thought for[^)]*\)')
+
     def _looks_like_prompt(self, clean: str) -> bool:
         """True if claude is idle and waiting for the next user message.
 
-        Tricky: the buffer accumulates every screen frame, so 'esc to
-        interrupt' from a *previous* generation is still present long after
-        that generation ended. We look for the most-recent occurrence of
-        '❯' and check that 'esc to interrupt' is *between* it and the end
-        only — i.e. doesn't appear after the current cursor position.
+        Operates on the CURRENT rendered screen (pyte's display) so markers
+        from earlier phases don't linger and trick us. Two in-progress
+        signals invalidate completion even if 'esc to interrupt' isn't on
+        the visible screen:
+          - extended-thinking footer (matched by pattern, not verb)
+          - 'esc to interrupt' anywhere   (active streaming)
         """
-        # Need at least the start of the main TUI.
-        squashed = clean.replace(' ', '')
+        squashed = clean.replace(' ', '').lower()
         if 'bypasspermissions' not in squashed:
             return False
-        # Find the LAST '❯' and look only at content from there onward.
-        last_chevron = clean.rfind('❯')
-        if last_chevron == -1:
+        if 'esctointerrupt' in squashed:
             return False
-        # If 'esc to interrupt' (in any spacing) appears after the latest
-        # chevron, claude is still generating. (When idle the chevron is
-        # the cursor and is followed only by status-bar redraws without
-        # the interrupt hint.)
-        after = clean[last_chevron:].replace(' ', '')
-        return 'esctointerrupt' not in after
+        # Match the thinking footer by its '(... tokens ... thought for ...)'
+        # signature so we catch all the verb variants claude rotates through.
+        if self._THINKING_RE.search(clean):
+            return False
+        # Need to see the input cursor `❯` somewhere in the visible screen.
+        return '❯' in clean
 
     def _response_complete(self) -> bool:
-        return self._looks_like_prompt(self._buffer_clean)
+        # Check the rendered screen (current visible state), not the
+        # cumulative buffer (everything ever printed).
+        return self._looks_like_prompt(self._screen_text())
 
     # ── response extraction ──────────────────────────────────────────────
     def _extract_response(self, sent_prompt: str) -> str:
