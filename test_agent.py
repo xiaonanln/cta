@@ -2495,6 +2495,19 @@ class TestNoiseLineFilter(unittest.TestCase):
         ]:
             self.assertTrue(self.cc._is_noise_line(line), f"should filter: {line!r}")
 
+    def test_filters_chevron_divider_line(self):
+        # Around end-of-output (and sometimes mid-stream), the TUI redraws a
+        # divider line prefixed with the input-prompt cursor: "❯ ────…".
+        # Both single- and double-space variants leak through if not handled.
+        for line in [
+            "❯ " + "─" * 117,
+            "❯  " + "─" * 116,
+            "❯ ────",
+            "❯  ────",
+            "❯─────",  # no-space variant just in case
+        ]:
+            self.assertTrue(self.cc._is_noise_line(line), f"should filter: {line!r}")
+
 
 class TestReadNewOutputBottomLineHold(unittest.TestCase):
     """ClaudeCode.read_new_output should hold back the bottom-most content
