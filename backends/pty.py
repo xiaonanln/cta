@@ -14,8 +14,10 @@ import claude_code
 
 from .base import ClaudeBackend
 
-_TYPING_IDLE_SECONDS = 5.0   # stop typing after this many seconds without output
+_TYPING_IDLE_SECONDS = 3.0   # stop typing after this many seconds without output
 _TYPING_PULSE_SECONDS = 3.0  # re-send typing action this often (Telegram expires after ~5s)
+_OUTPUT_COALESCE_SECONDS = 3.0  # buffer lines and flush after this many seconds of quiet (noise frames don't reset the timer)
+_now = time.time  # indirection so tests can patch the reader_loop clock without touching the real time module
 
 
 class PtyBackend(ClaudeBackend):
@@ -80,9 +82,32 @@ class PtyBackend(ClaudeBackend):
         print(f"[PTY] ready for {self.key}", flush=True)
 
     def _reader_loop(self) -> None:
-        """Long-lived: read new lines from the PTY and forward via on_output."""
+        """Long-lived: read new lines from the PTY, coalesce them within a
+        quiet window, and forward via on_output. Lines accumulate until no
+        real content has arrived for `_OUTPUT_COALESCE_SECONDS` — noise
+        frames (filtered out by `read_new_output`) don't reset the timer."""
         cc = self._cc
         stop_event = self._stop_event
+        pending: list[str] = []
+        last_content_time = 0.0
+
+        def flush() -> None:
+            nonlocal pending
+            if not pending:
+                return
+            text = "\n".join(pending).strip()
+            pending = []
+            if not text:
+                return
+            print(f"[PTY_OUTPUT] uid={self.uid} chat={self.chat_id}\n{text}", flush=True)
+            cb = self.on_output
+            if cb is None:
+                return
+            try:
+                cb(text)
+            except Exception as e:
+                self._log(f"[red]pty reader on_output error {self.key}: {e}[/]")
+
         while not stop_event.is_set():
             if cc.proc is None or cc.proc.poll() is not None:
                 break
@@ -94,19 +119,12 @@ class PtyBackend(ClaudeBackend):
             # Sync activity from raw PTY bytes — covers noise/redraw-only frames
             # where new_lines is empty but Claude is still actively generating.
             self._last_activity = cc.last_pty_bytes
-            if not new_lines:
-                continue
-            text = "\n".join(new_lines).strip()
-            if not text:
-                continue
-            print(f"[PTY_OUTPUT] uid={self.uid} chat={self.chat_id}\n{text}", flush=True)
-            cb = self.on_output
-            if cb is None:
-                continue
-            try:
-                cb(text)
-            except Exception as e:
-                self._log(f"[red]pty reader on_output error {self.key}: {e}[/]")
+            if new_lines:
+                pending.extend(new_lines)
+                last_content_time = _now()
+            elif pending and _now() - last_content_time >= _OUTPUT_COALESCE_SECONDS:
+                flush()
+        flush()
 
     def send(self, prompt: str) -> None:
         self._ensure_started()
