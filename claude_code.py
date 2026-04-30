@@ -17,6 +17,8 @@ heuristic (read until the input prompt redraws or the stream goes idle
 past a stall threshold).
 """
 
+from __future__ import annotations
+
 import fcntl
 import os
 import pty
@@ -65,10 +67,12 @@ class ClaudeCode:
         debug_log: str | None = None,
         rows: int = 40,
         cols: int = 120,
+        extra_env: dict | None = None,
     ):
         self.cwd = cwd
         self.model = model
         self.session_id = session_id
+        self.extra_env = dict(extra_env) if extra_env else {}
         self.claude_bin = (
             claude_bin
             or shutil.which('claude')
@@ -126,6 +130,9 @@ class ClaudeCode:
         # Pass through SSH_AUTH_SOCK if present (used by some plugins)
         if 'SSH_AUTH_SOCK' in os.environ:
             env['SSH_AUTH_SOCK'] = os.environ['SSH_AUTH_SOCK']
+        # Caller-supplied additions (e.g. CTA_UID / CTA_CHAT_ID so cron.py /
+        # notify.py invoked from inside the chat know which chat they're in).
+        env.update(self.extra_env)
         self.proc = subprocess.Popen(
             cmd,
             stdin=slave_fd,
