@@ -75,7 +75,10 @@ class PtyBackend(ClaudeBackend):
                 cc.stop()
             except Exception:
                 pass
-            if session_id and 'No conversation found with session ID' in str(e):
+            if session_id and (
+                'No conversation found with session ID' in str(e)
+                or 'exited rc=1' in str(e)
+            ):
                 # Stale session — clear it in agent state and retry fresh.
                 print(f"[PTY] invalid session {session_id} for {self.key}, retrying without resume", flush=True)
                 if self.on_invalid_session:

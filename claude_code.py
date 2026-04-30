@@ -351,9 +351,18 @@ class ClaudeCode:
                         f'claude exited rc={self.proc.returncode} during startup. '
                         f'Buffer: {self._buffer_clean[-500:]!r}'
                     )
+                # Menu may have appeared during the initial drain phase (before
+                # _wait_for_prompt was called) — check even without new data.
+                if not resume_menu_handled:
+                    resume_menu_handled = self._maybe_handle_resume_menu()
+                    if resume_menu_handled:
+                        # Large sessions take significant time to load after menu selection.
+                        deadline = max(deadline, time.time() + 90.0)
                 continue
             if not resume_menu_handled:
                 resume_menu_handled = self._maybe_handle_resume_menu()
+                if resume_menu_handled:
+                    deadline = max(deadline, time.time() + 90.0)
             if self._looks_like_prompt(self._buffer_clean):
                 return
         raise ClaudeNotReady(

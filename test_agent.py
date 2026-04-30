@@ -868,6 +868,31 @@ class TestBotHandlers(unittest.TestCase):
         # Only one ClaudeCode ever created — no retry
         self.assertEqual(mock_cc_class.call_count, 1)
 
+    @patch("backends.pty.claude_code.ClaudeCode")
+    def test_pty_backend_retries_on_rc1_exit_with_empty_buffer(self, mock_cc_class):
+        """If claude exits rc=1 during startup with a session_id but the buffer
+        is empty (PTY closed before we read), pty.py must still retry fresh.
+        'No conversation found' may not be in the exception string in that case."""
+        invalid_instance = MagicMock()
+        invalid_instance.proc = None
+        invalid_instance.start.side_effect = claude_code.ClaudeNotReady(
+            "claude exited rc=1 during startup. Buffer: ''"
+        )
+        fresh_instance = MagicMock()
+        fresh_instance.proc = None
+
+        mock_cc_class.side_effect = [invalid_instance, fresh_instance]
+
+        cleared = []
+        b = backends.PtyBackend(123, 456)
+        b.start_config = lambda: ("/tmp", "claude-sonnet-4-6", "sess-old")
+        b.on_invalid_session = lambda: cleared.append(True)
+        b._ensure_started()
+
+        self.assertEqual(cleared, [True])
+        second_kwargs = mock_cc_class.call_args_list[1][1]
+        self.assertIsNone(second_kwargs.get("session_id"))
+
     @patch("agent._get_backend")
     @patch("agent.call_claude")
     def test_pty_mode_dispatch_calls_backend_send(self, mock_print, mock_get):
@@ -2619,6 +2644,46 @@ class TestResumeMenuHandler(unittest.TestCase):
         calls = mock_write.call_args_list
         self.assertEqual(calls[0], unittest.mock.call(99, b'\x1b[B'))
         self.assertEqual(calls[1], unittest.mock.call(99, b'\r'))
+
+    @unittest.mock.patch('os.write')
+    @unittest.mock.patch('time.sleep')
+    def test_menu_handled_when_chunk_is_none(self, mock_sleep, mock_write):
+        """Menu that appeared during the drain phase (before _wait_for_prompt)
+        must be handled even when _read_chunk keeps returning None (claude is
+        waiting silently for menu input)."""
+        cc = claude_code.ClaudeCode.__new__(claude_code.ClaudeCode)
+        cc._screen = unittest.mock.MagicMock()
+        cc._screen.display = [''] * 40
+        cc.master_fd = 99
+        cc.proc = unittest.mock.MagicMock()
+        cc.proc.poll.return_value = None
+        cc._buffer_raw = ''
+        cc._stream = unittest.mock.MagicMock()
+        cc.last_pty_bytes = 0.0
+        # Buffer already populated from drain phase — menu text is present.
+        cc._buffer_clean = '❯1.Resumefromsummary(recommended)\n2.Resumefullsessionas-is'
+
+        call_count = [0]
+
+        def fake_read_chunk(timeout):
+            call_count[0] += 1
+            if call_count[0] >= 3:
+                # Simulate session finishing load: return a non-None chunk so
+                # _looks_like_prompt is evaluated, and set the prompt buffer.
+                cc._buffer_clean = 'bypasspermissions ❯ '
+                return 'some bytes'
+            return None  # no new data (claude is waiting for menu choice)
+
+        cc._read_chunk = fake_read_chunk
+        cc._looks_like_prompt = lambda txt: 'bypasspermissions' in txt and '❯' in txt
+
+        cc._wait_for_prompt(timeout=5.0)
+
+        # Menu must have been handled exactly once despite early chunks being None
+        down_calls = [c for c in mock_write.call_args_list if c == unittest.mock.call(99, b'\x1b[B')]
+        enter_calls = [c for c in mock_write.call_args_list if c == unittest.mock.call(99, b'\r')]
+        self.assertEqual(len(down_calls), 1)
+        self.assertEqual(len(enter_calls), 1)
 
     @unittest.mock.patch('os.write')
     @unittest.mock.patch('time.sleep')
