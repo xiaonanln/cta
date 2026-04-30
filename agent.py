@@ -27,6 +27,7 @@ import telegramify_markdown
 from rich.markup import escape
 
 import claude_code
+import backends
 from web import app, tui_log, _LogHandler, _WebMessage
 
 # Ensure /usr/local/bin is in PATH so shell commands issued by Claude (docker, etc.)
@@ -102,9 +103,7 @@ user_cwd: dict[tuple[int, int], str] = {}  # (uid, chat_id) → working director
 user_model: dict[tuple[int, int], str] = {}  # (uid, chat_id) → model override
 user_timeout: dict[tuple[int, int], int] = {}  # (uid, chat_id) → timeout override (seconds)
 user_pty_mode: dict[tuple[int, int], bool] = {}  # (uid, chat_id) → True = use ClaudeCode PTY
-claude_code_instances: dict = {}  # (uid, chat_id) → live ClaudeCode (lazy, PTY mode only)
-_pty_reader_threads: dict = {}  # (uid, chat_id) → long-lived reader Thread (PTY mode)
-_pty_reader_stop: dict = {}     # (uid, chat_id) → threading.Event used to stop the reader
+_backends: dict[tuple[int, int], "backends.ClaudeBackend"] = {}  # (uid, chat_id) → live backend
 user_queues: dict[tuple[int, int], queue.Queue] = {}
 user_queues_lock = threading.Lock()
 chat_labels: dict[tuple[int, int], str] = {}   # (uid, chat_id) → "DM" or group name
@@ -239,7 +238,7 @@ def _purge_chat(uid: int, chat_id: int):
     sends another message in that Telegram chat later, a fresh session is
     created from scratch."""
     key = (uid, chat_id)
-    _stop_pty(key)
+    _stop_backend(key)
     for d in (user_sessions, user_cwd, user_model, user_timeout, user_pty_mode,
               msg_counts, last_reply, last_active, chat_labels, chat_history):
         d.pop(key, None)
@@ -395,8 +394,8 @@ def _cron_scheduler():
 def _kill_tracked_subprocs() -> int:
     """Send SIGKILL to every subprocess CTA spawned (print mode + PTY mode).
 
-    Only touches PIDs CTA tracks itself (`_current_procs`, `claude_code_instances`)
-    so unrelated `claude` processes started by the user's terminal / IDE / other
+    Only touches PIDs CTA tracks itself (`_current_procs`, `_backends`) so
+    unrelated `claude` processes started by the user's terminal / IDE / other
     tools are never killed. Returns number of processes signalled.
     """
     n = 0
@@ -412,21 +411,14 @@ def _kill_tracked_subprocs() -> int:
             except Exception:
                 pass
         _current_procs.pop(key, None)
-    # PTY mode: ClaudeCode.stop() handles the SIGTERM/SIGKILL escalation cleanly.
-    # Also tear down the per-chat reader thread so it doesn't keep reading from
-    # a closed master_fd during shutdown.
-    for key in list(_pty_reader_stop):
-        ev = _pty_reader_stop.pop(key, None)
-        if ev is not None:
-            ev.set()
-    _pty_reader_threads.clear()
-    for key, cc in list(claude_code_instances.items()):
+    # Backends own their own processes (PTY) and reader threads. Stop tears them down.
+    for key, b in list(_backends.items()):
         try:
-            cc.stop()
+            b.stop()
             n += 1
         except Exception:
             pass
-        claude_code_instances.pop(key, None)
+        _backends.pop(key, None)
     return n
 
 
@@ -564,113 +556,28 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
         sem.release()
 
 
-# ── PTY mode (ClaudeCode wrapper) ─────────────────────────────────────────────
+# ── Backend dispatch ──────────────────────────────────────────────────────────
 
-def _pty_reader_loop(uid: int, chat_id: int, cc: "claude_code.ClaudeCode",
-                     stop_event: threading.Event) -> None:
-    """Long-lived per-chat thread: stream claude's output to Telegram as it arrives.
-
-    PTY mode has no request/response concept — output is decoupled from
-    input. This loop reads new lines from the rendered screen and forwards
-    them to the chat immediately, instead of waiting for a "turn done" heuristic.
-    """
-    key = (uid, chat_id)
-    while not stop_event.is_set():
-        if cc.proc is None or cc.proc.poll() is not None:
-            break
-        try:
-            new_lines = cc.read_new_output(timeout=0.5)
-        except Exception as e:
-            tui_log(f"[red]pty reader read error {key}: {escape(str(e))}[/]")
-            break
-        if not new_lines:
-            continue
-        text = "\n".join(new_lines).strip()
-        if not text:
-            continue
-        try:
-            for chunk in _split_reply(text):
-                bot.send_message(chat_id, chunk)
-        except Exception as e:
-            tui_log(f"[red]pty reader send error {key}: {escape(str(e))}[/]")
-            continue
-        msg_counts[key] = msg_counts.get(key, 0) + 1
-        last_reply[key] = text[:300]
-        print(f"[PTY_OUTPUT] uid={uid} chat={chat_id}\n{text}", flush=True)
-        _chat_push(uid, chat_id, "assistant", text)
-        save_sessions()
-
-
-def _get_or_create_pty(key: tuple[int, int]) -> claude_code.ClaudeCode:
-    """Return the live ClaudeCode for this chat, spawning if needed.
-
-    A new instance is started lazily on the first message after toggling
-    PTY mode on (or after /clear, /cd, /model, which all stop the prior
-    instance so the next call respawns with the right state). When a fresh
-    instance starts, a long-lived reader thread is spawned to stream its
-    output to Telegram.
-    """
-    cc = claude_code_instances.get(key)
-    if cc is not None and cc.proc is not None and cc.proc.poll() is None:
-        return cc
-    # Cached instance is dead — clean it up so we don't leak its master_fd
-    # (and its reader thread).
-    if cc is not None:
-        _stop_pty(key)
+def _get_backend(key: tuple[int, int]) -> "backends.ClaudeBackend":
+    """Return the live backend for this chat, swapping mode if /pty was toggled."""
+    pty_on = user_pty_mode.get(key, False)
+    desired_cls = backends.PtyBackend if pty_on else backends.PrintBackend
+    b = _backends.get(key)
+    if b is not None and isinstance(b, desired_cls):
+        return b
+    if b is not None:
+        b.stop()
     uid, chat_id = key
-    cwd = user_cwd.get(key, DEFAULT_CWD)
-    model = user_model.get(key, MODEL)
-    cc = claude_code.ClaudeCode(
-        cwd=cwd,
-        model=model,
-        # Helpers like cron.py / notify.py read these to learn which chat
-        # they're being invoked from. Without them, those scripts exit unless
-        # the agent passes --uid/--chat-id flags explicitly.
-        extra_env={"CTA_UID": str(uid), "CTA_CHAT_ID": str(chat_id)},
-    )
-    print(f"[PTY] spawning ClaudeCode for {key} cwd={cwd} model={model}", flush=True)
-    try:
-        cc.start(ready_timeout=45)
-    except Exception:
-        # If start() raises (e.g. ClaudeNotReady), the subprocess and master_fd
-        # would leak — clean them up before propagating so a retry doesn't pile
-        # up orphaned claude processes.
-        try:
-            cc.stop()
-        except Exception:
-            pass
-        raise
-    claude_code_instances[key] = cc
-    stop_event = threading.Event()
-    _pty_reader_stop[key] = stop_event
-    t = threading.Thread(
-        target=_pty_reader_loop,
-        args=(uid, chat_id, cc, stop_event),
-        name=f"pty-reader:{uid}:{chat_id}",
-        daemon=True,
-    )
-    _pty_reader_threads[key] = t
-    t.start()
-    print(f"[PTY] ready for {key}", flush=True)
-    return cc
+    b = desired_cls(uid, chat_id)
+    _backends[key] = b
+    return b
 
 
-def _stop_pty(key: tuple[int, int]) -> None:
-    """Stop and forget the chat's ClaudeCode instance and its reader thread, if any."""
-    stop_event = _pty_reader_stop.pop(key, None)
-    if stop_event is not None:
-        stop_event.set()
-    t = _pty_reader_threads.pop(key, None)
-    if t is not None:
-        t.join(timeout=2)
-    cc = claude_code_instances.pop(key, None)
-    if cc is None:
-        return
-    print(f"[PTY] stopping ClaudeCode for {key}", flush=True)
-    try:
-        cc.stop()
-    except Exception as e:
-        tui_log(f"[red]⚠ pty stop error for {key}: {escape(str(e))}[/]")
+def _stop_backend(key: tuple[int, int]) -> None:
+    """Stop and forget the chat's backend, if any."""
+    b = _backends.pop(key, None)
+    if b is not None:
+        b.stop()
 
 
 # ── Web chat history & SSE ────────────────────────────────────────────────────
@@ -857,55 +764,55 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
 
     pty_mode = user_pty_mode.get(key, False)
     print(f"[CALL_CLAUDE] uid={uid} chat={chat_id} model={model} cwd={cwd} mode={'pty' if pty_mode else 'print'}", flush=True)
-    if pty_mode:
-        # PTY mode is fire-and-forget: write the prompt, return. The long-lived
-        # reader thread spawned by _get_or_create_pty streams claude's output
-        # back to Telegram as it arrives — no synchronous reply here.
-        try:
-            cc = _get_or_create_pty(key)
-            cc.send_input(prompt)
-        except claude_code.ClaudeNotReady as e:
-            bot.reply_to(message, f"❌ PTY not ready: {e}")
-            _stop_pty(key)
-        except Exception as e:
-            tui_log(f"[red]⚠ pty send error for {key}: {escape(str(e))}[/]")
-            bot.reply_to(message, f"❌ PTY error: {type(e).__name__}: {e}")
-            _stop_pty(key)
-        finally:
-            done.set()
-            if tmp_photo:
-                os.unlink(tmp_photo)
-        return
-
-    claude_active_keys.add(key)
+    backend = _get_backend(key)
+    backend.on_output = _make_output_handler(uid, chat_id, message, username, pty_mode)
     try:
-        reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=session_id, model=model, timeout=timeout, uid=uid, chat_id=chat_id)
-        if session_id and "No conversation found with session ID" in reply:
-            tui_log(f"[yellow]⚠ stale session for {escape(username)}, retrying fresh[/]")
-            user_sessions.pop(key, None)
-            reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=None, model=model, uid=uid, chat_id=chat_id)
+        backend.send(prompt)
+    except claude_code.ClaudeNotReady as e:
+        bot.reply_to(message, f"❌ PTY not ready: {e}")
+        _stop_backend(key)
+    except Exception as e:
+        tui_log(f"[red]⚠ backend send error for {key}: {escape(str(e))}[/]")
+        bot.reply_to(message, f"❌ Backend error: {type(e).__name__}: {e}")
+        _stop_backend(key)
     finally:
-        claude_active_keys.discard(key)
         done.set()
         if tmp_photo:
             os.unlink(tmp_photo)
 
-    if key in _cancelled_keys:
-        _cancelled_keys.discard(key)
-        return
-    if new_session_id:
-        user_sessions[key] = new_session_id
-    msg_counts[key] = msg_counts.get(key, 0) + 1
-    last_reply[key] = reply[:300]
-    preview = reply[:120].replace("\n", " ")
-    tui_log(f"[blue]←[/] [bold]{escape(username)}[/] {escape(preview)}{'…' if len(reply) > 120 else ''}")
-    print(f"[CLAUDE_OUTPUT] uid={uid} chat={chat_id}\n{reply}", flush=True)
-    _chat_push(uid, chat_id, "assistant", reply)
-    # Persist after the assistant _chat_push so its last_active timestamp is captured;
-    # also runs on failed/timeout turns (reply is the error string) so user activity isn't lost.
-    save_sessions()
-    for chunk in _split_reply(reply):
-        _send_markdown(message, chunk)
+
+def _make_output_handler(uid: int, chat_id: int, message, username: str, pty_mode: bool):
+    """Build the callback a backend invokes for each chunk of new output.
+
+    Centralises post-processing (history, msg_counts, persistence, Telegram
+    fan-out) so backends only have to deliver text — they don't need to
+    know about Telegram-specific formatting or chat-history bookkeeping.
+    """
+    key = (uid, chat_id)
+
+    def on_output(text: str) -> None:
+        if not text:
+            return
+        msg_counts[key] = msg_counts.get(key, 0) + 1
+        last_reply[key] = text[:300]
+        preview = text[:120].replace("\n", " ")
+        tui_log(f"[blue]←[/] [bold]{escape(username)}[/] {escape(preview)}{'…' if len(text) > 120 else ''}")
+        print(f"[CLAUDE_OUTPUT] uid={uid} chat={chat_id}\n{text}", flush=True)
+        _chat_push(uid, chat_id, "assistant", text)
+        save_sessions()
+        if pty_mode:
+            # PTY output is raw terminal text — skip MarkdownV2 (would mostly fail
+            # to parse) and skip reply_to (chunks aren't tied to a single user msg).
+            for chunk in _split_reply(text):
+                try:
+                    bot.send_message(chat_id, chunk)
+                except Exception as e:
+                    tui_log(f"[red]pty send error {key}: {escape(str(e))}[/]")
+        else:
+            for chunk in _split_reply(text):
+                _send_markdown(message, chunk)
+
+    return on_output
 
 
 def _process_cron(uid: int, chat_id: int, task: dict, done: threading.Event):
@@ -1058,7 +965,7 @@ def cmd_clear(message):
     if not _allowed(message): return
     key = (message.from_user.id, message.chat.id)
     user_sessions.pop(key, None)
-    _stop_pty(key)
+    _stop_backend(key)
     save_sessions()
     bot.reply_to(message, "🧹 Conversation cleared.")
 
@@ -1068,25 +975,10 @@ def cmd_cancel(message):
     uid = message.from_user.id
     key = (uid, message.chat.id)
     parts = []
-    proc = _current_procs.get(key)
-    if proc is not None:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            print(f"[CANCEL] killpg pid={proc.pid} key={key}", flush=True)
-        except (ProcessLookupError, PermissionError) as e:
-            print(f"[CANCEL] killpg failed pid={proc.pid}: {e!r}; falling back to proc.kill()", flush=True)
-            proc.kill()
-        _cancelled_keys.add(key)
+    backend = _backends.get(key)
+    if backend is not None and backend.cancel():
         parts.append("current task stopped")
-    elif user_pty_mode.get(key) and key in claude_code_instances:
-        # PTY mode: interrupt the in-flight generation, keep the process.
-        try:
-            claude_code_instances[key].cancel()
-            _cancelled_keys.add(key)
-            parts.append("current task stopped (pty)")
-            print(f"[CANCEL] pty cancel key={key}", flush=True)
-        except Exception as e:
-            print(f"[CANCEL] pty cancel failed key={key}: {e!r}", flush=True)
+        print(f"[CANCEL] backend cancel key={key} type={type(backend).__name__}", flush=True)
     elif key in claude_active_keys:
         # Worker is in-flight but no subprocess yet — likely blocked at the
         # semaphore acquire when concurrency is saturated. Mark it cancelled
@@ -1130,7 +1022,7 @@ def cmd_cd(message):
     key = (uid, message.chat.id)
     user_cwd[key] = expanded
     user_sessions.pop(key, None)
-    _stop_pty(key)
+    _stop_backend(key)
     save_sessions()
     suffix = " (created)" if created else ""
     bot.reply_to(message, f"📂 → `{expanded}`{suffix} (session cleared)", parse_mode="Markdown")
@@ -1150,7 +1042,7 @@ def cmd_model(message):
         return
     key = (uid, message.chat.id)
     user_model[key] = name
-    _stop_pty(key)
+    _stop_backend(key)
     save_sessions()
     bot.reply_to(message, f"🤖 Model → `{name}`", parse_mode="Markdown")
 
@@ -1164,7 +1056,7 @@ def cmd_opus(message):
     name = "claude-opus-4-7"
     key = (uid, message.chat.id)
     user_model[key] = name
-    _stop_pty(key)
+    _stop_backend(key)
     save_sessions()
     try:
         bot.reply_to(message, f"🤖 Model → `{name}`", parse_mode="Markdown")
@@ -1182,7 +1074,7 @@ def cmd_sonnet(message):
     name = "claude-sonnet-4-6"
     key = (uid, message.chat.id)
     user_model[key] = name
-    _stop_pty(key)
+    _stop_backend(key)
     save_sessions()
     try:
         bot.reply_to(message, f"🤖 Model → `{name}`", parse_mode="Markdown")
@@ -1214,7 +1106,7 @@ def cmd_pty(message):
         return
     if arg == "off":
         user_pty_mode.pop(key, None)
-        _stop_pty(key)
+        _stop_backend(key)
         save_sessions()
         bot.reply_to(message, "🧪 PTY mode → `off` (using `claude --print`)", parse_mode="Markdown")
         return
