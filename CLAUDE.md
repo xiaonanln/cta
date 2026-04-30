@@ -8,7 +8,7 @@ Self-hosted Telegram bot that uses Claude Code CLI (`claude --print`) as the bac
 Telegram → agent.py (pyTelegramBotAPI) → subprocess claude --print → response → Telegram
 ```
 
-Single Python file. Config and sessions in `~/.cta/`.
+Config and sessions in `~/.cta/`.
 
 ## Common Commands
 
@@ -22,7 +22,8 @@ python -m unittest test_agent test_cron test_notify
 
 ## Files
 
-- `agent.py` — Main bot code, single file.
+- `agent.py` — Main bot code (Telegram handlers, web UI, message processing).
+- `claude_code.py` — PTY wrapper around the `claude` CLI (interactive mode).
 - `cron.py` — CLI for managing per-chat cron jobs (calls the local web API).
 - `notify.py` — CLI for cross-agent messaging (sends to another chat by label or id).
 - `test_agent.py`, `test_cron.py`, `test_notify.py` — Tests (all mocked, no real Claude calls).
@@ -65,7 +66,7 @@ python -m unittest test_agent test_cron test_notify
 
 ## Guidelines
 
-- Keep it simple — single file, no frameworks, no database.
+- Keep it simple — no database, minimal dependencies. Splitting `agent.py` into focused modules is fine when it makes the code clearer (e.g. backends/, web/).
 - All changes must pass `python -m unittest test_agent -v`.
 - Don't hardcode paths or tokens.
 - Always create a PR after completing a task. Commit changes, push to a feature branch, and open a PR against main.
