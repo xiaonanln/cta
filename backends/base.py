@@ -19,6 +19,8 @@ class ClaudeBackend(ABC):
         self.uid = uid
         self.chat_id = chat_id
         self.on_output: Optional[Callable[[str], None]] = None
+        self.on_typing: Optional[Callable[[], None]] = None
+        self.on_log: Optional[Callable[[str], None]] = None
 
     @property
     def key(self) -> tuple[int, int]:
