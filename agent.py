@@ -177,7 +177,7 @@ def _load_whisper():
 
 def init(config: dict):
     global BOT_TOKEN, ALLOWED_USERS, TIMEOUT, MODEL, WEB_PORT, DEFAULT_CWD, GLOBAL_PREAMBLE, WHISPER_MODEL
-    global MAX_CONCURRENT_CLAUDE, _claude_semaphore
+    global MAX_CONCURRENT_CLAUDE, _claude_semaphore, CLAUDE_BIN
     BOT_TOKEN = config["telegram_bot_token"]
     ALLOWED_USERS = set(config["allowed_users"])
     TIMEOUT = config["claude_timeout"]
@@ -187,6 +187,9 @@ def init(config: dict):
     WEB_PORT = config.get("web_port", 17488)
     WHISPER_MODEL = config.get("whisper_model", "base")
     _apply_path_prefix(config.get("path_prefix", ""))
+    # Re-resolve CLAUDE_BIN AFTER applying path_prefix so an install discoverable
+    # only via the new prefix is actually used by the print backend.
+    CLAUDE_BIN = shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
     if config.get("default_cwd"):
         DEFAULT_CWD = os.path.expanduser(config["default_cwd"])
     GLOBAL_PREAMBLE = _read_global_preamble()

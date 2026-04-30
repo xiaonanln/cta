@@ -159,6 +159,30 @@ class TestConfig(unittest.TestCase):
             os.environ["PATH"] = original_path
             agent.init(agent.DEFAULT_CONFIG)
 
+    def test_init_reresolves_claude_bin_via_path_prefix(self):
+        """Codex P1: if `claude` is only discoverable via path_prefix, init() must
+        re-resolve CLAUDE_BIN — otherwise call_claude() invokes the stale fallback
+        path resolved at module-import time (~/.local/bin/claude) and fails."""
+        import shutil as _sh
+        original_path = os.environ.get("PATH", "")
+        original_bin = agent.CLAUDE_BIN
+        tmpdir = tempfile.mkdtemp()
+        try:
+            fake = os.path.join(tmpdir, "claude")
+            with open(fake, "w") as f:
+                f.write("#!/bin/sh\nexit 0\n")
+            os.chmod(fake, 0o755)
+            # Set PATH to a dir that definitely does NOT contain `claude`, so
+            # init() can only resolve to `fake` via path_prefix.
+            os.environ["PATH"] = "/nonexistent-dir-for-test"
+            agent.init({**agent.DEFAULT_CONFIG, "path_prefix": tmpdir})
+            self.assertEqual(agent.CLAUDE_BIN, fake)
+        finally:
+            _sh.rmtree(tmpdir, ignore_errors=True)
+            os.environ["PATH"] = original_path
+            agent.CLAUDE_BIN = original_bin
+            agent.init(agent.DEFAULT_CONFIG)
+
     def test_sessions_path_is_in_cta_home(self):
         self.assertTrue(agent.AGENTS_PATH.startswith(agent.CTA_HOME))
         self.assertTrue(agent.AGENTS_PATH.endswith("agents.json"))
