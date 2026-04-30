@@ -1,9 +1,4 @@
-"""Web UI for CTA — Flask routes, SSE log/chat broadcast, and HTML templates.
-
-Imports `agent` at module load time and references `agent.<global>` lazily
-inside route handlers. The reverse arrow (`agent` ← `web`) is also lazy:
-agent imports `app` and `tui_log` from this module to mount them.
-"""
+"""Web UI for CTA — Flask routes, SSE log/chat broadcast, and HTML templates."""
 
 from __future__ import annotations
 
@@ -19,7 +14,12 @@ from datetime import datetime
 from flask import Flask, Response, request, stream_with_context
 from werkzeug.routing import BaseConverter
 
-import agent  # cyclic at module level; route handlers resolve agent.<x> at call time
+# Set by agent.py via web.init() after its globals are fully initialised.
+agent = None
+
+def init(agent_module) -> None:
+    global agent
+    agent = agent_module
 
 # ── Logging primitives ─────────────────────────────────────────────────────────
 
@@ -986,7 +986,8 @@ def _web_stream():
 
 @app.route("/status")
 def _web_status():
-    all_keys = set(agent.user_sessions) | set(agent.msg_counts)
+    all_keys = (set(agent.user_sessions) | set(agent.msg_counts)
+                | set(agent.chat_labels) | set(agent.last_active))
     sessions = []
     for key in sorted(all_keys):
         uid, chat_id = key

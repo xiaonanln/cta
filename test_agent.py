@@ -19,6 +19,7 @@ import claude_code
 import web
 
 agent.init(agent.DEFAULT_CONFIG)
+web.init(agent)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
