@@ -14,7 +14,7 @@ import claude_code
 
 from .base import ClaudeBackend
 
-_TYPING_IDLE_SECONDS = 5.0   # stop typing after this many seconds without output
+_TYPING_IDLE_SECONDS = 3.0   # stop typing after this many seconds without output
 _TYPING_PULSE_SECONDS = 3.0  # re-send typing action this often (Telegram expires after ~5s)
 _OUTPUT_COALESCE_SECONDS = 3.0  # buffer lines and flush after this many seconds of quiet (noise frames don't reset the timer)
 _now = time.time  # indirection so tests can patch the reader_loop clock without touching the real time module
