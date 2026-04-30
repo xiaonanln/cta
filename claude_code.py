@@ -239,6 +239,12 @@ class ClaudeCode:
         bar, thinking footer, input box decoration). Returns [] if nothing
         new in `timeout` seconds.
 
+        Holds back the bottom-most content line while claude is still
+        generating, since pyte renders it character-by-character and we'd
+        otherwise emit "Hel" → "Hello" → "Hello world" as three updates of
+        the same line. Once a newer content line appears below it (or
+        claude returns to idle), the held line is flushed.
+
         Caller decides when to stop reading — there's no completion concept
         here. Common patterns: read until N seconds quiet, until deadline,
         or until cancel signal.
@@ -246,10 +252,23 @@ class ClaudeCode:
         chunk = self._read_chunk(timeout)
         if chunk is None:
             return []
+        screen = self._screen_lines()
+        content_indices = [
+            i for i, raw in enumerate(screen)
+            if raw.strip() and not self._is_noise_line(raw)
+        ]
+        # Bottom content line may still be mid-write — hold it until either
+        # a newer line is rendered below it, or claude returns to idle.
+        held_index = (
+            content_indices[-1]
+            if content_indices and not self.is_idle()
+            else None
+        )
         new_lines: list[str] = []
-        for raw in self._screen_lines():
-            if self._is_noise_line(raw):
+        for i in content_indices:
+            if i == held_index:
                 continue
+            raw = screen[i]
             h = hash(raw.strip())
             if h in self._yielded_line_hashes:
                 continue

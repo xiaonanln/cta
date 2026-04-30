@@ -2318,5 +2318,67 @@ class TestPrintBackendSend(unittest.TestCase):
         self.assertFalse(b.cancel())
 
 
+class TestReadNewOutputBottomLineHold(unittest.TestCase):
+    """ClaudeCode.read_new_output should hold back the bottom-most content
+    line while claude is generating, since pyte renders character-by-character
+    and we'd otherwise emit the same line multiple times as it's being written.
+    """
+
+    def _make_cc(self):
+        cc = claude_code.ClaudeCode.__new__(claude_code.ClaudeCode)
+        cc._yielded_line_hashes = set()
+        return cc
+
+    def _drive(self, cc, screen_frames, idle_after_last=True):
+        """Run read_new_output once per frame, returning the list of emitted batches."""
+        batches: list[list[str]] = []
+        for i, frame in enumerate(screen_frames):
+            with patch.object(cc, "_read_chunk", return_value="x"), \
+                 patch.object(cc, "_screen_lines", return_value=frame), \
+                 patch.object(cc, "is_idle",
+                              return_value=(idle_after_last and i == len(screen_frames) - 1)):
+                batches.append(cc.read_new_output(timeout=0))
+        return batches
+
+    def test_holds_bottom_line_while_generating(self):
+        cc = self._make_cc()
+        # Frame 1: "Hel" is the bottom-most content line — hold it.
+        # Frame 2: "Hello" replaces "Hel" at the bottom — still held.
+        # Frame 3: "Hello" pushed up by "world" — emit "Hello", hold "world".
+        # Idle: flush "world".
+        batches = self._drive(cc, [
+            ["Hel"],
+            ["Hello"],
+            ["Hello", "world"],
+            ["Hello", "world"],
+        ])
+        self.assertEqual(batches, [[], [], ["Hello"], ["world"]])
+
+    def test_emits_all_lines_above_bottom(self):
+        cc = self._make_cc()
+        batches = self._drive(cc, [
+            ["line A", "line B", "line C"],   # bottom = "line C"
+            ["line A", "line B", "line C", "line D"],  # bottom = "line D"
+        ], idle_after_last=False)
+        self.assertEqual(batches, [["line A", "line B"], ["line C"]])
+
+    def test_flushes_bottom_line_on_idle(self):
+        cc = self._make_cc()
+        batches = self._drive(cc, [
+            ["only line"],
+        ], idle_after_last=True)
+        self.assertEqual(batches, [["only line"]])
+
+    def test_skips_noise_when_picking_bottom(self):
+        cc = self._make_cc()
+        # Status bar / box drawing trail at the bottom; the real bottom-most
+        # content line is "answer" and should be held.
+        screen = ["question", "answer", "╭─────╮", "│ ❯   │", "╰─────╯"]
+        with patch.object(cc, "_read_chunk", return_value="x"), \
+             patch.object(cc, "_screen_lines", return_value=screen), \
+             patch.object(cc, "is_idle", return_value=False):
+            self.assertEqual(cc.read_new_output(timeout=0), ["question"])
+
+
 if __name__ == "__main__":
     unittest.main()
