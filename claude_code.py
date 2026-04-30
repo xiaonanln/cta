@@ -220,7 +220,7 @@ class ClaudeCode:
         r'|.*esc to interrupt'                      # streaming indicator
         r'|.*\d+/\d+\(esc\)'                         # interrupt hint variant
         r'|(?:[·✻✶✽✳✢]\s+|\.{3,}\s*)[A-Za-z\']{1,32}(?:…|\.{3,})(?:\s*\(.*)?'  # spinner: glyph + word + …
-        r'|⎿.*'                                     # tool indicator (Running…, $ cmd, output preview)
+        r'|⎿.*….*'                                  # tool spinner (⎿ Running…); keeps ⎿ $ cmd / ⎿ output
         r')\s*$',
         re.IGNORECASE,
     )

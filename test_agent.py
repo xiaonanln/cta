@@ -847,6 +847,29 @@ class TestBotHandlers(unittest.TestCase):
         b._reader_loop()
         self.assertEqual(sent, ["hello", "second batch", "third"])
 
+    def test_pty_backend_reader_updates_activity_for_noise_only_frames(self):
+        """When all output was filtered as noise (read_new_output returns []),
+        the reader must still bump _last_activity from cc.last_pty_bytes so the
+        typing indicator keeps pulsing during long thinking periods that emit
+        only spinner redraws."""
+        cc = MagicMock()
+        cc.proc.poll.return_value = None
+        stop_event = threading.Event()
+        ticks = iter([101.0, 102.0, 103.0])
+        def fake_read(timeout=0.5):
+            try:
+                cc.last_pty_bytes = next(ticks)
+            except StopIteration:
+                stop_event.set()
+            return []  # nothing emitted — everything filtered as noise
+        cc.read_new_output.side_effect = fake_read
+        b = backends.PtyBackend(123, 123)
+        b._cc = cc
+        b._stop_event = stop_event
+        b.on_output = lambda _: None
+        b._reader_loop()
+        self.assertEqual(b._last_activity, 103.0)
+
     def test_pty_backend_reader_exits_when_proc_dies(self):
         """If cc.proc has exited (poll() != None), the reader must break out
         before the stop event fires, so a crashed claude doesn't leave a
@@ -2347,12 +2370,11 @@ class TestNoiseLineFilter(unittest.TestCase):
         ]:
             self.assertTrue(self.cc._is_noise_line(line), f"should filter: {line!r}")
 
-    def test_filters_tool_indicator_lines(self):
+    def test_filters_tool_spinner_lines(self):
+        # Only the spinner variants (with …) — not the ⎿ command echo or output.
         for line in [
             "⎿  Running… (5s)",
             "⎿  Running… (15s)",
-            "⎿  $ tail -20 /Users/alex/projects/cta/test_agent.py",
-            "⎿ output preview",
         ]:
             self.assertTrue(self.cc._is_noise_line(line), f"should filter: {line!r}")
 
@@ -2364,6 +2386,8 @@ class TestNoiseLineFilter(unittest.TestCase):
             "```python",
             "✻ this has a glyph but no ellipsis so is not the spinner",
             "...continued from where we left off",  # leading dots but no Unicode … after one word
+            "⎿  $ tail -20 /Users/alex/projects/cta/test_agent.py",  # tool command echo — keep
+            "⎿ output preview",  # tool output — keep
         ]:
             self.assertFalse(self.cc._is_noise_line(line), f"should NOT filter: {line!r}")
 
