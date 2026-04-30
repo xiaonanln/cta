@@ -2370,15 +2370,9 @@ class TestNoiseLineFilter(unittest.TestCase):
         ]:
             self.assertTrue(self.cc._is_noise_line(line), f"should filter: {line!r}")
 
-    def test_filters_tool_spinner_lines(self):
-        # Only the spinner variants (with …) — not the ⎿ command echo or output.
-        for line in [
-            "⎿  Running… (5s)",
-            "⎿  Running… (15s)",
-        ]:
-            self.assertTrue(self.cc._is_noise_line(line), f"should filter: {line!r}")
-
-    def test_does_not_filter_real_content(self):
+    def test_does_not_filter_real_content_or_tool_lines(self):
+        # ⎿-prefixed lines (tool indicator / command echo / output) are
+        # intentionally NOT filtered — they carry useful information.
         for line in [
             "Hello, here is the answer.",
             "Let me think about that…",  # ellipsis at end without spinner glyph
@@ -2386,8 +2380,9 @@ class TestNoiseLineFilter(unittest.TestCase):
             "```python",
             "✻ this has a glyph but no ellipsis so is not the spinner",
             "...continued from where we left off",  # leading dots but no Unicode … after one word
-            "⎿  $ tail -20 /Users/alex/projects/cta/test_agent.py",  # tool command echo — keep
-            "⎿ output preview",  # tool output — keep
+            "⎿  Running… (5s)",  # tool spinner — keep, user wants visibility
+            "⎿  $ tail -20 /Users/alex/projects/cta/test_agent.py",
+            "⎿ output preview",
         ]:
             self.assertFalse(self.cc._is_noise_line(line), f"should NOT filter: {line!r}")
 
