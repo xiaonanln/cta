@@ -103,6 +103,8 @@ user_model: dict[tuple[int, int], str] = {}  # (uid, chat_id) → model override
 user_timeout: dict[tuple[int, int], int] = {}  # (uid, chat_id) → timeout override (seconds)
 user_pty_mode: dict[tuple[int, int], bool] = {}  # (uid, chat_id) → True = use ClaudeCode PTY
 claude_code_instances: dict = {}  # (uid, chat_id) → live ClaudeCode (lazy, PTY mode only)
+_pty_reader_threads: dict = {}  # (uid, chat_id) → long-lived reader Thread (PTY mode)
+_pty_reader_stop: dict = {}     # (uid, chat_id) → threading.Event used to stop the reader
 user_queues: dict[tuple[int, int], queue.Queue] = {}
 user_queues_lock = threading.Lock()
 chat_labels: dict[tuple[int, int], str] = {}   # (uid, chat_id) → "DM" or group name
@@ -411,6 +413,13 @@ def _kill_tracked_subprocs() -> int:
                 pass
         _current_procs.pop(key, None)
     # PTY mode: ClaudeCode.stop() handles the SIGTERM/SIGKILL escalation cleanly.
+    # Also tear down the per-chat reader thread so it doesn't keep reading from
+    # a closed master_fd during shutdown.
+    for key in list(_pty_reader_stop):
+        ev = _pty_reader_stop.pop(key, None)
+        if ev is not None:
+            ev.set()
+    _pty_reader_threads.clear()
     for key, cc in list(claude_code_instances.items()):
         try:
             cc.stop()
@@ -1975,23 +1984,57 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
 
 # ── PTY mode (ClaudeCode wrapper) ─────────────────────────────────────────────
 
+def _pty_reader_loop(uid: int, chat_id: int, cc: "claude_code.ClaudeCode",
+                     stop_event: threading.Event) -> None:
+    """Long-lived per-chat thread: stream claude's output to Telegram as it arrives.
+
+    PTY mode has no request/response concept — output is decoupled from
+    input. This loop reads new lines from the rendered screen and forwards
+    them to the chat immediately, instead of waiting for a "turn done" heuristic.
+    """
+    key = (uid, chat_id)
+    while not stop_event.is_set():
+        if cc.proc is None or cc.proc.poll() is not None:
+            break
+        try:
+            new_lines = cc.read_new_output(timeout=0.5)
+        except Exception as e:
+            tui_log(f"[red]pty reader read error {key}: {escape(str(e))}[/]")
+            break
+        if not new_lines:
+            continue
+        text = "\n".join(new_lines).strip()
+        if not text:
+            continue
+        try:
+            for chunk in _split_reply(text):
+                bot.send_message(chat_id, chunk)
+        except Exception as e:
+            tui_log(f"[red]pty reader send error {key}: {escape(str(e))}[/]")
+            continue
+        msg_counts[key] = msg_counts.get(key, 0) + 1
+        last_reply[key] = text[:300]
+        print(f"[PTY_OUTPUT] uid={uid} chat={chat_id}\n{text}", flush=True)
+        _chat_push(uid, chat_id, "assistant", text)
+        save_sessions()
+
+
 def _get_or_create_pty(key: tuple[int, int]) -> claude_code.ClaudeCode:
     """Return the live ClaudeCode for this chat, spawning if needed.
 
     A new instance is started lazily on the first message after toggling
     PTY mode on (or after /clear, /cd, /model, which all stop the prior
-    instance so the next call respawns with the right state).
+    instance so the next call respawns with the right state). When a fresh
+    instance starts, a long-lived reader thread is spawned to stream its
+    output to Telegram.
     """
     cc = claude_code_instances.get(key)
     if cc is not None and cc.proc is not None and cc.proc.poll() is None:
         return cc
-    # Cached instance is dead — clean it up so we don't leak its master_fd.
+    # Cached instance is dead — clean it up so we don't leak its master_fd
+    # (and its reader thread).
     if cc is not None:
-        try:
-            cc.stop()
-        except Exception:
-            pass
-        claude_code_instances.pop(key, None)
+        _stop_pty(key)
     uid, chat_id = key
     cwd = user_cwd.get(key, DEFAULT_CWD)
     model = user_model.get(key, MODEL)
@@ -2016,12 +2059,28 @@ def _get_or_create_pty(key: tuple[int, int]) -> claude_code.ClaudeCode:
             pass
         raise
     claude_code_instances[key] = cc
+    stop_event = threading.Event()
+    _pty_reader_stop[key] = stop_event
+    t = threading.Thread(
+        target=_pty_reader_loop,
+        args=(uid, chat_id, cc, stop_event),
+        name=f"pty-reader:{uid}:{chat_id}",
+        daemon=True,
+    )
+    _pty_reader_threads[key] = t
+    t.start()
     print(f"[PTY] ready for {key}", flush=True)
     return cc
 
 
 def _stop_pty(key: tuple[int, int]) -> None:
-    """Stop and forget the chat's ClaudeCode instance, if any."""
+    """Stop and forget the chat's ClaudeCode instance and its reader thread, if any."""
+    stop_event = _pty_reader_stop.pop(key, None)
+    if stop_event is not None:
+        stop_event.set()
+    t = _pty_reader_threads.pop(key, None)
+    if t is not None:
+        t.join(timeout=2)
     cc = claude_code_instances.pop(key, None)
     if cc is None:
         return
@@ -2030,42 +2089,6 @@ def _stop_pty(key: tuple[int, int]) -> None:
         cc.stop()
     except Exception as e:
         tui_log(f"[red]⚠ pty stop error for {key}: {escape(str(e))}[/]")
-
-
-def call_claude_pty(prompt: str, key: tuple[int, int],
-                    timeout: int | None = None) -> tuple[str, str]:
-    """PTY-mode equivalent of call_claude. Returns (text, session_id="").
-
-    Adapter over the streaming ClaudeCode API: write the prompt, then
-    collect new output lines until claude has been quiet for a window
-    (treats that as "this turn is done"). The streaming layer itself
-    has no completion concept — this adapter imposes one for callers
-    that still expect a single reply per Telegram message.
-    """
-    cc = _get_or_create_pty(key)
-    try:
-        cc.send_input(prompt)
-        deadline = time.time() + float(timeout or TIMEOUT)
-        last_activity = time.time()
-        quiet_window = 8.0  # no new output for 8s → consider turn done
-        chunks: list[str] = []
-        while time.time() < deadline:
-            new_lines = cc.read_new_output(timeout=0.5)
-            now = time.time()
-            if new_lines:
-                chunks.extend(new_lines)
-                last_activity = now
-            elif now - last_activity > quiet_window:
-                break
-        if not chunks:
-            return "(empty response)", ""
-        return "\n".join(chunks).strip() or "(empty response)", ""
-    except claude_code.ClaudeNotReady as e:
-        _stop_pty(key)
-        return f"[Error] PTY not ready: {e}", ""
-    except Exception as e:
-        _stop_pty(key)
-        return f"[Error] PTY error: {type(e).__name__}: {e}", ""
 
 
 # ── Web chat history & SSE ────────────────────────────────────────────────────
@@ -2267,16 +2290,33 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
 
     pty_mode = user_pty_mode.get(key, False)
     print(f"[CALL_CLAUDE] uid={uid} chat={chat_id} model={model} cwd={cwd} mode={'pty' if pty_mode else 'print'}", flush=True)
+    if pty_mode:
+        # PTY mode is fire-and-forget: write the prompt, return. The long-lived
+        # reader thread spawned by _get_or_create_pty streams claude's output
+        # back to Telegram as it arrives — no synchronous reply here.
+        try:
+            cc = _get_or_create_pty(key)
+            cc.send_input(prompt)
+        except claude_code.ClaudeNotReady as e:
+            bot.reply_to(message, f"❌ PTY not ready: {e}")
+            _stop_pty(key)
+        except Exception as e:
+            tui_log(f"[red]⚠ pty send error for {key}: {escape(str(e))}[/]")
+            bot.reply_to(message, f"❌ PTY error: {type(e).__name__}: {e}")
+            _stop_pty(key)
+        finally:
+            done.set()
+            if tmp_photo:
+                os.unlink(tmp_photo)
+        return
+
     claude_active_keys.add(key)
     try:
-        if pty_mode:
-            reply, new_session_id = call_claude_pty(prompt, key, timeout=timeout)
-        else:
-            reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=session_id, model=model, timeout=timeout, uid=uid, chat_id=chat_id)
-            if session_id and "No conversation found with session ID" in reply:
-                tui_log(f"[yellow]⚠ stale session for {escape(username)}, retrying fresh[/]")
-                user_sessions.pop(key, None)
-                reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=None, model=model, uid=uid, chat_id=chat_id)
+        reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=session_id, model=model, timeout=timeout, uid=uid, chat_id=chat_id)
+        if session_id and "No conversation found with session ID" in reply:
+            tui_log(f"[yellow]⚠ stale session for {escape(username)}, retrying fresh[/]")
+            user_sessions.pop(key, None)
+            reply, new_session_id = call_claude(prompt, cwd=cwd, session_id=None, model=model, uid=uid, chat_id=chat_id)
     finally:
         claude_active_keys.discard(key)
         done.set()

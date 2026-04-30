@@ -659,6 +659,17 @@ class TestBotHandlers(unittest.TestCase):
                 os.unlink(path)
         shutil.rmtree(self._tmp_memory_dir, ignore_errors=True)
         shutil.rmtree(self._tmp_preamble_dir, ignore_errors=True)
+        # Clean up any PTY reader threads / events left over from tests that
+        # exercised _get_or_create_pty — otherwise the dicts leak across tests.
+        for key in list(agent._pty_reader_stop):
+            ev = agent._pty_reader_stop.pop(key, None)
+            if ev is not None:
+                ev.set()
+        for key in list(agent._pty_reader_threads):
+            t = agent._pty_reader_threads.pop(key, None)
+            if t is not None:
+                t.join(timeout=1)
+        agent.claude_code_instances.clear()
 
     def test_start_replies(self):
         agent.cmd_start(make_fake_message("/start"))
@@ -781,14 +792,21 @@ class TestBotHandlers(unittest.TestCase):
             agent.claude_code_instances.pop((123, 456), None)
         dead_cc.stop.assert_called_once()
 
-    @patch("agent.call_claude_pty", return_value=("hi from pty", ""))
+    @patch("agent._get_or_create_pty")
     @patch("agent.call_claude")
-    def test_pty_mode_routes_to_call_claude_pty(self, mock_print, mock_pty):
+    def test_pty_mode_dispatch_calls_send_input_only(self, mock_print, mock_get):
+        """PTY mode is fire-and-forget: the worker sends the prompt and returns;
+        it must NOT call the print-mode `call_claude`. The long-lived reader
+        thread (spawned in `_get_or_create_pty`) is what surfaces the response."""
+        cc = MagicMock()
+        mock_get.return_value = cc
         agent.user_pty_mode[(123, 123)] = True
         try:
             agent.handle_message(make_fake_message("hello"))
             time.sleep(0.5)
-            mock_pty.assert_called_once()
+            mock_get.assert_called_once_with((123, 123))
+            cc.send_input.assert_called_once()
+            self.assertIn("hello", cc.send_input.call_args[0][0])
             mock_print.assert_not_called()
         finally:
             agent.user_pty_mode.pop((123, 123), None)
@@ -810,53 +828,71 @@ class TestBotHandlers(unittest.TestCase):
         fake_cc.stop.assert_called_once()
         self.assertNotIn((123, 123), agent.claude_code_instances)
 
-    @patch("agent._get_or_create_pty")
-    def test_call_claude_pty_collects_streamed_lines(self, mock_get):
-        """Adapter writes the prompt via send_input then drains read_new_output
-        until quiet, joining the new lines into the returned text."""
+    def test_pty_reader_forwards_lines_to_telegram(self):
+        """Reader thread forwards each batch of new lines as a Telegram message
+        and pushes it onto the chat history. Validates the streaming pipeline
+        end-to-end without spinning a real PTY."""
         cc = MagicMock()
-        # First two calls yield content, the rest are quiet. Use a callable
-        # so MagicMock keeps returning [] forever instead of StopIteration.
-        chunks = iter([["line one"], ["line two"]])
-        cc.read_new_output.side_effect = lambda timeout=0.5: next(chunks, [])
-        mock_get.return_value = cc
-        text, sid = agent.call_claude_pty("ping", (123, 123), timeout=1)
-        self.assertIn("line one", text)
-        self.assertIn("line two", text)
-        self.assertEqual(sid, "")  # PTY mode never returns a session_id
-        cc.send_input.assert_called_once_with("ping")
+        cc.proc.poll.return_value = None
+        chunks = iter([["hello"], ["second batch"], ["third"]])
+        # After 3 batches, set stop event so the loop exits cleanly.
+        stop_event = threading.Event()
+        sent: list[str] = []
+        def fake_read(timeout=0.5):
+            try:
+                return next(chunks)
+            except StopIteration:
+                stop_event.set()
+                return []
+        cc.read_new_output.side_effect = fake_read
+        with patch.object(agent.bot, "send_message", side_effect=lambda cid, t: sent.append(t)):
+            agent._pty_reader_loop(123, 123, cc, stop_event)
+        self.assertEqual(sent, ["hello", "second batch", "third"])
+        # Each forwarded batch counts as one assistant message.
+        self.assertEqual(agent.msg_counts.get((123, 123)), 3)
+        self.assertEqual(agent.last_reply.get((123, 123)), "third")
 
-    @patch("agent._get_or_create_pty")
-    def test_call_claude_pty_returns_empty_response_placeholder(self, mock_get):
-        """If nothing comes out of read_new_output before the deadline, the
-        adapter should return the '(empty response)' marker."""
+    def test_pty_reader_exits_when_proc_dies(self):
+        """If cc.proc has exited (poll() != None), the reader must break out
+        even before stop_event fires, so a crashed claude doesn't leave a
+        thread spinning on a dead PTY."""
         cc = MagicMock()
+        cc.proc.poll.return_value = 0  # exited
+        stop_event = threading.Event()
+        agent._pty_reader_loop(123, 123, cc, stop_event)
+        cc.read_new_output.assert_not_called()
+
+    def test_pty_reader_exits_on_stop_event(self):
+        cc = MagicMock()
+        cc.proc.poll.return_value = None
         cc.read_new_output.side_effect = lambda timeout=0.5: []
-        mock_get.return_value = cc
-        text, _ = agent.call_claude_pty("ping", (123, 123), timeout=1)
-        self.assertEqual(text, "(empty response)")
+        stop_event = threading.Event()
+        stop_event.set()
+        agent._pty_reader_loop(123, 123, cc, stop_event)
+        cc.read_new_output.assert_not_called()
 
-    @patch("agent._stop_pty")
-    @patch("agent._get_or_create_pty")
-    def test_call_claude_pty_not_ready_kill_pty(self, mock_get, mock_stop):
+    def test_stop_pty_signals_reader_and_joins(self):
+        """_stop_pty must set the stop event, join the reader thread, and only
+        then call cc.stop(). Otherwise the reader could read from a closed fd."""
+        agent.claude_code_instances.pop((123, 123), None)
+        agent._pty_reader_threads.pop((123, 123), None)
+        agent._pty_reader_stop.pop((123, 123), None)
         cc = MagicMock()
-        cc.send_input.side_effect = claude_code.ClaudeNotReady("setup never finished")
-        mock_get.return_value = cc
-        text, _ = agent.call_claude_pty("ping", (123, 123))
-        self.assertIn("not ready", text.lower())
-        mock_stop.assert_called_once_with((123, 123))
-
-    @patch("agent._stop_pty")
-    @patch("agent._get_or_create_pty")
-    def test_call_claude_pty_generic_error_kill_pty(self, mock_get, mock_stop):
-        """Any unexpected exception from send_input/read_new_output should
-        still trigger _stop_pty so we don't leak a broken instance."""
-        cc = MagicMock()
-        cc.send_input.side_effect = RuntimeError("something weird")
-        mock_get.return_value = cc
-        text, _ = agent.call_claude_pty("ping", (123, 123))
-        self.assertIn("RuntimeError", text)
-        mock_stop.assert_called_once_with((123, 123))
+        agent.claude_code_instances[(123, 123)] = cc
+        ev = threading.Event()
+        agent._pty_reader_stop[(123, 123)] = ev
+        joined = threading.Event()
+        def runner():
+            ev.wait(timeout=2)
+            joined.set()
+        t = threading.Thread(target=runner, daemon=True)
+        t.start()
+        agent._pty_reader_threads[(123, 123)] = t
+        agent._stop_pty((123, 123))
+        self.assertTrue(joined.is_set())
+        self.assertNotIn((123, 123), agent._pty_reader_threads)
+        self.assertNotIn((123, 123), agent._pty_reader_stop)
+        cc.stop.assert_called_once()
 
     def test_clear_blocked_unknown_user(self):
         agent.cmd_clear(make_fake_message("/clear", user_id=999))
