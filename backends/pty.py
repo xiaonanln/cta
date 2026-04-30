@@ -7,10 +7,14 @@ A per-backend reader thread streams new screen content back to ``on_output``.
 from __future__ import annotations
 
 import threading
+import time
 
 import claude_code
 
 from .base import ClaudeBackend
+
+_TYPING_IDLE_SECONDS = 5.0   # stop typing after this many seconds without output
+_TYPING_PULSE_SECONDS = 3.0  # re-send typing action this often (Telegram expires after ~5s)
 
 
 class PtyBackend(ClaudeBackend):
@@ -19,6 +23,9 @@ class PtyBackend(ClaudeBackend):
         self._cc: claude_code.ClaudeCode | None = None
         self._reader: threading.Thread | None = None
         self._stop_event: threading.Event | None = None
+        self._last_activity: float = 0.0
+        self._typing_stop: threading.Event | None = None
+        self._typing_thread: threading.Thread | None = None
 
     @property
     def cc(self) -> claude_code.ClaudeCode | None:
@@ -82,6 +89,7 @@ class PtyBackend(ClaudeBackend):
                 break
             if not new_lines:
                 continue
+            self._last_activity = time.time()
             text = "\n".join(new_lines).strip()
             if not text:
                 continue
@@ -96,7 +104,41 @@ class PtyBackend(ClaudeBackend):
 
     def send(self, prompt: str) -> None:
         self._ensure_started()
+        self._last_activity = time.time()
+        self._start_typing()
         self._cc.send_input(prompt)
+
+    def _start_typing(self) -> None:
+        if self._typing_stop is not None:
+            self._typing_stop.set()
+        stop = threading.Event()
+        self._typing_stop = stop
+        t = threading.Thread(
+            target=self._typing_loop,
+            args=(stop,),
+            name=f"pty-typing:{self.uid}:{self.chat_id}",
+            daemon=True,
+        )
+        t.start()
+        self._typing_thread = t
+
+    def _typing_loop(self, stop: threading.Event) -> None:
+        import agent
+
+        def pulse() -> None:
+            try:
+                agent.bot.send_chat_action(self.chat_id, "typing")
+            except Exception:
+                pass
+
+        pulse()
+        while not stop.wait(timeout=_TYPING_PULSE_SECONDS):
+            if time.time() - self._last_activity > _TYPING_IDLE_SECONDS:
+                break
+            cc = self._cc
+            if cc and cc.is_idle():
+                break
+            pulse()
 
     def cancel(self) -> bool:
         if self._cc is None:
@@ -114,6 +156,10 @@ class PtyBackend(ClaudeBackend):
         import agent
         from rich.markup import escape
 
+        if self._typing_stop is not None:
+            self._typing_stop.set()
+        self._typing_stop = None
+        self._typing_thread = None
         if self._stop_event is not None:
             self._stop_event.set()
         if self._reader is not None:

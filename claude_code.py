@@ -307,6 +307,10 @@ class ClaudeCode:
             f'Last 800 chars: {self._buffer_clean[-800:]!r}'
         )
 
+    def is_idle(self) -> bool:
+        """True if claude is back at the prompt and ready for the next message."""
+        return self._looks_like_prompt(self._buffer_clean)
+
     # ── startup readiness ───────────────────────────────────────────────
     # Used only by _wait_for_prompt during start() to decide claude is
     # ready to accept input. Response completion no longer uses this —
