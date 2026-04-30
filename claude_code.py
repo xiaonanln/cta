@@ -109,17 +109,11 @@ class ClaudeCode:
 
     # ── lifecycle ────────────────────────────────────────────────────────
     def _build_cmd(self) -> list[str]:
-        # `-c` continues the most recent conversation in `cwd`. We use it
-        # (instead of `--resume <id>`) so a PTY can pick up where the print
-        # backend left off — the session_id stored by print mode is the most
-        # recent transcript in that cwd, so `-c` lands on it. Treating
-        # session_id as a boolean trigger sidesteps the print-vs-PTY
-        # session-id divergence that interactive mode introduces.
         cmd = [self.claude_bin, '--dangerously-skip-permissions']
         if self.model:
             cmd += ['--model', self.model]
         if self.session_id:
-            cmd += ['-c']
+            cmd += ['--resume', self.session_id]
         if self.debug_log:
             cmd += ['--debug-file', self.debug_log]
         return cmd

@@ -776,8 +776,8 @@ class TestBotHandlers(unittest.TestCase):
     @patch("backends.pty.claude_code.ClaudeCode")
     def test_pty_backend_passes_session_id_from_start_config(self, mock_cc_class):
         """When start_config returns a session_id, PtyBackend must pass it to
-        ClaudeCode so the spawned `claude` process gets `-c` and continues the
-        previous (print-mode) conversation in this cwd."""
+        ClaudeCode so the spawned `claude` process gets `--resume <id>` and
+        resumes the previous (print-mode) conversation."""
         mock_instance = MagicMock()
         mock_instance.proc = None
         mock_cc_class.return_value = mock_instance
@@ -2372,8 +2372,8 @@ class TestGetBackend(unittest.TestCase):
 
     def test_pty_start_config_plumbs_session_id(self):
         """Once /pty turns PTY on, the backend's start_config must surface the
-        session_id stored by print mode so ClaudeCode launches with `-c` and
-        continues that conversation."""
+        session_id stored by print mode so ClaudeCode launches with
+        `--resume <id>` and resumes that conversation."""
         agent.user_pty_mode[(1, 2)] = True
         agent.user_sessions[(1, 2)] = "sess-from-print"
         try:
@@ -2475,20 +2475,20 @@ class TestClaudeCodeBuildCmd(unittest.TestCase):
         cc.debug_log = kwargs.get("debug_log")
         return cc
 
-    def test_no_session_id_no_continue_flag(self):
+    def test_no_session_id_no_resume_flag(self):
         cmd = self._make()._build_cmd()
+        self.assertNotIn("--resume", cmd)
         self.assertNotIn("-c", cmd)
         self.assertNotIn("--continue", cmd)
-        self.assertNotIn("--resume", cmd)
 
-    def test_session_id_adds_continue_flag(self):
-        """When session_id is set, pass `-c` so PTY continues the most recent
-        conversation in cwd — which is the one print mode just wrote."""
+    def test_session_id_adds_resume_flag_with_value(self):
+        """When session_id is set, pass `--resume <id>` so PTY resumes that
+        specific conversation."""
         cmd = self._make(session_id="sess-xyz")._build_cmd()
-        self.assertIn("-c", cmd)
-        # session_id value itself is NOT passed: `-c` takes no arg, and
-        # claude resolves the conversation by cwd recency.
-        self.assertNotIn("sess-xyz", cmd)
+        self.assertIn("--resume", cmd)
+        # --resume takes the session_id as its value
+        idx = cmd.index("--resume")
+        self.assertEqual(cmd[idx + 1], "sess-xyz")
 
     def test_keeps_dangerously_skip_permissions_and_debug_file(self):
         cmd = self._make(session_id="sess", debug_log="/tmp/x.log")._build_cmd()
