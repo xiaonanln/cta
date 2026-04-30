@@ -19,7 +19,16 @@ from datetime import datetime
 from flask import Flask, Response, request, stream_with_context
 from werkzeug.routing import BaseConverter
 
-import agent  # cyclic at module level; route handlers resolve agent.<x> at call time
+class _LazyAgent:
+    """Defers 'import agent' until first attribute access to break the __main__ circular import."""
+    def __getattr__(self, name):
+        import agent as _m
+        return getattr(_m, name)
+    def __setattr__(self, name, value):
+        import agent as _m
+        setattr(_m, name, value)
+
+agent = _LazyAgent()
 
 # ── Logging primitives ─────────────────────────────────────────────────────────
 
@@ -986,7 +995,8 @@ def _web_stream():
 
 @app.route("/status")
 def _web_status():
-    all_keys = set(agent.user_sessions) | set(agent.msg_counts)
+    all_keys = (set(agent.user_sessions) | set(agent.msg_counts)
+                | set(agent.chat_labels) | set(agent.last_active))
     sessions = []
     for key in sorted(all_keys):
         uid, chat_id = key
