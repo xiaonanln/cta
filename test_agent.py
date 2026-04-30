@@ -1193,6 +1193,60 @@ class TestBotHandlers(unittest.TestCase):
         self.assertEqual(results[1], "new-sess")
 
 
+# ── shutdown handler ─────────────────────────────────────────────────────────
+
+class TestShutdownHandler(unittest.TestCase):
+    """Tests for _kill_tracked_subprocs — must touch only CTA-spawned PIDs."""
+
+    def setUp(self):
+        agent._current_procs.clear()
+        agent.claude_code_instances.clear()
+
+    def tearDown(self):
+        agent._current_procs.clear()
+        agent.claude_code_instances.clear()
+
+    @patch("agent.os.killpg")
+    @patch("agent.os.getpgid", return_value=12345)
+    def test_kills_tracked_print_subprocs(self, mock_getpgid, mock_killpg):
+        proc = MagicMock()
+        proc.pid = 9999
+        agent._current_procs[(1, 2)] = proc
+        n = agent._kill_tracked_subprocs()
+        self.assertEqual(n, 1)
+        mock_killpg.assert_called_once_with(12345, agent.signal.SIGKILL)
+        self.assertNotIn((1, 2), agent._current_procs)
+
+    def test_stops_tracked_pty_instances(self):
+        cc = MagicMock()
+        agent.claude_code_instances[(1, 2)] = cc
+        n = agent._kill_tracked_subprocs()
+        self.assertEqual(n, 1)
+        cc.stop.assert_called_once()
+        self.assertNotIn((1, 2), agent.claude_code_instances)
+
+    @patch("agent.os.killpg", side_effect=ProcessLookupError)
+    @patch("agent.os.getpgid", return_value=12345)
+    def test_falls_back_to_proc_kill_when_killpg_fails(self, mock_getpgid, mock_killpg):
+        """If the process group is already gone, fall back to proc.kill() so
+        we don't crash the shutdown handler."""
+        proc = MagicMock()
+        proc.pid = 9999
+        agent._current_procs[(1, 2)] = proc
+        n = agent._kill_tracked_subprocs()
+        self.assertEqual(n, 1)
+        proc.kill.assert_called_once()
+
+    def test_only_touches_tracked_pids(self):
+        """Sanity: a foreign PID NOT in _current_procs / claude_code_instances
+        must never be killed. Empty tracking dicts → zero kills."""
+        with patch("agent.os.killpg") as mock_killpg, \
+             patch("agent.os.getpgid"):
+            n = agent._kill_tracked_subprocs()
+        self.assertEqual(n, 0)
+        mock_killpg.assert_not_called()
+
+
 # ── /cancel command ──────────────────────────────────────────────────────────
 
 class TestCancel(unittest.TestCase):
