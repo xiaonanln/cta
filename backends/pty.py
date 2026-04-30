@@ -29,9 +29,14 @@ class PtyBackend(ClaudeBackend):
         self._last_activity: float = 0.0
         self._typing_stop: threading.Event | None = None
         self._typing_thread: threading.Thread | None = None
-        # Set by agent to supply (cwd, model) at PTY start time without
-        # the backend needing to import agent.
-        self.start_config: Optional[Callable[[], tuple[str, str]]] = None
+        # Set by agent to supply (cwd, model, session_id) at PTY start time
+        # without the backend needing to import agent. session_id is the
+        # session recorded by the print backend; when set, ClaudeCode passes
+        # `--resume <id>` so the PTY resumes that conversation.
+        self.start_config: Optional[Callable[[], tuple[str, str, Optional[str]]]] = None
+        # Called when claude rejects the session_id as invalid so the agent can
+        # clear its stored session before we retry without it.
+        self.on_invalid_session: Optional[Callable[[], None]] = None
 
     @property
     def cc(self) -> claude_code.ClaudeCode | None:
@@ -57,20 +62,41 @@ class PtyBackend(ClaudeBackend):
         # and the old reader thread don't leak.
         if self._cc is not None:
             self._teardown()
-        cwd, model = self.start_config() if self.start_config else ("", "")
+        cwd, model, session_id = self.start_config() if self.start_config else ("", "", None)
         cc = claude_code.ClaudeCode(
-            cwd=cwd, model=model,
+            cwd=cwd, model=model, session_id=session_id,
             extra_env={"CTA_UID": str(self.uid), "CTA_CHAT_ID": str(self.chat_id)},
         )
-        print(f"[PTY] spawning ClaudeCode for {self.key} cwd={cwd} model={model}", flush=True)
+        print(f"[PTY] spawning ClaudeCode for {self.key} cwd={cwd} model={model} resume={session_id or 'none'}", flush=True)
         try:
             cc.start(ready_timeout=45)
-        except Exception:
+        except claude_code.ClaudeNotReady as e:
             try:
                 cc.stop()
             except Exception:
                 pass
-            raise
+            if session_id and (
+                'No conversation found with session ID' in str(e)
+                or 'exited rc=1' in str(e)
+            ):
+                # Stale session — clear it in agent state and retry fresh.
+                print(f"[PTY] invalid session {session_id} for {self.key}, retrying without resume", flush=True)
+                if self.on_invalid_session:
+                    self.on_invalid_session()
+                cc = claude_code.ClaudeCode(
+                    cwd=cwd, model=model, session_id=None,
+                    extra_env={"CTA_UID": str(self.uid), "CTA_CHAT_ID": str(self.chat_id)},
+                )
+                try:
+                    cc.start(ready_timeout=45)
+                except Exception:
+                    try:
+                        cc.stop()
+                    except Exception:
+                        pass
+                    raise
+            else:
+                raise
         self._cc = cc
         self._stop_event = threading.Event()
         self._reader = threading.Thread(

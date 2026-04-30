@@ -108,16 +108,20 @@ class ClaudeCode:
         self.last_pty_bytes: float = 0.0
 
     # ── lifecycle ────────────────────────────────────────────────────────
-    def start(self, ready_timeout: float = 30.0) -> None:
-        # Fresh process → fresh dedup state.
-        self._yielded_line_hashes = set()
+    def _build_cmd(self) -> list[str]:
         cmd = [self.claude_bin, '--dangerously-skip-permissions']
         if self.model:
             cmd += ['--model', self.model]
         if self.session_id:
-            cmd += ['resume', self.session_id]
+            cmd += ['--resume', self.session_id]
         if self.debug_log:
             cmd += ['--debug-file', self.debug_log]
+        return cmd
+
+    def start(self, ready_timeout: float = 30.0) -> None:
+        # Fresh process → fresh dedup state.
+        self._yielded_line_hashes = set()
+        cmd = self._build_cmd()
 
         master_fd, slave_fd = pty.openpty()
         # Set window size BEFORE the child is spawned — many TUIs query
@@ -319,8 +323,26 @@ class ClaudeCode:
         """Current screen as a single string with newlines."""
         return '\n'.join(self._screen_lines())
 
+    def _maybe_handle_resume_menu(self) -> bool:
+        """If claude is showing the 'Resume from summary vs full session' menu,
+        navigate to option 2 ('Resume full session as-is') and confirm.
+        Returns True if the menu was detected and handled."""
+        # Check both the pyte-rendered screen and the raw buffer (with spaces
+        # collapsed), because claude's complex ANSI sequences can confuse pyte
+        # and leave the screen blank while the stripped buffer still has the text.
+        screen_has_menu = 'Resume from summary' in self._screen_text()
+        buffer_has_menu = 'Resumefromsummary' in self._buffer_clean.replace(' ', '')
+        if not screen_has_menu and not buffer_has_menu:
+            return False
+        # Option 1 is selected by default; press down to reach option 2, then Enter.
+        os.write(self.master_fd, b'\x1b[B')  # down arrow
+        time.sleep(0.2)
+        os.write(self.master_fd, b'\r')
+        return True
+
     def _wait_for_prompt(self, timeout: float) -> None:
         deadline = time.time() + timeout
+        resume_menu_handled = False
         while time.time() < deadline:
             chunk = self._read_chunk(0.5)
             if chunk is None:
@@ -329,7 +351,18 @@ class ClaudeCode:
                         f'claude exited rc={self.proc.returncode} during startup. '
                         f'Buffer: {self._buffer_clean[-500:]!r}'
                     )
+                # Menu may have appeared during the initial drain phase (before
+                # _wait_for_prompt was called) — check even without new data.
+                if not resume_menu_handled:
+                    resume_menu_handled = self._maybe_handle_resume_menu()
+                    if resume_menu_handled:
+                        # Large sessions take significant time to load after menu selection.
+                        deadline = max(deadline, time.time() + 90.0)
                 continue
+            if not resume_menu_handled:
+                resume_menu_handled = self._maybe_handle_resume_menu()
+                if resume_menu_handled:
+                    deadline = max(deadline, time.time() + 90.0)
             if self._looks_like_prompt(self._buffer_clean):
                 return
         raise ClaudeNotReady(

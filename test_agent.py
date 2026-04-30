@@ -774,6 +774,39 @@ class TestBotHandlers(unittest.TestCase):
         self.assertIsNone(b.cc)
 
     @patch("backends.pty.claude_code.ClaudeCode")
+    def test_pty_backend_passes_session_id_from_start_config(self, mock_cc_class):
+        """When start_config returns a session_id, PtyBackend must pass it to
+        ClaudeCode so the spawned `claude` process gets `--resume <id>` and
+        resumes the previous (print-mode) conversation."""
+        mock_instance = MagicMock()
+        mock_instance.proc = None
+        mock_cc_class.return_value = mock_instance
+        b = backends.PtyBackend(123, 456)
+        b.start_config = lambda: ("/tmp", "claude-sonnet-4-6", "sess-abc")
+        try:
+            b._ensure_started()
+        finally:
+            b.stop()
+        kwargs = mock_cc_class.call_args[1]
+        self.assertEqual(kwargs.get("session_id"), "sess-abc")
+        self.assertEqual(kwargs.get("cwd"), "/tmp")
+        self.assertEqual(kwargs.get("model"), "claude-sonnet-4-6")
+
+    @patch("backends.pty.claude_code.ClaudeCode")
+    def test_pty_backend_passes_none_session_id_when_no_print_session(self, mock_cc_class):
+        mock_instance = MagicMock()
+        mock_instance.proc = None
+        mock_cc_class.return_value = mock_instance
+        b = backends.PtyBackend(123, 456)
+        b.start_config = lambda: ("/tmp", "claude-sonnet-4-6", None)
+        try:
+            b._ensure_started()
+        finally:
+            b.stop()
+        kwargs = mock_cc_class.call_args[1]
+        self.assertIsNone(kwargs.get("session_id"))
+
+    @patch("backends.pty.claude_code.ClaudeCode")
     def test_pty_backend_stops_dead_cc_before_respawn(self, mock_cc_class):
         """If the cached ClaudeCode has died (proc.poll() != None), the old instance
         must be stopped before spawning a replacement — otherwise the dead PTY's
@@ -790,6 +823,75 @@ class TestBotHandlers(unittest.TestCase):
         finally:
             b.stop()
         dead_cc.stop.assert_called_once()
+
+    @patch("backends.pty.claude_code.ClaudeCode")
+    def test_pty_backend_retries_without_session_on_invalid_session_error(self, mock_cc_class):
+        """If cc.start() raises ClaudeNotReady with 'No conversation found with session ID',
+        PtyBackend must call on_invalid_session, then retry with session_id=None."""
+        invalid_instance = MagicMock()
+        invalid_instance.proc = None
+        invalid_instance.start.side_effect = claude_code.ClaudeNotReady(
+            "claude exited rc=1 during startup. Buffer: 'No conversation found with session ID: sess-stale'"
+        )
+        fresh_instance = MagicMock()
+        fresh_instance.proc = None
+        mock_cc_class.side_effect = [invalid_instance, fresh_instance]
+
+        cleared = []
+        b = backends.PtyBackend(123, 456)
+        b.start_config = lambda: ("/tmp", "claude-sonnet-4-6", "sess-stale")
+        b.on_invalid_session = lambda: cleared.append(True)
+        b._ensure_started()
+        # Check cc before stop() tears it down
+        self.assertIs(b.cc, fresh_instance)
+        b.stop()
+
+        # on_invalid_session must have been called
+        self.assertEqual(cleared, [True])
+        # First ClaudeCode built with stale session; second with session_id=None
+        first_kwargs = mock_cc_class.call_args_list[0][1]
+        self.assertEqual(first_kwargs.get("session_id"), "sess-stale")
+        second_kwargs = mock_cc_class.call_args_list[1][1]
+        self.assertIsNone(second_kwargs.get("session_id"))
+
+    @patch("backends.pty.claude_code.ClaudeCode")
+    def test_pty_backend_does_not_retry_on_non_session_error(self, mock_cc_class):
+        """Other ClaudeNotReady errors (e.g. timeout) must not trigger the retry path."""
+        mock_instance = MagicMock()
+        mock_instance.proc = None
+        mock_instance.start.side_effect = claude_code.ClaudeNotReady("No prompt indicator within 45s")
+        mock_cc_class.return_value = mock_instance
+        b = backends.PtyBackend(123, 456)
+        b.start_config = lambda: ("/tmp", "claude-sonnet-4-6", "sess-ok")
+        with self.assertRaises(claude_code.ClaudeNotReady):
+            b._ensure_started()
+        # Only one ClaudeCode ever created — no retry
+        self.assertEqual(mock_cc_class.call_count, 1)
+
+    @patch("backends.pty.claude_code.ClaudeCode")
+    def test_pty_backend_retries_on_rc1_exit_with_empty_buffer(self, mock_cc_class):
+        """If claude exits rc=1 during startup with a session_id but the buffer
+        is empty (PTY closed before we read), pty.py must still retry fresh.
+        'No conversation found' may not be in the exception string in that case."""
+        invalid_instance = MagicMock()
+        invalid_instance.proc = None
+        invalid_instance.start.side_effect = claude_code.ClaudeNotReady(
+            "claude exited rc=1 during startup. Buffer: ''"
+        )
+        fresh_instance = MagicMock()
+        fresh_instance.proc = None
+
+        mock_cc_class.side_effect = [invalid_instance, fresh_instance]
+
+        cleared = []
+        b = backends.PtyBackend(123, 456)
+        b.start_config = lambda: ("/tmp", "claude-sonnet-4-6", "sess-old")
+        b.on_invalid_session = lambda: cleared.append(True)
+        b._ensure_started()
+
+        self.assertEqual(cleared, [True])
+        second_kwargs = mock_cc_class.call_args_list[1][1]
+        self.assertIsNone(second_kwargs.get("session_id"))
 
     @patch("agent._get_backend")
     @patch("agent.call_claude")
@@ -2337,6 +2439,39 @@ class TestGetBackend(unittest.TestCase):
         old.stop.assert_called_once()
         self.assertIsInstance(new, backends.PrintBackend)
 
+    def test_pty_start_config_plumbs_session_id(self):
+        """Once /pty turns PTY on, the backend's start_config must surface the
+        session_id stored by print mode so ClaudeCode launches with
+        `--resume <id>` and resumes that conversation."""
+        agent.user_pty_mode[(1, 2)] = True
+        agent.user_sessions[(1, 2)] = "sess-from-print"
+        try:
+            b = agent._get_backend((1, 2))
+            cwd, model, sid = b.start_config()
+            self.assertEqual(sid, "sess-from-print")
+        finally:
+            agent.user_sessions.pop((1, 2), None)
+
+    def test_pty_start_config_session_id_none_when_no_session(self):
+        agent.user_pty_mode[(1, 2)] = True
+        b = agent._get_backend((1, 2))
+        cwd, model, sid = b.start_config()
+        self.assertIsNone(sid)
+
+    def test_pty_on_invalid_session_clears_session_and_saves(self):
+        """on_invalid_session must remove the key from user_sessions and persist."""
+        agent.user_pty_mode[(1, 2)] = True
+        agent.user_sessions[(1, 2)] = "sess-stale"
+        try:
+            b = agent._get_backend((1, 2))
+            self.assertIsNotNone(b.on_invalid_session)
+            with patch("agent.save_sessions") as mock_save:
+                b.on_invalid_session()
+                mock_save.assert_called_once()
+            self.assertNotIn((1, 2), agent.user_sessions)
+        finally:
+            agent.user_sessions.pop((1, 2), None)
+
 
 class TestPrintBackendSend(unittest.TestCase):
     """Unit tests for PrintBackend.send and PrintBackend.cancel."""
@@ -2409,6 +2544,189 @@ class TestPrintBackendSend(unittest.TestCase):
     def test_cancel_returns_false_when_nothing_active(self):
         b = backends.PrintBackend(1, 2)
         self.assertFalse(b.cancel())
+
+
+class TestClaudeCodeBuildCmd(unittest.TestCase):
+    """ClaudeCode._build_cmd shapes the `claude` argv. Verifying it directly
+    avoids spinning up a real PTY just to inspect the command line."""
+
+    def _make(self, **kwargs):
+        cc = claude_code.ClaudeCode.__new__(claude_code.ClaudeCode)
+        cc.claude_bin = "/fake/claude"
+        cc.model = kwargs.get("model")
+        cc.session_id = kwargs.get("session_id")
+        cc.debug_log = kwargs.get("debug_log")
+        return cc
+
+    def test_no_session_id_no_resume_flag(self):
+        cmd = self._make()._build_cmd()
+        self.assertNotIn("--resume", cmd)
+        self.assertNotIn("-c", cmd)
+        self.assertNotIn("--continue", cmd)
+
+    def test_session_id_adds_resume_flag_with_value(self):
+        """When session_id is set, pass `--resume <id>` so PTY resumes that
+        specific conversation."""
+        cmd = self._make(session_id="sess-xyz")._build_cmd()
+        self.assertIn("--resume", cmd)
+        # --resume takes the session_id as its value
+        idx = cmd.index("--resume")
+        self.assertEqual(cmd[idx + 1], "sess-xyz")
+
+    def test_keeps_dangerously_skip_permissions_and_debug_file(self):
+        cmd = self._make(session_id="sess", debug_log="/tmp/x.log")._build_cmd()
+        self.assertIn("--dangerously-skip-permissions", cmd)
+        self.assertIn("--debug-file", cmd)
+        self.assertIn("/tmp/x.log", cmd)
+
+    def test_model_flag_when_set(self):
+        cmd = self._make(model="claude-sonnet-4-6")._build_cmd()
+        self.assertIn("--model", cmd)
+        self.assertIn("claude-sonnet-4-6", cmd)
+
+
+class TestResumeMenuHandler(unittest.TestCase):
+    """_maybe_handle_resume_menu detects the 'Resume from summary vs full
+    session' interactive menu and selects option 2 automatically."""
+
+    def _make_cc(self):
+        cc = claude_code.ClaudeCode.__new__(claude_code.ClaudeCode)
+        cc._screen = unittest.mock.MagicMock()
+        cc.master_fd = 99  # fake fd
+        return cc
+
+    def _set_screen(self, cc, lines):
+        cc._screen.display = lines + [''] * (40 - len(lines))
+
+    def _set_buffer(self, cc, text):
+        cc._buffer_clean = text
+
+    def test_returns_false_when_menu_absent(self):
+        cc = self._make_cc()
+        self._set_screen(cc, ['> What should I do next?', 'bypasspermissions'])
+        cc._buffer_clean = 'bypasspermissions ❯ '
+        self.assertFalse(cc._maybe_handle_resume_menu())
+
+    @unittest.mock.patch('os.write')
+    @unittest.mock.patch('time.sleep')
+    def test_returns_true_and_sends_down_then_enter_when_menu_visible(self, mock_sleep, mock_write):
+        cc = self._make_cc()
+        self._set_screen(cc, [
+            'This session is 14h 26m old and 255.7k tokens.',
+            '',
+            '❯ 1. Resume from summary (recommended)',
+            '  2. Resume full session as-is',
+            '  3. Don\'t ask me again',
+            '',
+            'Enter to confirm · Esc to cancel',
+        ])
+        cc._buffer_clean = ''
+        result = cc._maybe_handle_resume_menu()
+        self.assertTrue(result)
+        calls = mock_write.call_args_list
+        # First write: down arrow escape sequence
+        self.assertEqual(calls[0], unittest.mock.call(99, b'\x1b[B'))
+        # Second write: Enter
+        self.assertEqual(calls[1], unittest.mock.call(99, b'\r'))
+
+    @unittest.mock.patch('os.write')
+    @unittest.mock.patch('time.sleep')
+    def test_detects_menu_from_buffer_when_pyte_screen_is_blank(self, mock_sleep, mock_write):
+        """When claude's complex ANSI sequences confuse pyte (leaving the screen
+        blank), detection must still work via the raw stripped buffer."""
+        cc = self._make_cc()
+        # Pyte screen has nothing useful
+        self._set_screen(cc, [])
+        # But buffer has the menu text, space-squashed as it appears in practice
+        cc._buffer_clean = '❯1.Resumefromsummary(recommended)\n2.Resumefullsessionas-is'
+        result = cc._maybe_handle_resume_menu()
+        self.assertTrue(result)
+        calls = mock_write.call_args_list
+        self.assertEqual(calls[0], unittest.mock.call(99, b'\x1b[B'))
+        self.assertEqual(calls[1], unittest.mock.call(99, b'\r'))
+
+    @unittest.mock.patch('os.write')
+    @unittest.mock.patch('time.sleep')
+    def test_menu_handled_when_chunk_is_none(self, mock_sleep, mock_write):
+        """Menu that appeared during the drain phase (before _wait_for_prompt)
+        must be handled even when _read_chunk keeps returning None (claude is
+        waiting silently for menu input)."""
+        cc = claude_code.ClaudeCode.__new__(claude_code.ClaudeCode)
+        cc._screen = unittest.mock.MagicMock()
+        cc._screen.display = [''] * 40
+        cc.master_fd = 99
+        cc.proc = unittest.mock.MagicMock()
+        cc.proc.poll.return_value = None
+        cc._buffer_raw = ''
+        cc._stream = unittest.mock.MagicMock()
+        cc.last_pty_bytes = 0.0
+        # Buffer already populated from drain phase — menu text is present.
+        cc._buffer_clean = '❯1.Resumefromsummary(recommended)\n2.Resumefullsessionas-is'
+
+        call_count = [0]
+
+        def fake_read_chunk(timeout):
+            call_count[0] += 1
+            if call_count[0] >= 3:
+                # Simulate session finishing load: return a non-None chunk so
+                # _looks_like_prompt is evaluated, and set the prompt buffer.
+                cc._buffer_clean = 'bypasspermissions ❯ '
+                return 'some bytes'
+            return None  # no new data (claude is waiting for menu choice)
+
+        cc._read_chunk = fake_read_chunk
+        cc._looks_like_prompt = lambda txt: 'bypasspermissions' in txt and '❯' in txt
+
+        cc._wait_for_prompt(timeout=5.0)
+
+        # Menu must have been handled exactly once despite early chunks being None
+        down_calls = [c for c in mock_write.call_args_list if c == unittest.mock.call(99, b'\x1b[B')]
+        enter_calls = [c for c in mock_write.call_args_list if c == unittest.mock.call(99, b'\r')]
+        self.assertEqual(len(down_calls), 1)
+        self.assertEqual(len(enter_calls), 1)
+
+    @unittest.mock.patch('os.write')
+    @unittest.mock.patch('time.sleep')
+    def test_called_only_once_in_wait_for_prompt(self, mock_sleep, mock_write):
+        """_wait_for_prompt must not send the menu response more than once even
+        if the menu is still visible across multiple read cycles."""
+        cc = claude_code.ClaudeCode.__new__(claude_code.ClaudeCode)
+        cc._screen = unittest.mock.MagicMock()
+        cc.master_fd = 99
+        cc.proc = unittest.mock.MagicMock()
+        cc.proc.poll.return_value = None
+        cc._buffer_raw = ''
+        cc._buffer_clean = ''
+        cc._stream = unittest.mock.MagicMock()
+        cc.last_pty_bytes = 0.0
+
+        menu_lines = [
+            '❯ 1. Resume from summary (recommended)',
+            '  2. Resume full session as-is',
+        ] + [''] * 38
+
+        call_count = [0]
+
+        def fake_read_chunk(timeout):
+            call_count[0] += 1
+            cc._screen.display = menu_lines
+            if call_count[0] >= 3:
+                # After a couple of cycles pretend the real prompt is up
+                cc._buffer_clean = 'bypasspermissions ❯ '
+            return 'some bytes'
+
+        cc._read_chunk = fake_read_chunk
+        # Patch _looks_like_prompt so it returns True on the 3rd cycle
+        original_looks = claude_code.ClaudeCode._looks_like_prompt.__get__(cc, claude_code.ClaudeCode)
+        cc._looks_like_prompt = lambda txt: 'bypasspermissions' in txt and '❯' in txt and 'esctointerrupt' not in txt.replace(' ', '')
+
+        cc._wait_for_prompt(timeout=5.0)
+
+        # Down-arrow + Enter should have been written exactly once
+        down_calls = [c for c in mock_write.call_args_list if c == unittest.mock.call(99, b'\x1b[B')]
+        enter_calls = [c for c in mock_write.call_args_list if c == unittest.mock.call(99, b'\r')]
+        self.assertEqual(len(down_calls), 1)
+        self.assertEqual(len(enter_calls), 1)
 
 
 class TestNoiseLineFilter(unittest.TestCase):
