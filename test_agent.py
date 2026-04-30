@@ -2175,5 +2175,147 @@ class TestWebAPI(unittest.TestCase):
         self.assertIn(b"<!DOCTYPE html>", r.data)
 
 
+# ── Backend unit tests ────────────────────────────────────────────────────────
+
+class TestClaudeBackendBase(unittest.TestCase):
+    """Tests for the ClaudeBackend ABC itself."""
+
+    def _make_concrete(self, uid=1, chat_id=2):
+        class Concrete(backends.ClaudeBackend):
+            def send(self, prompt):
+                pass
+        return Concrete(uid, chat_id)
+
+    def test_key_property(self):
+        b = self._make_concrete(7, 99)
+        self.assertEqual(b.key, (7, 99))
+
+    def test_cancel_default_returns_false(self):
+        b = self._make_concrete()
+        self.assertFalse(b.cancel())
+
+    def test_stop_default_returns_none(self):
+        b = self._make_concrete()
+        self.assertIsNone(b.stop())
+
+
+class TestGetBackend(unittest.TestCase):
+    """Tests for agent._get_backend — backend selection and swap logic."""
+
+    def setUp(self):
+        agent._backends.clear()
+        agent.user_pty_mode.clear()
+
+    def tearDown(self):
+        agent._backends.clear()
+        agent.user_pty_mode.clear()
+
+    def test_creates_print_backend_by_default(self):
+        b = agent._get_backend((1, 2))
+        self.assertIsInstance(b, backends.PrintBackend)
+        self.assertIn((1, 2), agent._backends)
+
+    def test_creates_pty_backend_when_pty_on(self):
+        agent.user_pty_mode[(1, 2)] = True
+        b = agent._get_backend((1, 2))
+        self.assertIsInstance(b, backends.PtyBackend)
+
+    def test_reuses_existing_backend_same_class(self):
+        first = agent._get_backend((1, 2))
+        second = agent._get_backend((1, 2))
+        self.assertIs(first, second)
+
+    def test_swaps_print_to_pty_stops_old(self):
+        old = agent._get_backend((1, 2))  # PrintBackend
+        old.stop = MagicMock()
+        agent.user_pty_mode[(1, 2)] = True
+        new = agent._get_backend((1, 2))
+        old.stop.assert_called_once()
+        self.assertIsInstance(new, backends.PtyBackend)
+        self.assertIsNot(old, new)
+
+    def test_swaps_pty_to_print_stops_old(self):
+        agent.user_pty_mode[(1, 2)] = True
+        old = agent._get_backend((1, 2))  # PtyBackend
+        old.stop = MagicMock()
+        agent.user_pty_mode.pop((1, 2))
+        new = agent._get_backend((1, 2))
+        old.stop.assert_called_once()
+        self.assertIsInstance(new, backends.PrintBackend)
+
+
+class TestPrintBackendSend(unittest.TestCase):
+    """Unit tests for PrintBackend.send and PrintBackend.cancel."""
+
+    def setUp(self):
+        self.bot = setup_fake_bot()
+        agent.ALLOWED_USERS.clear()
+        agent.ALLOWED_USERS.add(1)
+        agent._backends.clear()
+        agent.user_sessions.clear()
+        agent._cancelled_keys.clear()
+        agent.claude_active_keys.clear()
+        self._key = (1, 2)
+
+    def tearDown(self):
+        agent._backends.clear()
+        agent.user_sessions.clear()
+        agent._cancelled_keys.clear()
+        agent.claude_active_keys.clear()
+
+    @patch("agent.call_claude", return_value=("hello world", "sess-1"))
+    def test_send_invokes_on_output_with_reply(self, _):
+        b = backends.PrintBackend(1, 2)
+        received = []
+        b.on_output = received.append
+        b.send("hi")
+        self.assertEqual(received, ["hello world"])
+        self.assertEqual(agent.user_sessions[self._key], "sess-1")
+
+    @patch("agent.call_claude", return_value=("hello", "sess-1"))
+    def test_send_suppresses_reply_when_cancelled(self, _):
+        agent._cancelled_keys.add(self._key)
+        b = backends.PrintBackend(1, 2)
+        received = []
+        b.on_output = received.append
+        b.send("hi")
+        self.assertEqual(received, [])
+        # Cancelled key is consumed so the next prompt is not suppressed.
+        self.assertNotIn(self._key, agent._cancelled_keys)
+
+    @patch("agent.call_claude")
+    def test_send_retries_on_session_not_found(self, mock_cc):
+        agent.user_sessions[self._key] = "old-sess"
+        mock_cc.side_effect = [
+            ("No conversation found with session ID old-sess", ""),
+            ("fresh reply", "new-sess"),
+        ]
+        b = backends.PrintBackend(1, 2)
+        received = []
+        b.on_output = received.append
+        b.send("hi")
+        self.assertEqual(mock_cc.call_count, 2)
+        # Second call must not pass a session_id.
+        self.assertIsNone(mock_cc.call_args_list[1][1].get("session_id"))
+        self.assertEqual(received, ["fresh reply"])
+
+    @patch("agent.call_claude", return_value=("reply", "new-sid"))
+    def test_send_updates_session_id(self, _):
+        b = backends.PrintBackend(1, 2)
+        b.on_output = lambda _: None
+        b.send("hi")
+        self.assertEqual(agent.user_sessions[self._key], "new-sid")
+
+    @patch("agent.call_claude", return_value=("reply", ""))
+    def test_send_on_output_none_does_not_crash(self, _):
+        b = backends.PrintBackend(1, 2)
+        b.on_output = None
+        b.send("hi")  # must not raise
+
+    def test_cancel_returns_false_when_nothing_active(self):
+        b = backends.PrintBackend(1, 2)
+        self.assertFalse(b.cancel())
+
+
 if __name__ == "__main__":
     unittest.main()
