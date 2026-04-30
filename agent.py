@@ -31,13 +31,16 @@ import backends
 import web
 from web import app, tui_log, _LogHandler, _WebMessage
 
-# Ensure /usr/local/bin is in PATH so shell commands issued by Claude (docker, etc.)
+# Ensure /usr/local/bin and ~/bin are in PATH so shell commands issued by Claude
 # work even when agent.py is launched via launchd/systemd with a minimal environment.
 # If PATH is unset, fall back to standard system dirs (not "" — which resolves to CWD).
 _existing_path = os.environ.get("PATH", "")
-if "/usr/local/bin" not in _existing_path.split(os.pathsep):
+_path_parts = _existing_path.split(os.pathsep)
+_home_bin = os.path.expanduser("~/bin")
+_prepend = [d for d in ["/usr/local/bin", _home_bin] if d not in _path_parts]
+if _prepend:
     _base = _existing_path or "/usr/bin:/bin:/usr/sbin:/sbin"
-    os.environ["PATH"] = "/usr/local/bin" + os.pathsep + _base
+    os.environ["PATH"] = os.pathsep.join(_prepend) + os.pathsep + _base
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
