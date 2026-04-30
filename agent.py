@@ -49,6 +49,7 @@ DEFAULT_CONFIG = {
     "telegram_bot_token": "",
     "allowed_users": [],
     "claude_timeout": 1800,
+    "max_concurrent_claude": 1,
     "model": "claude-sonnet-4-6",
     "web_port": 17488,
 }
@@ -79,6 +80,8 @@ def load_config() -> dict:
 BOT_TOKEN = ""
 ALLOWED_USERS: set[int] = set()
 TIMEOUT = 1800
+MAX_CONCURRENT_CLAUDE = 1
+_claude_semaphore = threading.Semaphore(MAX_CONCURRENT_CLAUDE)
 MODEL = "claude-sonnet-4-6"
 WEB_PORT = 17488
 DEFAULT_CWD = os.getcwd()
@@ -152,9 +155,12 @@ def _load_whisper():
 
 def init(config: dict):
     global BOT_TOKEN, ALLOWED_USERS, TIMEOUT, MODEL, WEB_PORT, DEFAULT_CWD, GLOBAL_PREAMBLE, WHISPER_MODEL
+    global MAX_CONCURRENT_CLAUDE, _claude_semaphore
     BOT_TOKEN = config["telegram_bot_token"]
     ALLOWED_USERS = set(config["allowed_users"])
     TIMEOUT = config["claude_timeout"]
+    MAX_CONCURRENT_CLAUDE = max(1, int(config.get("max_concurrent_claude", 1)))
+    _claude_semaphore = threading.Semaphore(MAX_CONCURRENT_CLAUDE)
     MODEL = config.get("model", "claude-sonnet-4-6")
     WEB_PORT = config.get("web_port", 17488)
     WHISPER_MODEL = config.get("whisper_model", "base")
@@ -792,6 +798,10 @@ _WEB_HTML = """<!DOCTYPE html>
         <input id="cfg-timeout" type="number" min="10" />
       </div>
       <div class="cfg-row">
+        <label>Max concurrent agents</label>
+        <input id="cfg-concurrent" type="number" min="1" max="20" />
+      </div>
+      <div class="cfg-row">
         <label>Web port</label>
         <input id="cfg-port" type="number" min="1024" max="65535" />
       </div>
@@ -1168,6 +1178,7 @@ _WEB_HTML = """<!DOCTYPE html>
         modelSel.value = d.model;
       }
       document.getElementById('cfg-timeout').value = d.claude_timeout ?? '';
+      document.getElementById('cfg-concurrent').value = d.max_concurrent_claude ?? 1;
       document.getElementById('cfg-port').value = d.web_port ?? '';
       document.getElementById('cfg-cwd').value = d.default_cwd || '';
       document.getElementById('cfg-users').value = (d.allowed_users || []).join(', ');
@@ -1182,6 +1193,7 @@ _WEB_HTML = """<!DOCTYPE html>
     const body = {
       model: document.getElementById('cfg-model').value,
       claude_timeout: parseInt(document.getElementById('cfg-timeout').value) || 1800,
+      max_concurrent_claude: parseInt(document.getElementById('cfg-concurrent').value) || 1,
       web_port: parseInt(document.getElementById('cfg-port').value) || 17488,
       default_cwd: document.getElementById('cfg-cwd').value.trim(),
       allowed_users: document.getElementById('cfg-users').value
@@ -1370,6 +1382,7 @@ def _web_get_config():
         "web_port": cfg.get("web_port", WEB_PORT),
         "default_cwd": cfg.get("default_cwd", DEFAULT_CWD),
         "allowed_users": cfg.get("allowed_users", list(ALLOWED_USERS)),
+        "max_concurrent_claude": cfg.get("max_concurrent_claude", MAX_CONCURRENT_CLAUDE),
         "global_preamble": _read_global_preamble(),
         "system_preamble": _system_preamble("<uid>", "<chat_id>"),
     }
@@ -1378,6 +1391,7 @@ def _web_get_config():
 @app.route("/config", methods=["POST"])
 def _web_set_config():
     global BOT_TOKEN, MODEL, TIMEOUT, DEFAULT_CWD, ALLOWED_USERS, GLOBAL_PREAMBLE
+    global MAX_CONCURRENT_CLAUDE, _claude_semaphore
     from flask import request
     data = request.get_json(silent=True) or {}
     try:
@@ -1403,6 +1417,19 @@ def _web_set_config():
     if "allowed_users" in data:
         cfg["allowed_users"] = [int(u) for u in data["allowed_users"] if str(u).strip()]
         ALLOWED_USERS = set(cfg["allowed_users"])
+    if "max_concurrent_claude" in data:
+        try:
+            n = max(1, int(data["max_concurrent_claude"]))
+        except (TypeError, ValueError):
+            n = MAX_CONCURRENT_CLAUDE
+        if n != MAX_CONCURRENT_CLAUDE:
+            MAX_CONCURRENT_CLAUDE = n
+            # Allocating a fresh semaphore is OK because in-flight calls
+            # capture a local reference at acquire time and release that
+            # same instance. Old waiters will still drain on the previous
+            # semaphore once their permits land.
+            _claude_semaphore = threading.Semaphore(n)
+        cfg["max_concurrent_claude"] = n
     if "global_preamble" in data:
         text = data["global_preamble"].strip()
         if text:
@@ -1855,32 +1882,48 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
         env["CTA_CHAT_ID"] = str(chat_id)
     key = (uid, chat_id) if uid is not None and chat_id is not None else None
     label = chat_labels.get(key, f"{uid}:{chat_id}") if key else "—"
-    tui_log(f"[blue]→ claude[/] {escape(label)} model={escape(model or MODEL)} chars={len(prompt)} session={'resume' if session_id else 'new'} debug={escape(debug_path)}")
-    print(f"[POPEN] uid={uid} chat={chat_id} cmd={cmd[0]} debug={debug_path}", flush=True)
+    # Concurrency gate. Capture a local ref BEFORE acquire so a runtime
+    # config change that swaps the global semaphore can't make us release
+    # a different instance from the one we acquired (would leak permits).
+    sem = _claude_semaphore
+    if MAX_CONCURRENT_CLAUDE > 1 or sem._value < 1:  # type: ignore[attr-defined]
+        # Only log when we might actually wait, to avoid noise.
+        tui_log(f"[dim]→ acquiring slot for {escape(label)} ({MAX_CONCURRENT_CLAUDE} max)[/]")
+    sem.acquire()
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True, cwd=cwd, env=env, start_new_session=True)
-    except FileNotFoundError:
-        return "(claude CLI not found — install @anthropic-ai/claude-code)", ""
-    print(f"[POPEN_OK] uid={uid} chat={chat_id} pid={proc.pid}", flush=True)
-    if key:
-        _current_procs[key] = proc
-    try:
+        # If /cancel arrived while we were blocked at acquire, bail out before
+        # spawning the subprocess — otherwise the user's cancel is silently
+        # overridden by work that runs the moment a slot opens up.
+        if key and key in _cancelled_keys:
+            return "(cancelled)", ""
+        tui_log(f"[blue]→ claude[/] {escape(label)} model={escape(model or MODEL)} chars={len(prompt)} session={'resume' if session_id else 'new'} debug={escape(debug_path)}")
+        print(f"[POPEN] uid={uid} chat={chat_id} cmd={cmd[0]} debug={debug_path}", flush=True)
         try:
-            stdout, stderr = proc.communicate(timeout=timeout or TIMEOUT)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
-            tui_log(f"[yellow]⏱ claude timeout[/] {escape(label)}")
-            return "(Claude timed out)", ""
-    finally:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True, cwd=cwd, env=env, start_new_session=True)
+        except FileNotFoundError:
+            return "(claude CLI not found — install @anthropic-ai/claude-code)", ""
+        print(f"[POPEN_OK] uid={uid} chat={chat_id} pid={proc.pid}", flush=True)
         if key:
-            _current_procs.pop(key, None)
-    if proc.returncode != 0 or not stdout.strip():
-        return f"[Error] {stderr.strip()}" if stderr.strip() else "(empty response)", ""
-    data = json.loads(stdout)
-    text = (data.get("result") or "").strip() or "(empty response)"
-    text = _append_usage_footer(text, data)
-    return text, data.get("session_id", "")
+            _current_procs[key] = proc
+        try:
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout or TIMEOUT)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()
+                tui_log(f"[yellow]⏱ claude timeout[/] {escape(label)}")
+                return "(Claude timed out)", ""
+        finally:
+            if key:
+                _current_procs.pop(key, None)
+        if proc.returncode != 0 or not stdout.strip():
+            return f"[Error] {stderr.strip()}" if stderr.strip() else "(empty response)", ""
+        data = json.loads(stdout)
+        text = (data.get("result") or "").strip() or "(empty response)"
+        text = _append_usage_footer(text, data)
+        return text, data.get("session_id", "")
+    finally:
+        sem.release()
 
 
 # ── PTY mode (ClaudeCode wrapper) ─────────────────────────────────────────────
@@ -2382,6 +2425,13 @@ def cmd_cancel(message):
             print(f"[CANCEL] pty cancel key={key}", flush=True)
         except Exception as e:
             print(f"[CANCEL] pty cancel failed key={key}: {e!r}", flush=True)
+    elif key in claude_active_keys:
+        # Worker is in-flight but no subprocess yet — likely blocked at the
+        # semaphore acquire when concurrency is saturated. Mark it cancelled
+        # so call_claude bails out as soon as a slot opens.
+        _cancelled_keys.add(key)
+        parts.append("queued task will be cancelled when slot opens")
+        print(f"[CANCEL] mark queued key={key}", flush=True)
     q = user_queues.get(key)
     drained = 0
     if q:

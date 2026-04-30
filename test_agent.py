@@ -868,6 +868,64 @@ class TestBotHandlers(unittest.TestCase):
         agent.cmd_clear(make_fake_message("/clear", user_id=999))
         self.bot.reply_to.assert_not_called()
 
+    @patch("agent.subprocess.Popen")
+    def test_call_claude_releases_local_semaphore_after_global_swap(self, mock_popen):
+        """Codex P1 regression: if max_concurrent_claude is changed at runtime
+        between acquire and release, the release must hit the *acquired*
+        semaphore, not the new one — otherwise permits leak on the old and
+        inflate on the new."""
+        proc = MagicMock()
+        proc.communicate.return_value = (
+            json.dumps({"result": "hi", "session_id": "s", "is_error": False}),
+            "",
+        )
+        proc.returncode = 0
+        mock_popen.return_value = proc
+
+        original_sem = agent._claude_semaphore
+        # Mid-call, swap to a new semaphore (simulates /config POST). We do this
+        # by replacing the global right before the second acquire would happen.
+        try:
+            agent.call_claude("hi", uid=1, chat_id=2)
+            # Replace global like _web_set_config would do.
+            agent._claude_semaphore = threading.Semaphore(5)
+            agent.call_claude("hi", uid=1, chat_id=2)
+            # The original semaphore must still have its single permit
+            # available — otherwise the local-ref capture failed.
+            self.assertTrue(original_sem.acquire(blocking=False))
+            original_sem.release()
+        finally:
+            agent._claude_semaphore = original_sem
+
+    def test_cancel_marks_key_when_no_subprocess_yet(self):
+        """Codex P2: /cancel on a chat that's blocked at the semaphore (worker
+        in claude_active_keys but no subprocess yet) must add to _cancelled_keys
+        so call_claude bails out when the slot opens."""
+        key = (123, 123)
+        agent.claude_active_keys.add(key)
+        agent._cancelled_keys.discard(key)
+        try:
+            agent.cmd_cancel(make_fake_message("/cancel"))
+            self.assertIn(key, agent._cancelled_keys)
+            reply = self.bot.reply_to.call_args[0][1]
+            self.assertIn("queued", reply.lower())
+        finally:
+            agent.claude_active_keys.discard(key)
+            agent._cancelled_keys.discard(key)
+
+    @patch("agent.subprocess.Popen")
+    def test_call_claude_bails_when_cancelled_before_acquire(self, mock_popen):
+        """If /cancel marked the key while we were blocked at the semaphore,
+        call_claude must NOT spawn the subprocess once the slot opens."""
+        agent._cancelled_keys.add((1, 2))
+        try:
+            text, sid = agent.call_claude("hi", uid=1, chat_id=2)
+            self.assertEqual(text, "(cancelled)")
+            self.assertEqual(sid, "")
+            mock_popen.assert_not_called()
+        finally:
+            agent._cancelled_keys.discard((1, 2))
+
     def test_pwd_shows_default_cwd(self):
         agent.cmd_pwd(make_fake_message("/pwd"))
         reply = self.bot.reply_to.call_args[0][1]
