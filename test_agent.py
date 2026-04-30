@@ -15,6 +15,7 @@ os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-token")
 
 import agent
 import claude_code
+import web
 
 agent.init(agent.DEFAULT_CONFIG)
 
@@ -604,29 +605,29 @@ class TestAllowed(unittest.TestCase):
 class TestTuiLog(unittest.TestCase):
 
     def setUp(self):
-        agent._log_entries.clear()
+        web._log_entries.clear()
 
     def test_adds_entry(self):
         agent.tui_log("hello")
-        self.assertEqual(len(agent._log_entries), 1)
-        self.assertEqual(agent._log_entries[0][1], "hello")
+        self.assertEqual(len(web._log_entries), 1)
+        self.assertEqual(web._log_entries[0][1], "hello")
 
     def test_entry_has_timestamp(self):
         agent.tui_log("msg")
-        ts = agent._log_entries[0][0]
+        ts = web._log_entries[0][0]
         # HH:MM:SS format
         self.assertRegex(ts, r"^\d{2}:\d{2}:\d{2}$")
 
     def test_multiple_entries_ordered(self):
         agent.tui_log("first")
         agent.tui_log("second")
-        texts = [e[1] for e in agent._log_entries]
+        texts = [e[1] for e in web._log_entries]
         self.assertEqual(texts, ["first", "second"])
 
     def test_respects_maxlen(self):
         for i in range(250):
             agent.tui_log(f"msg{i}")
-        self.assertLessEqual(len(agent._log_entries), 200)
+        self.assertLessEqual(len(web._log_entries), 200)
 
 
 # ── Bot handlers ──────────────────────────────────────────────────────────────
