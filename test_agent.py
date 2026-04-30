@@ -2318,6 +2318,56 @@ class TestPrintBackendSend(unittest.TestCase):
         self.assertFalse(b.cancel())
 
 
+class TestNoiseLineFilter(unittest.TestCase):
+    """The noise filter strips Claude Code TUI chrome — status bar, thinking
+    spinner, tool indicator — so PTY mode doesn't forward them to Telegram."""
+
+    def setUp(self):
+        self.cc = claude_code.ClaudeCode.__new__(claude_code.ClaudeCode)
+
+    def test_filters_spinner_glyph_status_lines(self):
+        for line in [
+            "✻ Synthesizing…",
+            "· Synthesizing…",
+            "✶ Synthesizing…",
+            "✽ Beboppin'…",
+            "✳ Transfiguring…",
+            "✢ Beboppin'…",
+            "· Synthesizing… (2s · ↓ 13 tokens · thinking)",
+            "✻ Synthesizing… (3s · ↓ 62 tokens · thinking...",  # unclosed paren — TUI redraw
+            "✶ Beboppin'… (1m 49s · ↓ 6.1k tokens · almost done thinking)",
+        ]:
+            self.assertTrue(self.cc._is_noise_line(line), f"should filter: {line!r}")
+
+    def test_filters_ascii_dot_spinner_lines(self):
+        # The spinner has a frame where the leader is "..." (ASCII dots).
+        for line in [
+            "...Beboppin'…",
+            "...Beboppin'… (1m 48s · ↑ 6.0k tokens · almost done thinking)",
+        ]:
+            self.assertTrue(self.cc._is_noise_line(line), f"should filter: {line!r}")
+
+    def test_filters_tool_indicator_lines(self):
+        for line in [
+            "⎿  Running… (5s)",
+            "⎿  Running… (15s)",
+            "⎿  $ tail -20 /Users/alex/projects/cta/test_agent.py",
+            "⎿ output preview",
+        ]:
+            self.assertTrue(self.cc._is_noise_line(line), f"should filter: {line!r}")
+
+    def test_does_not_filter_real_content(self):
+        for line in [
+            "Hello, here is the answer.",
+            "Let me think about that…",  # ellipsis at end without spinner glyph
+            "- a bullet point",
+            "```python",
+            "✻ this has a glyph but no ellipsis so is not the spinner",
+            "...continued from where we left off",  # leading dots but no Unicode … after one word
+        ]:
+            self.assertFalse(self.cc._is_noise_line(line), f"should NOT filter: {line!r}")
+
+
 class TestReadNewOutputBottomLineHold(unittest.TestCase):
     """ClaudeCode.read_new_output should hold back the bottom-most content
     line while claude is generating, since pyte renders character-by-character
