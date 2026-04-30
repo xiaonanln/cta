@@ -1,20 +1,24 @@
 """
 ClaudeCode — long-lived `claude` interactive process under a PTY.
 
-Wraps the `claude` CLI in interactive (TUI) mode so we can reuse the same
-code path that `claude --print` is built on top of, but without --print's
-known streaming-response hangs on tool_use.
+Streaming I/O model: caller writes input whenever, reads new output as it
+arrives. No "request → response" boundary; claude's TUI is bidirectional.
 
 Usage:
     cc = ClaudeCode(cwd="/path/to/project", model="claude-sonnet-4-6")
     cc.start()
-    reply = cc.send("run ls in current dir")
-    print(reply)
+    cc.send_input("run ls in current dir")
+    while alive:
+        new_lines = cc.read_new_output(timeout=0.5)
+        for line in new_lines:
+            relay_to_telegram(line)
+        # caller decides when to stop based on its own logic
+        # (idle window, deadline, user cancelled, ...)
     cc.stop()
 
-This is intentionally a thin wrapper. Response-completion detection is
-heuristic (read until the input prompt redraws or the stream goes idle
-past a stall threshold).
+`read_new_output` returns only lines NOT previously yielded. It filters
+out the input box, status bar, and the thinking footer so callers can
+pipe straight to a UI without seeing TUI furniture.
 """
 
 from __future__ import annotations
@@ -95,9 +99,14 @@ class ClaudeCode:
         # the accumulated stream of frames.
         self._screen = pyte.Screen(self.cols, self.rows)
         self._stream = pyte.ByteStream(self._screen)
+        # Hashes of lines we've already returned via read_new_output, so
+        # we don't re-emit them on every screen redraw. Reset on start().
+        self._yielded_line_hashes: set[int] = set()
 
     # ── lifecycle ────────────────────────────────────────────────────────
     def start(self, ready_timeout: float = 30.0) -> None:
+        # Fresh process → fresh dedup state.
+        self._yielded_line_hashes = set()
         cmd = [self.claude_bin, '--dangerously-skip-permissions']
         if self.model:
             cmd += ['--model', self.model]
@@ -186,28 +195,63 @@ class ClaudeCode:
             self.master_fd = None
 
     # ── messaging ────────────────────────────────────────────────────────
-    def send(
-        self,
-        prompt: str,
-        response_timeout: float = 600.0,
-        stall_timeout: float = 90.0,
-    ) -> str:
+    def send_input(self, text: str, submit: bool = True) -> None:
+        """Write `text` to claude's PTY stdin. By default, append `\\r` to
+        submit (claude TUI expects CR for Enter). Set submit=False to type
+        without submitting (e.g. multi-step input)."""
         if not self.proc or self.proc.poll() is not None or self.master_fd is None:
             raise ClaudeNotReady('claude process is not running; call start() first')
-        # Clear buffers for this turn.
-        self._buffer_raw = ''
-        self._buffer_clean = ''
-        # Type the prompt. For multi-line, claude treats raw \n as newline
-        # within the input field, not submit. Submit is a final \r after
-        # the input is settled.
-        body = prompt.replace('\n', '\\\n')  # unused, leave plain newlines
-        os.write(self.master_fd, prompt.encode('utf-8'))
-        # Brief pause so claude's TUI reflects the typed text before submit.
-        time.sleep(0.2)
-        # Submit with Enter. Use \r (CR) — what TTYs normally send for Enter.
-        os.write(self.master_fd, b'\r')
-        self._read_until_idle(response_timeout, stall_timeout)
-        return self._extract_response(prompt)
+        os.write(self.master_fd, text.encode('utf-8'))
+        if submit:
+            # Brief pause so claude's TUI reflects the typed text before submit.
+            time.sleep(0.2)
+            os.write(self.master_fd, b'\r')
+
+    # Lines that are TUI chrome / noise (not real assistant content).
+    _NOISE_RE = re.compile(
+        r'^(?:'
+        r'─{4,}'                                    # horizontal divider
+        r'|⏵⏵.*bypass permissions'                  # status bar
+        r'|.*\([^)]*tokens[^)]*thought for[^)]*\)'  # thinking footer
+        r'|.*esc to interrupt'                      # streaming indicator
+        r'|.*\d+/\d+\(esc\)'                         # interrupt hint variant
+        r')\s*$',
+        re.IGNORECASE,
+    )
+
+    def _is_noise_line(self, line: str) -> bool:
+        s = line.strip()
+        if not s:
+            return True
+        # Pure box-drawing / cursor (input box decoration).
+        box_chars = '╭╮╰╯│├┤┬┴┼┌┐└┘─━ '
+        if all(c in box_chars + '❯' for c in s):
+            return True
+        return bool(self._NOISE_RE.match(s))
+
+    def read_new_output(self, timeout: float = 0.5) -> list[str]:
+        """Read PTY for up to `timeout` seconds; return new lines (those not
+        previously yielded since start()). Filters out TUI chrome (status
+        bar, thinking footer, input box decoration). Returns [] if nothing
+        new in `timeout` seconds.
+
+        Caller decides when to stop reading — there's no completion concept
+        here. Common patterns: read until N seconds quiet, until deadline,
+        or until cancel signal.
+        """
+        chunk = self._read_chunk(timeout)
+        if chunk is None:
+            return []
+        new_lines: list[str] = []
+        for raw in self._screen_lines():
+            if self._is_noise_line(raw):
+                continue
+            h = hash(raw.strip())
+            if h in self._yielded_line_hashes:
+                continue
+            self._yielded_line_hashes.add(h)
+            new_lines.append(raw.rstrip())
+        return new_lines
 
     def cancel(self) -> None:
         """Interrupt the currently-running generation (Esc, then Ctrl-C as fallback)."""
@@ -263,54 +307,10 @@ class ClaudeCode:
             f'Last 800 chars: {self._buffer_clean[-800:]!r}'
         )
 
-    def _read_until_idle(self, response_timeout: float, stall_timeout: float) -> str:
-        """Read until claude redraws its input prompt (response complete) OR
-        the stream is silent for stall_timeout (probable hang).
-
-        Distinguishes "claude hasn't started yet" from "claude finished" by
-        requiring we observe 'esc to interrupt' at least once. Without that
-        gate, the post-submit interval — where the TUI just shows the echoed
-        input and 'esc to interrupt' hasn't yet rendered — looks idle and
-        the check returns immediately with the input echo as the "response".
-        """
-        deadline = time.time() + response_timeout
-        last_activity = time.time()
-        seen_generating = False  # have we ever seen claude actively generating?
-        while time.time() < deadline:
-            chunk = self._read_chunk(0.5)
-            now = time.time()
-            if chunk:
-                last_activity = now
-                if 'esctointerrupt' in self._buffer_clean.replace(' ', ''):
-                    seen_generating = True
-                # Only treat "no esc-to-interrupt" as completion AFTER we've
-                # witnessed claude generating at least once. Otherwise we'd
-                # bail out during the submit→generate-start window.
-                if seen_generating and self._response_complete():
-                    return self._buffer_clean
-            else:
-                if now - last_activity > stall_timeout:
-                    raise ClaudeStalled(
-                        f'No output for {stall_timeout}s mid-response. '
-                        f'Last 400: {self._buffer_clean[-400:]!r}'
-                    )
-                if self.proc and self.proc.poll() is not None:
-                    raise ClaudeNotReady(
-                        f'claude exited rc={self.proc.returncode} during response.'
-                    )
-        raise TimeoutError(f'Response not complete within {response_timeout}s.')
-
-    # ── heuristic detectors ──────────────────────────────────────────────
-    # These will need tuning once we see actual claude TUI output. Keep
-    # the matchers conservative: false-positive completion is the worst
-    # failure mode (we'd cut off mid-response).
-
-    # Markers observed in the actual claude TUI (v2.1.123) AFTER ANSI strip:
-    #   '❯' is the input cursor (visible when idle, waiting for input)
-    #   'esc to interrupt' appears only during generation. Note that since
-    #     box-drawing compacts text horizontally, words may run together
-    #     ('esctointerrupt'), so check both forms.
-    #   'bypass permissions' (or 'bypasspermissions') is in the status bar
+    # ── startup readiness ───────────────────────────────────────────────
+    # Used only by _wait_for_prompt during start() to decide claude is
+    # ready to accept input. Response completion no longer uses this —
+    # the streaming API doesn't have a completion concept.
     def _looks_like_prompt(self, clean: str) -> bool:
         """True if claude is idle and waiting for the next user message.
 
@@ -335,85 +335,4 @@ class ClaudeCode:
         after = clean[last_chevron:].replace(' ', '')
         return 'esctointerrupt' not in after
 
-    def _response_complete(self) -> bool:
-        return self._looks_like_prompt(self._buffer_clean)
 
-    # ── response extraction ──────────────────────────────────────────────
-    def _extract_response(self, sent_prompt: str) -> str:
-        """Pull the assistant's reply text from the rendered screen.
-
-        Layout we observed in claude TUI v2.1.123:
-
-            (top blank lines)
-            ❯ <user prompt echo>
-            ⏺ <assistant response, possibly multi-line>
-              ⎿ <tool result, indented under tool-call>     (when tools used)
-            ⏺ <more assistant>                              (multi-step)
-            ────────────────  (divider)
-            ❯                  (input cursor — empty, idle)
-            ────────────────  (divider)
-            ⏵⏵ bypass permissions on …  (status bar)
-
-        Strategy: find the LAST `❯ <prompt>` echo and take everything between
-        it and the empty-input `❯` line near the bottom dividers. Strip
-        leading `⏺ ` markers from response lines; keep `⎿` indented blocks.
-        """
-        lines = self._screen_lines()
-        if not lines:
-            return ''
-        # Locate the input divider near the bottom: a long run of '─'.
-        divider_idx = None
-        for i in range(len(lines) - 1, -1, -1):
-            if lines[i].count('─') > 20:
-                divider_idx = i
-                break
-        # Locate the user-prompt echo: a '❯' line whose content starts with
-        # the prompt we just sent (after stripping '❯' and spaces).
-        prompt_first_word = sent_prompt.split('\n')[0].strip()[:30]
-        echo_idx = None
-        for i in range(len(lines) - 1, -1, -1):
-            line = lines[i]
-            if '❯' in line and prompt_first_word and prompt_first_word[:15] in line:
-                echo_idx = i
-                break
-        if echo_idx is None:
-            # Fallback: everything above the bottom divider.
-            top = 0
-            bottom = divider_idx if divider_idx is not None else len(lines)
-            return self._clean_response_block(lines[top:bottom])
-        top = echo_idx + 1
-        bottom = divider_idx if divider_idx is not None else len(lines)
-        return self._clean_response_block(lines[top:bottom])
-
-    # Lines that are TUI chrome rather than response content.
-    _CHROME_RE = re.compile(
-        r'^\s*('
-        r'❯\s*'                                    # empty input cursor
-        r'|─{20,}.*'                               # horizontal divider
-        r'|[✢✳✶✻✽●○]\s*\w+ for \d+\w*\s*$'        # "✻ Baked for 1s" etc.
-        r'|[✢✳✶✻✽✻●○]\s*(Generating|Percolating|Crafting|Cooking).*'
-        r'|⏵⏵.*bypass permissions.*'               # status bar
-        r')\s*$'
-    )
-
-    @classmethod
-    def _clean_response_block(cls, lines: list[str]) -> str:
-        out: list[str] = []
-        for raw in lines:
-            s = raw.rstrip()
-            if not s:
-                if out and out[-1] != '':
-                    out.append('')
-                continue
-            if cls._CHROME_RE.match(s):
-                continue
-            # Strip leading '⏺ ' / '⏺' marking an assistant message.
-            if s.lstrip().startswith('⏺'):
-                s = s.lstrip()[1:].lstrip()
-            out.append(s)
-        # Trim leading/trailing blanks.
-        while out and out[0] == '':
-            out.pop(0)
-        while out and out[-1] == '':
-            out.pop()
-        return '\n'.join(out)
