@@ -14,6 +14,7 @@ from unittest.mock import patch, MagicMock, call
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-token")
 
 import agent
+import backends
 import claude_code
 import web
 
@@ -660,17 +661,14 @@ class TestBotHandlers(unittest.TestCase):
                 os.unlink(path)
         shutil.rmtree(self._tmp_memory_dir, ignore_errors=True)
         shutil.rmtree(self._tmp_preamble_dir, ignore_errors=True)
-        # Clean up any PTY reader threads / events left over from tests that
-        # exercised _get_or_create_pty — otherwise the dicts leak across tests.
-        for key in list(agent._pty_reader_stop):
-            ev = agent._pty_reader_stop.pop(key, None)
-            if ev is not None:
-                ev.set()
-        for key in list(agent._pty_reader_threads):
-            t = agent._pty_reader_threads.pop(key, None)
-            if t is not None:
-                t.join(timeout=1)
-        agent.claude_code_instances.clear()
+        # Stop any backends that tests left behind so reader threads / PTYs
+        # don't leak across tests.
+        for key, b in list(agent._backends.items()):
+            try:
+                b.stop()
+            except Exception:
+                pass
+            agent._backends.pop(key, None)
 
     def test_start_replies(self):
         agent.cmd_start(make_fake_message("/start"))
@@ -712,12 +710,12 @@ class TestBotHandlers(unittest.TestCase):
 
     def test_pty_off_clears_flag_and_stops_instance(self):
         agent.user_pty_mode[(123, 123)] = True
-        fake_cc = MagicMock()
-        agent.claude_code_instances[(123, 123)] = fake_cc
+        fake_backend = MagicMock()
+        agent._backends[(123, 123)] = fake_backend
         agent.cmd_pty(make_fake_message("/pty off"))
         self.assertNotIn((123, 123), agent.user_pty_mode)
-        self.assertNotIn((123, 123), agent.claude_code_instances)
-        fake_cc.stop.assert_called_once()
+        self.assertNotIn((123, 123), agent._backends)
+        fake_backend.stop.assert_called_once()
 
     def test_pty_invalid_arg_shows_usage(self):
         agent.cmd_pty(make_fake_message("/pty wat"))
@@ -727,87 +725,85 @@ class TestBotHandlers(unittest.TestCase):
         agent.cmd_pty(make_fake_message("/pty on", user_id=999))
         self.bot.reply_to.assert_not_called()
 
-    def test_clear_stops_pty_instance(self):
-        fake_cc = MagicMock()
-        agent.claude_code_instances[(123, 123)] = fake_cc
+    def test_clear_stops_backend(self):
+        fake_backend = MagicMock()
+        agent._backends[(123, 123)] = fake_backend
         agent.cmd_clear(make_fake_message("/clear"))
-        fake_cc.stop.assert_called_once()
-        self.assertNotIn((123, 123), agent.claude_code_instances)
+        fake_backend.stop.assert_called_once()
+        self.assertNotIn((123, 123), agent._backends)
 
-    def test_model_change_stops_pty_instance(self):
-        fake_cc = MagicMock()
-        agent.claude_code_instances[(123, 123)] = fake_cc
+    def test_model_change_stops_backend(self):
+        fake_backend = MagicMock()
+        agent._backends[(123, 123)] = fake_backend
         agent.cmd_model(make_fake_message("/model claude-opus-4-6"))
-        fake_cc.stop.assert_called_once()
-        self.assertNotIn((123, 123), agent.claude_code_instances)
+        fake_backend.stop.assert_called_once()
+        self.assertNotIn((123, 123), agent._backends)
 
-    @patch("agent.claude_code.ClaudeCode")
-    def test_get_or_create_pty_passes_cta_env(self, mock_cc_class):
+    @patch("backends.pty.claude_code.ClaudeCode")
+    def test_pty_backend_passes_cta_env(self, mock_cc_class):
         """ClaudeCode should be constructed with CTA_UID/CTA_CHAT_ID in extra_env so
         cron.py / notify.py invoked from inside the PTY chat can identify themselves.
         Without this, those scripts exit unless --uid/--chat-id flags are passed."""
-        agent.claude_code_instances.pop((123, 456), None)
         mock_instance = MagicMock()
-        mock_instance.proc = None
+        mock_instance.proc = None  # reader will exit immediately
         mock_cc_class.return_value = mock_instance
+        b = backends.PtyBackend(123, 456)
         try:
-            agent._get_or_create_pty((123, 456))
+            b._ensure_started()
         finally:
-            agent.claude_code_instances.pop((123, 456), None)
+            b.stop()
         kwargs = mock_cc_class.call_args[1]
         self.assertIn("extra_env", kwargs)
         self.assertEqual(kwargs["extra_env"]["CTA_UID"], "123")
         self.assertEqual(kwargs["extra_env"]["CTA_CHAT_ID"], "456")
 
-    @patch("agent.claude_code.ClaudeCode")
-    def test_get_or_create_pty_cleans_up_when_start_raises(self, mock_cc_class):
+    @patch("backends.pty.claude_code.ClaudeCode")
+    def test_pty_backend_cleans_up_when_start_raises(self, mock_cc_class):
         """If cc.start() raises (e.g. ClaudeNotReady), the half-started instance
-        must be stopped so we don't leak the subprocess + master_fd, and it
-        must NOT be registered in claude_code_instances (so the next attempt
-        spawns fresh)."""
-        agent.claude_code_instances.pop((123, 456), None)
+        must be stopped so we don't leak subprocess + master_fd, and the backend
+        must not register the cc (so the next attempt spawns fresh)."""
         mock_instance = MagicMock()
         mock_instance.proc = None
         mock_instance.start.side_effect = claude_code.ClaudeNotReady("setup failed")
         mock_cc_class.return_value = mock_instance
-        try:
-            with self.assertRaises(claude_code.ClaudeNotReady):
-                agent._get_or_create_pty((123, 456))
-            mock_instance.stop.assert_called_once()
-            self.assertNotIn((123, 456), agent.claude_code_instances)
-        finally:
-            agent.claude_code_instances.pop((123, 456), None)
+        b = backends.PtyBackend(123, 456)
+        with self.assertRaises(claude_code.ClaudeNotReady):
+            b._ensure_started()
+        mock_instance.stop.assert_called_once()
+        self.assertIsNone(b.cc)
 
-    @patch("agent.claude_code.ClaudeCode")
-    def test_get_or_create_pty_stops_dead_instance_before_respawn(self, mock_cc_class):
+    @patch("backends.pty.claude_code.ClaudeCode")
+    def test_pty_backend_stops_dead_cc_before_respawn(self, mock_cc_class):
         """If the cached ClaudeCode has died (proc.poll() != None), the old instance
         must be stopped before spawning a replacement — otherwise the dead PTY's
-        master_fd leaks. Long-running deployments could exhaust file descriptors."""
+        master_fd leaks."""
         dead_cc = MagicMock()
         dead_cc.proc.poll.return_value = 1  # process exited
-        agent.claude_code_instances[(123, 456)] = dead_cc
-        mock_cc_class.return_value = MagicMock(proc=None)
+        fresh_cc = MagicMock(proc=None)
+        mock_cc_class.return_value = fresh_cc
+        b = backends.PtyBackend(123, 456)
+        b._cc = dead_cc
+        b._stop_event = threading.Event()  # so _teardown can set it
         try:
-            agent._get_or_create_pty((123, 456))
+            b._ensure_started()
         finally:
-            agent.claude_code_instances.pop((123, 456), None)
+            b.stop()
         dead_cc.stop.assert_called_once()
 
-    @patch("agent._get_or_create_pty")
+    @patch("agent._get_backend")
     @patch("agent.call_claude")
-    def test_pty_mode_dispatch_calls_send_input_only(self, mock_print, mock_get):
-        """PTY mode is fire-and-forget: the worker sends the prompt and returns;
-        it must NOT call the print-mode `call_claude`. The long-lived reader
-        thread (spawned in `_get_or_create_pty`) is what surfaces the response."""
-        cc = MagicMock()
-        mock_get.return_value = cc
+    def test_pty_mode_dispatch_calls_backend_send(self, mock_print, mock_get):
+        """PTY mode dispatch must go through the backend's send (not call_claude).
+        The long-lived reader inside the backend surfaces the response."""
+        backend = MagicMock(spec=backends.PtyBackend)
+        mock_get.return_value = backend
         agent.user_pty_mode[(123, 123)] = True
         try:
             agent.handle_message(make_fake_message("hello"))
             time.sleep(0.5)
             mock_get.assert_called_once_with((123, 123))
-            cc.send_input.assert_called_once()
-            self.assertIn("hello", cc.send_input.call_args[0][0])
+            backend.send.assert_called_once()
+            self.assertIn("hello", backend.send.call_args[0][0])
             mock_print.assert_not_called()
         finally:
             agent.user_pty_mode.pop((123, 123), None)
@@ -819,26 +815,22 @@ class TestBotHandlers(unittest.TestCase):
         reply = self.bot.reply_to.call_args[0][1]
         self.assertIn("session cleared", reply)
 
-    def test_cd_stops_pty_instance(self):
-        """Like /clear and /model, /cd must stop the PTY so the next message
-        respawns with the new cwd. Otherwise a stale ClaudeCode keeps
-        running in the old directory."""
-        fake_cc = MagicMock()
-        agent.claude_code_instances[(123, 123)] = fake_cc
+    def test_cd_stops_backend(self):
+        """Like /clear and /model, /cd must stop the backend so the next message
+        respawns with the new cwd. Otherwise a stale PTY keeps running in the old dir."""
+        fake_backend = MagicMock()
+        agent._backends[(123, 123)] = fake_backend
         agent.cmd_cd(make_fake_message(f"/cd {os.getcwd()}"))
-        fake_cc.stop.assert_called_once()
-        self.assertNotIn((123, 123), agent.claude_code_instances)
+        fake_backend.stop.assert_called_once()
+        self.assertNotIn((123, 123), agent._backends)
 
-    def test_pty_reader_forwards_lines_to_telegram(self):
-        """Reader thread forwards each batch of new lines as a Telegram message
-        and pushes it onto the chat history. Validates the streaming pipeline
-        end-to-end without spinning a real PTY."""
+    def test_pty_backend_reader_forwards_chunks_via_callback(self):
+        """The reader loop forwards each batch of new lines through on_output.
+        Validates the streaming pipeline without spinning a real PTY."""
         cc = MagicMock()
         cc.proc.poll.return_value = None
         chunks = iter([["hello"], ["second batch"], ["third"]])
-        # After 3 batches, set stop event so the loop exits cleanly.
         stop_event = threading.Event()
-        sent: list[str] = []
         def fake_read(timeout=0.5):
             try:
                 return next(chunks)
@@ -846,53 +838,55 @@ class TestBotHandlers(unittest.TestCase):
                 stop_event.set()
                 return []
         cc.read_new_output.side_effect = fake_read
-        with patch.object(agent.bot, "send_message", side_effect=lambda cid, t: sent.append(t)):
-            agent._pty_reader_loop(123, 123, cc, stop_event)
+        b = backends.PtyBackend(123, 123)
+        b._cc = cc
+        b._stop_event = stop_event
+        sent: list[str] = []
+        b.on_output = lambda text: sent.append(text)
+        b._reader_loop()
         self.assertEqual(sent, ["hello", "second batch", "third"])
-        # Each forwarded batch counts as one assistant message.
-        self.assertEqual(agent.msg_counts.get((123, 123)), 3)
-        self.assertEqual(agent.last_reply.get((123, 123)), "third")
 
-    def test_pty_reader_exits_when_proc_dies(self):
+    def test_pty_backend_reader_exits_when_proc_dies(self):
         """If cc.proc has exited (poll() != None), the reader must break out
-        even before stop_event fires, so a crashed claude doesn't leave a
+        before the stop event fires, so a crashed claude doesn't leave a
         thread spinning on a dead PTY."""
         cc = MagicMock()
         cc.proc.poll.return_value = 0  # exited
-        stop_event = threading.Event()
-        agent._pty_reader_loop(123, 123, cc, stop_event)
+        b = backends.PtyBackend(123, 123)
+        b._cc = cc
+        b._stop_event = threading.Event()
+        b._reader_loop()
         cc.read_new_output.assert_not_called()
 
-    def test_pty_reader_exits_on_stop_event(self):
+    def test_pty_backend_reader_exits_on_stop_event(self):
         cc = MagicMock()
         cc.proc.poll.return_value = None
         cc.read_new_output.side_effect = lambda timeout=0.5: []
-        stop_event = threading.Event()
-        stop_event.set()
-        agent._pty_reader_loop(123, 123, cc, stop_event)
+        b = backends.PtyBackend(123, 123)
+        b._cc = cc
+        b._stop_event = threading.Event()
+        b._stop_event.set()
+        b._reader_loop()
         cc.read_new_output.assert_not_called()
 
-    def test_stop_pty_signals_reader_and_joins(self):
-        """_stop_pty must set the stop event, join the reader thread, and only
-        then call cc.stop(). Otherwise the reader could read from a closed fd."""
-        agent.claude_code_instances.pop((123, 123), None)
-        agent._pty_reader_threads.pop((123, 123), None)
-        agent._pty_reader_stop.pop((123, 123), None)
+    def test_pty_backend_stop_signals_reader_and_joins(self):
+        """PtyBackend.stop must set the stop event, join the reader thread,
+        and then call cc.stop. Otherwise the reader could read from a closed fd."""
         cc = MagicMock()
-        agent.claude_code_instances[(123, 123)] = cc
         ev = threading.Event()
-        agent._pty_reader_stop[(123, 123)] = ev
         joined = threading.Event()
         def runner():
             ev.wait(timeout=2)
             joined.set()
         t = threading.Thread(target=runner, daemon=True)
         t.start()
-        agent._pty_reader_threads[(123, 123)] = t
-        agent._stop_pty((123, 123))
+        b = backends.PtyBackend(123, 123)
+        b._cc = cc
+        b._stop_event = ev
+        b._reader = t
+        b.stop()
         self.assertTrue(joined.is_set())
-        self.assertNotIn((123, 123), agent._pty_reader_threads)
-        self.assertNotIn((123, 123), agent._pty_reader_stop)
+        self.assertIsNone(b.cc)
         cc.stop.assert_called_once()
 
     def test_clear_blocked_unknown_user(self):
@@ -1231,11 +1225,11 @@ class TestShutdownHandler(unittest.TestCase):
 
     def setUp(self):
         agent._current_procs.clear()
-        agent.claude_code_instances.clear()
+        agent._backends.clear()
 
     def tearDown(self):
         agent._current_procs.clear()
-        agent.claude_code_instances.clear()
+        agent._backends.clear()
 
     @patch("agent.os.killpg")
     @patch("agent.os.getpgid", return_value=12345)
@@ -1248,13 +1242,13 @@ class TestShutdownHandler(unittest.TestCase):
         mock_killpg.assert_called_once_with(12345, agent.signal.SIGKILL)
         self.assertNotIn((1, 2), agent._current_procs)
 
-    def test_stops_tracked_pty_instances(self):
-        cc = MagicMock()
-        agent.claude_code_instances[(1, 2)] = cc
+    def test_stops_tracked_backends(self):
+        b = MagicMock()
+        agent._backends[(1, 2)] = b
         n = agent._kill_tracked_subprocs()
         self.assertEqual(n, 1)
-        cc.stop.assert_called_once()
-        self.assertNotIn((1, 2), agent.claude_code_instances)
+        b.stop.assert_called_once()
+        self.assertNotIn((1, 2), agent._backends)
 
     @patch("agent.os.killpg", side_effect=ProcessLookupError)
     @patch("agent.os.getpgid", return_value=12345)
@@ -1269,8 +1263,8 @@ class TestShutdownHandler(unittest.TestCase):
         proc.kill.assert_called_once()
 
     def test_only_touches_tracked_pids(self):
-        """Sanity: a foreign PID NOT in _current_procs / claude_code_instances
-        must never be killed. Empty tracking dicts → zero kills."""
+        """Sanity: a foreign PID NOT in _current_procs / _backends must
+        never be killed. Empty tracking dicts → zero kills."""
         with patch("agent.os.killpg") as mock_killpg, \
              patch("agent.os.getpgid"):
             n = agent._kill_tracked_subprocs()
@@ -1308,9 +1302,10 @@ class TestCancel(unittest.TestCase):
         self.bot.reply_to.assert_not_called()
 
     def test_kills_active_proc_for_this_chat(self):
-        """When Claude is running for this chat, the proc is killed."""
+        """When Claude is running for this chat, the proc is killed via the backend."""
         proc = MagicMock()
         agent._current_procs[(123, 123)] = proc
+        agent._backends[(123, 123)] = backends.PrintBackend(123, 123)
         agent.cmd_cancel(make_fake_message("/cancel"))
         proc.kill.assert_called_once()
         self.assertIn((123, 123), agent._cancelled_keys)
@@ -1321,6 +1316,7 @@ class TestCancel(unittest.TestCase):
         """Active task belongs to a different chat — don't kill it."""
         proc = MagicMock()
         agent._current_procs[(999, 999)] = proc
+        agent._backends[(999, 999)] = backends.PrintBackend(999, 999)
         agent.cmd_cancel(make_fake_message("/cancel"))
         proc.kill.assert_not_called()
         self.assertNotIn((123, 123), agent._cancelled_keys)
@@ -1331,6 +1327,8 @@ class TestCancel(unittest.TestCase):
         proc_b = MagicMock()
         agent._current_procs[(123, 123)] = proc_a
         agent._current_procs[(456, 456)] = proc_b
+        agent._backends[(123, 123)] = backends.PrintBackend(123, 123)
+        agent._backends[(456, 456)] = backends.PrintBackend(456, 456)
         agent.cmd_cancel(make_fake_message("/cancel"))  # cancels chat (123,123)
         proc_a.kill.assert_called_once()
         proc_b.kill.assert_not_called()
