@@ -265,25 +265,29 @@ class ClaudeCode:
 
     def _read_until_idle(self, response_timeout: float, stall_timeout: float) -> str:
         """Read until claude redraws its input prompt (response complete) OR
-        the stream is silent for stall_timeout (probable hang)."""
+        the stream is silent for stall_timeout (probable hang).
+
+        Distinguishes "claude hasn't started yet" from "claude finished" by
+        requiring we observe 'esc to interrupt' at least once. Without that
+        gate, the post-submit interval — where the TUI just shows the echoed
+        input and 'esc to interrupt' hasn't yet rendered — looks idle and
+        the check returns immediately with the input echo as the "response".
+        """
         deadline = time.time() + response_timeout
         last_activity = time.time()
-        # Track buffer length at last "prompt visible" check so we don't
-        # detect stale prompt artifacts from before the user's submission.
-        seen_post_submit_output = False
+        seen_generating = False  # have we ever seen claude actively generating?
         while time.time() < deadline:
             chunk = self._read_chunk(0.5)
             now = time.time()
             if chunk:
                 last_activity = now
-                seen_post_submit_output = True
-                # Prompt redraw is the completion signal — but only if we've
-                # already seen at least some output since submit.
-                if seen_post_submit_output and self._looks_like_prompt(self._buffer_clean):
-                    # Heuristic: only call it done if last few non-empty lines
-                    # contain typical "ready for next message" markers.
-                    if self._response_complete():
-                        return self._buffer_clean
+                if 'esctointerrupt' in self._buffer_clean.replace(' ', ''):
+                    seen_generating = True
+                # Only treat "no esc-to-interrupt" as completion AFTER we've
+                # witnessed claude generating at least once. Otherwise we'd
+                # bail out during the submit→generate-start window.
+                if seen_generating and self._response_complete():
+                    return self._buffer_clean
             else:
                 if now - last_activity > stall_timeout:
                     raise ClaudeStalled(
