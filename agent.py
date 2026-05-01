@@ -57,7 +57,24 @@ DEFAULT_CONFIG = {
     "max_concurrent_claude": 1,
     "model": "claude-sonnet-4-6",
     "web_port": 17488,
+    "path_prefix": "",
 }
+
+
+def _apply_path_prefix(prefix: str) -> None:
+    """Prepend `prefix` (os.pathsep-separated) to PATH, expanding ~ and skipping dupes."""
+    if not prefix:
+        return
+    existing = os.environ.get("PATH", "")
+    existing_parts = existing.split(os.pathsep) if existing else []
+    new_parts = []
+    for p in prefix.split(os.pathsep):
+        p = os.path.expanduser(p.strip())
+        if p and p not in existing_parts and p not in new_parts:
+            new_parts.append(p)
+    if new_parts:
+        base = existing or "/usr/bin:/bin:/usr/sbin:/sbin"
+        os.environ["PATH"] = os.pathsep.join(new_parts) + os.pathsep + base
 
 
 def load_config() -> dict:
@@ -160,7 +177,7 @@ def _load_whisper():
 
 def init(config: dict):
     global BOT_TOKEN, ALLOWED_USERS, TIMEOUT, MODEL, WEB_PORT, DEFAULT_CWD, GLOBAL_PREAMBLE, WHISPER_MODEL
-    global MAX_CONCURRENT_CLAUDE, _claude_semaphore
+    global MAX_CONCURRENT_CLAUDE, _claude_semaphore, CLAUDE_BIN
     BOT_TOKEN = config["telegram_bot_token"]
     ALLOWED_USERS = set(config["allowed_users"])
     TIMEOUT = config["claude_timeout"]
@@ -169,6 +186,10 @@ def init(config: dict):
     MODEL = config.get("model", "claude-sonnet-4-6")
     WEB_PORT = config.get("web_port", 17488)
     WHISPER_MODEL = config.get("whisper_model", "base")
+    _apply_path_prefix(config.get("path_prefix", ""))
+    # Re-resolve CLAUDE_BIN AFTER applying path_prefix so an install discoverable
+    # only via the new prefix is actually used by the print backend.
+    CLAUDE_BIN = shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
     if config.get("default_cwd"):
         DEFAULT_CWD = os.path.expanduser(config["default_cwd"])
     GLOBAL_PREAMBLE = _read_global_preamble()
