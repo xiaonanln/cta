@@ -1114,8 +1114,10 @@ def _web_set_config():
     if "global_preamble" in data:
         text = data["global_preamble"].strip()
         if text:
-            with open(agent.GLOBAL_PREAMBLE_PATH, "w") as f:
+            tmp = agent.GLOBAL_PREAMBLE_PATH + ".tmp"
+            with open(tmp, "w") as f:
                 f.write(text)
+            os.replace(tmp, agent.GLOBAL_PREAMBLE_PATH)
         else:
             try:
                 os.unlink(agent.GLOBAL_PREAMBLE_PATH)
@@ -1129,6 +1131,10 @@ def _web_set_config():
             f.write("\n")
         os.replace(tmp, agent.CONFIG_PATH)
     except Exception as e:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
         return {"error": str(e)}, 500
     tui_log(f"[cyan]⚙ config updated via web[/]")
     return {"ok": True}
@@ -1144,8 +1150,10 @@ def _web_set_preamble(uid, chat_id):
     text = (request.get_json(silent=True) or {}).get("preamble", "").strip()
     path = agent._preamble_path(uid, chat_id)
     if text:
-        with open(path, "w") as f:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
             f.write(text)
+        os.replace(tmp, path)
         tui_log(f"[cyan]📝 preamble updated for {uid}:{chat_id}[/]")
     else:
         try:
