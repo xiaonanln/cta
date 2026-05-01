@@ -87,6 +87,8 @@ class JsonStreamBackend(ClaudeBackend):
                     if self._stream is stream:
                         self._stream = None
                 self._stop_typing()
+                # Consume the cancel flag so the next prompt isn't silently dropped.
+                agent._cancelled_keys.discard(key)
         finally:
             sem.release()
             agent.claude_active_keys.discard(key)

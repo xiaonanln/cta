@@ -80,7 +80,7 @@ class ClaudeJsonStream:
         self.proc = subprocess.Popen(
             self._build_cmd(),
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,  # stderr goes to --debug-file; piping risks deadlock
             stdin=subprocess.DEVNULL,
             text=True,
             cwd=self.cwd,
