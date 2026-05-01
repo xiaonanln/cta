@@ -2679,6 +2679,286 @@ class TestPrintBackendSend(unittest.TestCase):
         self.assertFalse(b.cancel())
 
 
+class TestJsonStreamBackendSend(unittest.TestCase):
+    """Unit tests for JsonStreamBackend using a mocked ClaudeJsonStream.
+
+    The mock is injected at backends.json_stream._cjs_mod.ClaudeJsonStream —
+    the same seam pattern as PtyBackend tests mock ClaudeCode.
+    """
+
+    def setUp(self):
+        self.bot = setup_fake_bot()
+        agent.ALLOWED_USERS.clear()
+        agent.ALLOWED_USERS.add(1)
+        agent._backends.clear()
+        agent.user_sessions.clear()
+        agent.user_cwd.clear()
+        agent.user_model.clear()
+        agent.user_timeout.clear()
+        agent._cancelled_keys.clear()
+        agent.claude_active_keys.clear()
+        agent._current_procs.clear()
+        self._key = (1, 2)
+
+    def tearDown(self):
+        agent._backends.clear()
+        agent.user_sessions.clear()
+        agent.user_cwd.clear()
+        agent.user_model.clear()
+        agent.user_timeout.clear()
+        agent._cancelled_keys.clear()
+        agent.claude_active_keys.clear()
+        agent._current_procs.clear()
+
+    # ── helpers ──────────────────────────────────────────────────────────
+
+    def _make_backend(self, uid=1, chat_id=2):
+        b = backends.JsonStreamBackend(uid, chat_id)
+        b.on_session = MagicMock()
+        return b
+
+    def _make_mock_stream(self, events):
+        """Mock ClaudeJsonStream instance that yields the given events."""
+        m = MagicMock()
+        m.proc = MagicMock()
+        m.proc.poll.return_value = None
+        m.iter_events.return_value = iter(events)
+        return m
+
+    def _delta(self, text):
+        return {
+            'type': 'stream_event',
+            'event': {
+                'type': 'content_block_delta',
+                'delta': {'type': 'text_delta', 'text': text},
+            },
+        }
+
+    def _result(self, session_id='sid-1', is_error=False, result='', num_turns=1):
+        return {
+            'type': 'result',
+            'session_id': session_id,
+            'is_error': is_error,
+            'subtype': 'error_during_execution' if is_error else 'success',
+            'result': result,
+            'num_turns': num_turns,
+        }
+
+    # ── basic send / output ───────────────────────────────────────────────
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_text_deltas_forwarded_via_on_output(self, mock_cls):
+        mock_cls.return_value = self._make_mock_stream([
+            self._delta('hello '),
+            self._delta('world'),
+            self._result(session_id='sid-1'),
+        ])
+        b = self._make_backend()
+        received = []
+        b.on_output = received.append
+        b.send('hi')
+        self.assertEqual(len(received), 1)
+        self.assertIn('hello ', received[0])
+        self.assertIn('world', received[0])
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_session_id_saved_from_result_event(self, mock_cls):
+        mock_cls.return_value = self._make_mock_stream([
+            self._delta('reply'),
+            self._result(session_id='new-sid-123'),
+        ])
+        b = self._make_backend()
+        b.on_output = lambda _: None
+        b.send('hi')
+        b.on_session.assert_called_once_with('new-sid-123')
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_on_output_none_does_not_crash(self, mock_cls):
+        mock_cls.return_value = self._make_mock_stream([
+            self._delta('text'),
+            self._result(),
+        ])
+        b = self._make_backend()
+        b.on_output = None
+        b.send('hi')  # must not raise
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_error_result_forwarded_via_on_output(self, mock_cls):
+        mock_cls.return_value = self._make_mock_stream([
+            self._result(is_error=True, result='some API error', num_turns=1),
+        ])
+        b = self._make_backend()
+        received = []
+        b.on_output = received.append
+        b.send('hi')
+        self.assertEqual(len(received), 1)
+        self.assertIn('some API error', received[0])
+
+    # ── constructor args ──────────────────────────────────────────────────
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_session_id_passed_to_stream(self, mock_cls):
+        agent.user_sessions[self._key] = 'existing-sid'
+        mock_cls.return_value = self._make_mock_stream([self._result()])
+        b = self._make_backend()
+        b.on_output = lambda _: None
+        b.send('hi')
+        self.assertEqual(mock_cls.call_args[1].get('session_id'), 'existing-sid')
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_no_session_id_passed_when_none_stored(self, mock_cls):
+        mock_cls.return_value = self._make_mock_stream([self._result()])
+        b = self._make_backend()
+        b.on_output = lambda _: None
+        b.send('hi')
+        self.assertIsNone(mock_cls.call_args[1].get('session_id'))
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_cta_env_vars_passed(self, mock_cls):
+        mock_cls.return_value = self._make_mock_stream([self._result()])
+        b = self._make_backend(uid=123, chat_id=456)
+        b.on_output = lambda _: None
+        b.send('hi')
+        extra_env = mock_cls.call_args[1].get('extra_env', {})
+        self.assertEqual(extra_env.get('CTA_UID'), '123')
+        self.assertEqual(extra_env.get('CTA_CHAT_ID'), '456')
+
+    # ── invalid session retry ─────────────────────────────────────────────
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_retries_without_session_on_invalid_session_signal(self, mock_cls):
+        """is_error=True + num_turns=0 + empty result → stale session, retry fresh."""
+        agent.user_sessions[self._key] = 'stale-sid'
+        invalid_stream = self._make_mock_stream([
+            self._result(is_error=True, result='', num_turns=0),
+        ])
+        fresh_stream = self._make_mock_stream([
+            self._delta('fresh reply'),
+            self._result(session_id='new-sid'),
+        ])
+        mock_cls.side_effect = [invalid_stream, fresh_stream]
+        b = self._make_backend()
+        received = []
+        b.on_output = received.append
+        with patch('agent.save_sessions'):
+            b.send('hi')
+        self.assertEqual(mock_cls.call_count, 2)
+        self.assertEqual(mock_cls.call_args_list[0][1].get('session_id'), 'stale-sid')
+        self.assertIsNone(mock_cls.call_args_list[1][1].get('session_id'))
+        self.assertNotIn(self._key, agent.user_sessions)
+        self.assertTrue(any('fresh reply' in r for r in received))
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_does_not_retry_when_no_session_was_set(self, mock_cls):
+        """Invalid-session signal without a prior session_id must not retry."""
+        mock_cls.return_value = self._make_mock_stream([
+            self._result(is_error=True, result='', num_turns=0),
+        ])
+        b = self._make_backend()
+        b.on_output = lambda _: None
+        b.send('hi')
+        self.assertEqual(mock_cls.call_count, 1)
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_non_session_error_not_retried(self, mock_cls):
+        """A real error result (non-empty result text, num_turns>0) must not retry."""
+        agent.user_sessions[self._key] = 'sess'
+        mock_cls.return_value = self._make_mock_stream([
+            self._result(is_error=True, result='rate limit exceeded', num_turns=1),
+        ])
+        b = self._make_backend()
+        received = []
+        b.on_output = received.append
+        b.send('hi')
+        self.assertEqual(mock_cls.call_count, 1)
+        self.assertIn('rate limit exceeded', received[0])
+
+    # ── cancel / flag handling ────────────────────────────────────────────
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_bails_early_if_cancelled_before_start(self, mock_cls):
+        """Key in _cancelled_keys at acquire time → return without creating stream."""
+        agent._cancelled_keys.add(self._key)
+        b = self._make_backend()
+        received = []
+        b.on_output = received.append
+        b.send('hi')
+        mock_cls.assert_not_called()
+        self.assertEqual(received, [])
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_cancel_flag_consumed_after_bail(self, mock_cls):
+        """Early-bail must clear the flag so the next prompt is not also dropped."""
+        agent._cancelled_keys.add(self._key)
+        self._make_backend().send('hi')
+        self.assertNotIn(self._key, agent._cancelled_keys)
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_cancel_flag_consumed_after_normal_send(self, mock_cls):
+        """Flag added mid-stream must be cleared after send() returns."""
+        key = self._key
+
+        def events_with_midstream_cancel():
+            yield self._delta('partial')
+            agent._cancelled_keys.add(key)
+            yield self._result()
+
+        m = MagicMock()
+        m.proc = MagicMock()
+        m.iter_events.return_value = events_with_midstream_cancel()
+        mock_cls.return_value = m
+        b = self._make_backend()
+        received = []
+        b.on_output = received.append
+        b.send('hi')
+        # Output suppressed by the cancel
+        self.assertEqual(received, [])
+        # Flag cleared so next prompt is not dropped
+        self.assertNotIn(key, agent._cancelled_keys)
+
+    # ── typing indicator ──────────────────────────────────────────────────
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_on_typing_called_during_send(self, mock_cls):
+        mock_cls.return_value = self._make_mock_stream([self._result()])
+        b = self._make_backend()
+        b.on_output = lambda _: None
+        typing_calls = []
+        b.on_typing = lambda: typing_calls.append(1)
+        b.send('hi')
+        time.sleep(0.05)
+        self.assertGreater(len(typing_calls), 0)
+
+    # ── error handling ────────────────────────────────────────────────────
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_file_not_found_reported_via_on_output(self, mock_cls):
+        m = MagicMock()
+        m.start.side_effect = FileNotFoundError
+        mock_cls.return_value = m
+        b = self._make_backend()
+        received = []
+        b.on_output = received.append
+        b.send('hi')
+        self.assertEqual(len(received), 1)
+        self.assertIn('not found', received[0])
+
+    # ── cancel() method ───────────────────────────────────────────────────
+
+    def test_cancel_returns_false_when_idle(self):
+        b = self._make_backend()
+        self.assertFalse(b.cancel())
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_cancel_marks_key_when_active_but_no_stream_yet(self, mock_cls):
+        """If send() is blocked at the semaphore, cancel() has no stream yet but
+        must still mark the key so send() bails when a slot opens."""
+        b = self._make_backend()
+        agent.claude_active_keys.add(self._key)
+        self.assertTrue(b.cancel())
+        self.assertIn(self._key, agent._cancelled_keys)
+
+
 class TestClaudeCodeBuildCmd(unittest.TestCase):
     """ClaudeCode._build_cmd shapes the `claude` argv. Verifying it directly
     avoids spinning up a real PTY just to inspect the command line."""
