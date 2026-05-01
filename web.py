@@ -7,6 +7,7 @@ import logging
 import os
 import queue
 import re
+import tempfile
 import threading
 from collections import deque
 from datetime import datetime
@@ -1114,19 +1115,23 @@ def _web_set_config():
     if "global_preamble" in data:
         text = data["global_preamble"].strip()
         if text:
-            tmp = agent.GLOBAL_PREAMBLE_PATH + ".tmp"
-            with open(tmp, "w") as f:
-                f.write(text)
-            os.replace(tmp, agent.GLOBAL_PREAMBLE_PATH)
+            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(agent.GLOBAL_PREAMBLE_PATH))
+            try:
+                with os.fdopen(fd, "w") as f:
+                    f.write(text)
+                os.replace(tmp, agent.GLOBAL_PREAMBLE_PATH)
+            except:
+                os.unlink(tmp)
+                raise
         else:
             try:
                 os.unlink(agent.GLOBAL_PREAMBLE_PATH)
             except FileNotFoundError:
                 pass
         agent.GLOBAL_PREAMBLE = text
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(agent.CONFIG_PATH))
     try:
-        tmp = agent.CONFIG_PATH + ".tmp"
-        with open(tmp, "w") as f:
+        with os.fdopen(fd, "w") as f:
             json.dump(cfg, f, indent=2)
             f.write("\n")
         os.replace(tmp, agent.CONFIG_PATH)
@@ -1150,10 +1155,14 @@ def _web_set_preamble(uid, chat_id):
     text = (request.get_json(silent=True) or {}).get("preamble", "").strip()
     path = agent._preamble_path(uid, chat_id)
     if text:
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            f.write(text)
-        os.replace(tmp, path)
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(text)
+            os.replace(tmp, path)
+        except:
+            os.unlink(tmp)
+            raise
         tui_log(f"[cyan]📝 preamble updated for {uid}:{chat_id}[/]")
     else:
         try:
