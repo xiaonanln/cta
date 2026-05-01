@@ -2749,6 +2749,68 @@ class TestJsonStreamBackendSend(unittest.TestCase):
     # ── basic send / output ───────────────────────────────────────────────
 
     @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_deltas_joined_without_newlines(self, mock_cls):
+        """Consecutive deltas must be concatenated with '' not '\\n'."""
+        mock_cls.return_value = self._make_mock_stream([
+            self._delta('hello '),
+            self._delta('world'),
+            self._result(),
+        ])
+        b = self._make_backend()
+        received = []
+        b.on_output = received.append
+        b.send('hi')
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0], 'hello world')
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_gap_between_delta_batches_produces_two_on_output_calls(self, mock_cls):
+        """A gap >= _COALESCE_SECONDS between delta bursts flushes the first burst
+        before accumulating the second, producing two separate on_output calls."""
+        import backends.json_stream as js_mod
+
+        # Start at a non-zero base so last_text_time is truthy after the first delta.
+        # (0.0 is the sentinel meaning "no text received yet".)
+        base = 1.0
+        t = [base]
+
+        def fake_time():
+            return t[0]
+
+        delta_events = [
+            self._delta('first '),
+            self._delta('batch'),
+            self._delta('second'),
+            self._result(),
+        ]
+
+        def patched_iter():
+            for i, ev in enumerate(delta_events):
+                if i == 2:
+                    # Simulate a pause longer than the coalesce window before the third delta.
+                    t[0] = base + js_mod._COALESCE_SECONDS + 0.5
+                yield ev
+
+        m = MagicMock()
+        m.proc = MagicMock()
+        m.proc.poll.return_value = None
+        m.iter_events.side_effect = patched_iter
+
+        mock_cls.return_value = m
+        b = self._make_backend()
+        received = []
+        b.on_output = received.append
+
+        with patch('backends.json_stream.time') as mock_time_mod:
+            mock_time_mod.time.side_effect = fake_time
+            b.send('hi')
+
+        self.assertEqual(len(received), 2)
+        self.assertIn('first', received[0])
+        self.assertIn('batch', received[0])
+        self.assertIn('second', received[1])
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
     def test_text_deltas_forwarded_via_on_output(self, mock_cls):
         mock_cls.return_value = self._make_mock_stream([
             self._delta('hello '),
@@ -2959,6 +3021,74 @@ class TestJsonStreamBackendSend(unittest.TestCase):
         agent.claude_active_keys.add(self._key)
         self.assertTrue(b.cancel())
         self.assertIn(self._key, agent._cancelled_keys)
+
+
+class TestMakeOutputHandler(unittest.TestCase):
+    """_make_output_handler wires up different Telegram send paths depending on
+    whether the backend is in print, pty, or stream mode."""
+
+    def setUp(self):
+        self.bot = setup_fake_bot()
+        agent.ALLOWED_USERS.clear()
+        agent.chat_history.clear()
+
+    def tearDown(self):
+        agent.chat_history.clear()
+
+    def _call_handler(self, mode, text='hello world'):
+        msg = make_fake_message('prompt', user_id=1)
+        handler = agent._make_output_handler(1, 1, msg, 'tester', mode)
+        with patch('agent.save_sessions'), patch('agent.tui_log'), patch('agent._chat_push'):
+            handler(text)
+
+    def test_print_mode_uses_send_markdown(self):
+        """print mode must route through _send_markdown (reply_to with MarkdownV2)."""
+        msg = make_fake_message('prompt', user_id=1)
+        handler = agent._make_output_handler(1, 1, msg, 'tester', 'print')
+        with patch('agent.save_sessions'), patch('agent.tui_log'), patch('agent._chat_push'):
+            handler('hello')
+        self.bot.reply_to.assert_called_once()
+        _, kwargs = self.bot.reply_to.call_args
+        self.assertEqual(kwargs.get('parse_mode'), 'MarkdownV2')
+
+    def test_pty_mode_sends_plain_text(self):
+        """pty mode must call send_message without parse_mode (raw terminal output)."""
+        self._call_handler('pty', 'raw output')
+        self.bot.send_message.assert_called_once()
+        _, kwargs = self.bot.send_message.call_args
+        self.assertNotIn('parse_mode', kwargs)
+
+    def test_stream_mode_applies_markdownv2(self):
+        """stream mode must call send_message with parse_mode=MarkdownV2 and markdownified text."""
+        with patch('agent.telegramify_markdown.markdownify', return_value='converted') as mock_m:
+            self._call_handler('stream', 'some **markdown**')
+        self.bot.send_message.assert_called_once()
+        args, kwargs = self.bot.send_message.call_args
+        self.assertEqual(args[1], 'converted')
+        self.assertEqual(kwargs.get('parse_mode'), 'MarkdownV2')
+        mock_m.assert_called_once_with('some **markdown**')
+
+    def test_stream_mode_falls_back_to_plain_text_when_markdownify_fails(self):
+        """stream mode falls back to plain text when MarkdownV2 send raises."""
+        self.bot.send_message.side_effect = [Exception('parse error'), None]
+        with patch('agent.telegramify_markdown.markdownify', return_value='bad md'), \
+             patch('agent.save_sessions'), patch('agent.tui_log'), patch('agent._chat_push'):
+            msg = make_fake_message('prompt', user_id=1)
+            handler = agent._make_output_handler(1, 1, msg, 'tester', 'stream')
+            handler('some text')
+        self.assertEqual(self.bot.send_message.call_count, 2)
+        # Second call is the plain-text fallback (no parse_mode)
+        _, kwargs = self.bot.send_message.call_args_list[1]
+        self.assertNotIn('parse_mode', kwargs)
+
+    def test_empty_text_is_ignored(self):
+        """on_output with empty string must not call send_message or reply_to."""
+        msg = make_fake_message('prompt', user_id=1)
+        handler = agent._make_output_handler(1, 1, msg, 'tester', 'stream')
+        with patch('agent.save_sessions'), patch('agent.tui_log'), patch('agent._chat_push'):
+            handler('')
+        self.bot.send_message.assert_not_called()
+        self.bot.reply_to.assert_not_called()
 
 
 class TestClaudeCodeBuildCmd(unittest.TestCase):
