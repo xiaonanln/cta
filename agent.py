@@ -244,8 +244,22 @@ def load_sessions():
     tui_log(f"[dim]Loaded {len(data)} agent(s) from {AGENTS_PATH}[/]")
 
 
+def atomic_write(path: str, text: str) -> None:
+    """Write *text* to *path* atomically via a unique temp file in the same directory."""
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def save_sessions():
-    tmp = AGENTS_PATH + ".tmp"
     bak = AGENTS_PATH + ".bak"
     try:
         all_keys = (set(user_sessions) | set(user_cwd) | set(user_model)
@@ -268,15 +282,13 @@ def save_sessions():
             if mode != "print":
                 entry["backend_mode"] = mode
             data[f"{uid}:{chat_id}"] = entry
-        with open(tmp, "w") as f:
-            json.dump(data, f, indent=2)
         # Rotate backup before replacing the live file.
         if os.path.exists(AGENTS_PATH):
             try:
                 shutil.copy2(AGENTS_PATH, bak)
             except OSError:
                 pass
-        os.replace(tmp, AGENTS_PATH)
+        atomic_write(AGENTS_PATH, json.dumps(data, indent=2))
     except Exception as e:
         tui_log(f"[red]Warning: could not save sessions: {escape(str(e))}[/]")
 
@@ -377,11 +389,8 @@ def _crons_parse_error(uid: int, chat_id: int):
 
 def _save_cron_jobs(uid: int, chat_id: int, jobs: list):
     path = _cron_path(uid, chat_id)
-    tmp = path + ".tmp"
     try:
-        with open(tmp, "w") as f:
-            json.dump(jobs, f, indent=2)
-        os.replace(tmp, path)
+        atomic_write(path, json.dumps(jobs, indent=2))
     except Exception as e:
         tui_log(f"[red]Warning: could not save crons for {uid}:{chat_id}: {escape(str(e))}[/]")
 

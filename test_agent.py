@@ -3,6 +3,7 @@
 import json
 import os
 import queue
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -186,6 +187,40 @@ class TestConfig(unittest.TestCase):
     def test_sessions_path_is_in_cta_home(self):
         self.assertTrue(agent.AGENTS_PATH.startswith(agent.CTA_HOME))
         self.assertTrue(agent.AGENTS_PATH.endswith("agents.json"))
+
+
+# ── atomic_write ─────────────────────────────────────────────────────────────
+
+class TestAtomicWrite(unittest.TestCase):
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.path = os.path.join(self.tmpdir, "out.txt")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_writes_content(self):
+        agent.atomic_write(self.path, "hello")
+        with open(self.path) as f:
+            self.assertEqual(f.read(), "hello")
+
+    def test_no_tmp_leftover_on_success(self):
+        agent.atomic_write(self.path, "x")
+        leftovers = [n for n in os.listdir(self.tmpdir) if n != "out.txt"]
+        self.assertEqual(leftovers, [])
+
+    def test_raises_and_cleans_up_on_write_error(self):
+        bad_path = os.path.join(self.tmpdir, "subdir_missing", "out.txt")
+        with self.assertRaises(Exception):
+            agent.atomic_write(bad_path, "x")
+        self.assertEqual(os.listdir(self.tmpdir), [])
+
+    def test_overwrites_existing(self):
+        agent.atomic_write(self.path, "first")
+        agent.atomic_write(self.path, "second")
+        with open(self.path) as f:
+            self.assertEqual(f.read(), "second")
 
 
 # ── Session persistence ───────────────────────────────────────────────────────
