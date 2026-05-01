@@ -270,11 +270,11 @@ class TestSessionPersistence(unittest.TestCase):
         agent.load_sessions()  # should not raise
         self.assertEqual(len(agent.user_sessions), 0)
 
-    def test_load_corrupt_file_does_not_crash(self):
+    def test_load_corrupt_file_exits(self):
         with open(self.tmp.name, "w") as f:
             f.write("not valid json{{{")
-        agent.load_sessions()  # should not raise
-        self.assertEqual(len(agent.user_sessions), 0)
+        with self.assertRaises(SystemExit):
+            agent.load_sessions()
 
     def test_save_is_atomic(self):
         """save_sessions must not leave a .tmp file behind."""
@@ -320,17 +320,16 @@ class TestSessionPersistence(unittest.TestCase):
         agent.load_sessions()
         self.assertEqual(agent.last_active.get((123, 456)), 1735000000.0)
 
-    def test_load_skips_malformed_entry_but_loads_rest(self):
-        """A bad entry in the middle of agents.json must not abort loading the remaining entries."""
+    def test_load_malformed_entry_exits(self):
+        """A bad entry in agents.json must cause CTA to exit rather than silently skip."""
         with open(self.tmp.name, "w") as f:
             json.dump({
                 "99:99": {"session": "good-before"},
                 "not-an-int:nope": {"session": "bad"},
                 "88:88": {"session": "good-after"},
             }, f)
-        agent.load_sessions()
-        self.assertEqual(agent.user_sessions.get((99, 99)), "good-before")
-        self.assertEqual(agent.user_sessions.get((88, 88)), "good-after")
+        with self.assertRaises(SystemExit):
+            agent.load_sessions()
 
     def test_load_does_not_overwrite_existing_memory(self):
         """load_sessions (and _load_entry) must not clobber values already in memory."""

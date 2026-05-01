@@ -229,18 +229,19 @@ def load_sessions():
         with open(AGENTS_PATH) as f:
             data = json.load(f)
     except Exception as e:
-        tui_log(f"[red]Warning: could not load sessions: {escape(str(e))}[/]")
-        return
-    loaded = 0
+        print(f"Error: could not parse {AGENTS_PATH}: {e}")
+        print(f"Fix: delete or repair {AGENTS_PATH} (a backup may exist at {AGENTS_PATH}.bak) and restart CTA.")
+        sys.exit(1)
     for key_str, entry in data.items():
         try:
             uid_str, chat_str = key_str.split(":", 1)
             key = (int(uid_str), int(chat_str))
             _load_entry(key, entry)
-            loaded += 1
         except Exception as e:
-            tui_log(f"[red]Warning: skipped malformed entry {key_str!r}: {escape(str(e))}[/]")
-    tui_log(f"[dim]Loaded {loaded}/{len(data)} agent(s) from {AGENTS_PATH}[/]")
+            print(f"Error: malformed entry {key_str!r} in {AGENTS_PATH}: {e}")
+            print(f"Fix: delete or repair that entry in {AGENTS_PATH} and restart CTA.")
+            sys.exit(1)
+    tui_log(f"[dim]Loaded {len(data)} agent(s) from {AGENTS_PATH}[/]")
 
 
 def save_sessions():
