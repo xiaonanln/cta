@@ -129,10 +129,46 @@ def scenario_cancel():
     print('[cancel] ✅ PASS')
 
 
+def scenario_invalid_session():
+    """Pass a bogus session_id; verify the result event has the signature that
+    JsonStreamBackend uses to detect a stale session and trigger a retry:
+    is_error=True, num_turns=0, empty result string.
+
+    Note: claude writes "No conversation found with session ID" to stderr, which
+    we devnull. The result event carries no human-readable message, so detection
+    is purely structural.
+    """
+    bogus_sid = '00000000-0000-0000-0000-000000000000'
+    prompt = 'what is 2+2? reply with just the digit.'
+    print(f'\n[invalid_session] session_id={bogus_sid!r}')
+    print(f'[invalid_session] prompt={prompt!r}')
+
+    cjs = ClaudeJsonStream(prompt=prompt, cwd=CWD, model=MODEL, session_id=bogus_sid)
+    cjs.start()
+
+    result_event = None
+    for event in cjs.iter_events():
+        if event.get('type') == 'result':
+            result_event = event
+            print(f'  [result] is_error={event.get("is_error")} '
+                  f'num_turns={event.get("num_turns")} '
+                  f'subtype={event.get("subtype")!r} '
+                  f'result={event.get("result","")[:80]!r}')
+
+    assert result_event is not None, 'FAIL: no result event received'
+    assert result_event.get('is_error'), 'FAIL: expected is_error=True'
+    assert result_event.get('num_turns', -1) == 0, \
+        f'FAIL: expected num_turns=0, got {result_event.get("num_turns")}'
+    assert not (result_event.get('result') or '').strip(), \
+        f'FAIL: expected empty result string, got {result_event.get("result")!r}'
+    print('[invalid_session] ✅ PASS — result matches retry-trigger signature (is_error=True, num_turns=0, result="")')
+
+
 SCENARIOS = {
     'basic': lambda: scenario_basic(),
     'resume': lambda: scenario_resume(scenario_basic()),
     'cancel': scenario_cancel,
+    'invalid_session': scenario_invalid_session,
     'all': None,
 }
 
@@ -143,6 +179,7 @@ def main():
         sid = scenario_basic()
         scenario_resume(sid)
         scenario_cancel()
+        scenario_invalid_session()
         print('\n✅ All scenarios passed.')
         return
     if name not in SCENARIOS:

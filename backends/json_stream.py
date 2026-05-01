@@ -20,6 +20,7 @@ from .base import ClaudeBackend
 
 _COALESCE_SECONDS = 3.0
 _TYPING_PULSE_SECONDS = 3.0
+_INVALID_SESSION_MSG = 'No conversation found with session ID'
 
 
 class JsonStreamBackend(ClaudeBackend):
@@ -46,16 +47,6 @@ class JsonStreamBackend(ClaudeBackend):
             f'{self.uid}-{self.chat_id}-{int(_time.time())}.log',
         )
 
-        stream = _cjs_mod.ClaudeJsonStream(
-            prompt=prompt,
-            cwd=cwd,
-            model=model,
-            session_id=session_id,
-            claude_bin=agent.CLAUDE_BIN,
-            debug_log=debug_path,
-            extra_env={'CTA_UID': str(self.uid), 'CTA_CHAT_ID': str(self.chat_id)},
-        )
-
         agent.claude_active_keys.add(key)
         sem = agent._claude_semaphore
         sem.acquire()
@@ -63,33 +54,58 @@ class JsonStreamBackend(ClaudeBackend):
             if key in agent._cancelled_keys:
                 agent._cancelled_keys.discard(key)
                 return
-            print(
-                f'[STREAM] uid={self.uid} chat={self.chat_id} '
-                f'model={model} session={"resume" if session_id else "new"} '
-                f'debug={debug_path}',
-                flush=True,
-            )
-            try:
-                stream.start()
-            except FileNotFoundError:
-                if self.on_output:
-                    self.on_output('(claude CLI not found — install @anthropic-ai/claude-code)')
-                return
-            with self._stream_lock:
-                self._stream = stream
-            agent._current_procs[key] = stream.proc
-            self._start_typing()
-            try:
-                self._run_reader(stream, timeout or agent.TIMEOUT, key)
-            finally:
-                agent._current_procs.pop(key, None)
+            # Retry once if claude rejects the session_id as stale.
+            for attempt in range(2):
+                stream = _cjs_mod.ClaudeJsonStream(
+                    prompt=prompt,
+                    cwd=cwd,
+                    model=model,
+                    session_id=session_id,
+                    claude_bin=agent.CLAUDE_BIN,
+                    debug_log=debug_path,
+                    extra_env={'CTA_UID': str(self.uid), 'CTA_CHAT_ID': str(self.chat_id)},
+                )
+                print(
+                    f'[STREAM] uid={self.uid} chat={self.chat_id} '
+                    f'model={model} session={"resume" if session_id else "new"} '
+                    f'debug={debug_path}',
+                    flush=True,
+                )
+                try:
+                    stream.start()
+                except FileNotFoundError:
+                    if self.on_output:
+                        self.on_output('(claude CLI not found — install @anthropic-ai/claude-code)')
+                    return
                 with self._stream_lock:
-                    if self._stream is stream:
-                        self._stream = None
-                self._stop_typing()
-                # Consume the cancel flag so the next prompt isn't silently dropped.
-                agent._cancelled_keys.discard(key)
+                    self._stream = stream
+                agent._current_procs[key] = stream.proc
+                if attempt == 0:
+                    self._start_typing()
+                try:
+                    invalid_session = self._run_reader(
+                        stream, timeout or agent.TIMEOUT, key,
+                        had_session=bool(session_id),
+                    )
+                finally:
+                    agent._current_procs.pop(key, None)
+                    with self._stream_lock:
+                        if self._stream is stream:
+                            self._stream = None
+                if not invalid_session or not session_id:
+                    break
+                # Stale session — clear it and retry without --resume.
+                print(
+                    f'[STREAM] invalid session {session_id} for {key}, retrying without resume',
+                    flush=True,
+                )
+                agent.user_sessions.pop(key, None)
+                agent.save_sessions()
+                session_id = None
         finally:
+            self._stop_typing()
+            # Consume the cancel flag so the next prompt isn't silently dropped.
+            agent._cancelled_keys.discard(key)
             sem.release()
             agent.claude_active_keys.discard(key)
 
@@ -98,7 +114,15 @@ class JsonStreamBackend(ClaudeBackend):
         stream: '_cjs_mod.ClaudeJsonStream',
         timeout: int,
         key: tuple,
-    ) -> None:
+        had_session: bool = False,
+    ) -> bool:
+        """Read events until EOF or result. Returns True if the session ID was rejected.
+
+        Invalid-session detection: claude prints the error to stderr (devnull'd) and
+        emits a result event with is_error=True, num_turns=0, and an empty result
+        string. We treat this combination as a stale session only when had_session=True
+        to avoid retrying on unrelated startup failures.
+        """
         import agent
 
         deadline = time.time() + timeout
@@ -123,7 +147,7 @@ class JsonStreamBackend(ClaudeBackend):
                 stream.stop()
                 if self.on_output:
                     self.on_output('(Claude timed out)')
-                return
+                return False
 
             etype = event.get('type')
             if etype == 'stream_event':
@@ -138,12 +162,17 @@ class JsonStreamBackend(ClaudeBackend):
                 if sid and self.on_session:
                     self.on_session(sid)
                 if event.get('is_error') or event.get('subtype') == 'error':
-                    msg = (event.get('result') or '').strip() or '(error)'
+                    msg = (event.get('result') or '').strip()
+                    # Invalid session: claude writes the error to stderr (devnull'd)
+                    # and emits is_error=True with num_turns=0 and an empty result.
+                    if had_session and not msg and event.get('num_turns', -1) == 0:
+                        return True
                     if self.on_output:
-                        self.on_output(msg)
-                return
+                        self.on_output(msg or '(error)')
+                return False
 
         flush()
+        return False
 
     def _start_typing(self) -> None:
         if self.on_typing is None:
