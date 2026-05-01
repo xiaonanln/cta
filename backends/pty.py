@@ -14,7 +14,6 @@ import claude_code
 
 from .base import ClaudeBackend
 
-_TYPING_IDLE_SECONDS = 3.0   # stop typing after this many seconds without output
 _TYPING_PULSE_SECONDS = 3.0  # re-send typing action this often (Telegram expires after ~5s)
 _OUTPUT_COALESCE_SECONDS = 3.0  # buffer lines and flush after this many seconds of quiet (noise frames don't reset the timer)
 _now = time.time  # indirection so tests can patch the reader_loop clock without touching the real time module
@@ -26,7 +25,6 @@ class PtyBackend(ClaudeBackend):
         self._cc: claude_code.ClaudeCode | None = None
         self._reader: threading.Thread | None = None
         self._stop_event: threading.Event | None = None
-        self._last_activity: float = 0.0
         self._typing_stop: threading.Event | None = None
         self._typing_thread: threading.Thread | None = None
         self.start_config: Optional[Callable[[], tuple[str, str, Optional[str]]]] = None
@@ -135,9 +133,6 @@ class PtyBackend(ClaudeBackend):
             except Exception as e:
                 self._log(f"[red]pty reader read error {self.key}: {e}[/]")
                 break
-            # Sync activity from raw PTY bytes — covers noise/redraw-only frames
-            # where new_lines is empty but Claude is still actively generating.
-            self._last_activity = cc.last_pty_bytes
             if new_lines:
                 pending.extend(new_lines)
                 last_content_time = _now()
@@ -147,7 +142,6 @@ class PtyBackend(ClaudeBackend):
 
     def send(self, prompt: str) -> None:
         self._ensure_started()
-        self._last_activity = time.time()
         self._start_typing()
         self._cc.send_input(prompt)
 
@@ -175,8 +169,6 @@ class PtyBackend(ClaudeBackend):
 
         pulse()
         while not stop.wait(timeout=_TYPING_PULSE_SECONDS):
-            if time.time() - self._last_activity > _TYPING_IDLE_SECONDS:
-                break
             cc = self._cc
             if cc and cc.is_idle():
                 break

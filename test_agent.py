@@ -1189,31 +1189,27 @@ class TestBotHandlers(unittest.TestCase):
              patch("backends.pty._now", side_effect=lambda: next(time_seq)):
             b._reader_loop()
         self.assertEqual(sent, ["real content"])
-        # Noise was observed and bumped activity (typing indicator stays alive).
-        self.assertGreater(b._last_activity, 100.0)
 
-    def test_pty_backend_reader_updates_activity_for_noise_only_frames(self):
-        """When all output was filtered as noise (read_new_output returns []),
-        the reader must still bump _last_activity from cc.last_pty_bytes so the
-        typing indicator keeps pulsing during long thinking periods that emit
-        only spinner redraws."""
+    def test_pty_typing_loop_keeps_pulsing_during_silent_tool_call(self):
+        """Typing indicator must keep pulsing even when no PTY output arrives
+        for a long time (e.g. goverse running a silent tool call).  The loop
+        must only stop when is_idle() returns True or the stop event fires."""
+        b = backends.PtyBackend(123, 456)
         cc = MagicMock()
-        cc.proc.poll.return_value = None
-        stop_event = threading.Event()
-        ticks = iter([101.0, 102.0, 103.0])
-        def fake_read(timeout=0.5):
-            try:
-                cc.last_pty_bytes = next(ticks)
-            except StopIteration:
-                stop_event.set()
-            return []  # nothing emitted — everything filtered as noise
-        cc.read_new_output.side_effect = fake_read
-        b = backends.PtyBackend(123, 123)
+        # is_idle returns False for first two checks (tool running), then True.
+        idle_seq = iter([False, False, True])
+        cc.is_idle.side_effect = lambda: next(idle_seq)
         b._cc = cc
-        b._stop_event = stop_event
-        b.on_output = lambda _: None
-        b._reader_loop()
-        self.assertEqual(b._last_activity, 103.0)
+
+        pulses: list[float] = []
+        b.on_typing = lambda: pulses.append(time.time())
+
+        stop = threading.Event()
+        with patch("backends.pty._TYPING_PULSE_SECONDS", 0.02):
+            b._typing_loop(stop)
+
+        # Should have pulsed at least twice before is_idle() returned True.
+        self.assertGreaterEqual(len(pulses), 2)
 
     def test_pty_backend_reader_exits_when_proc_dies(self):
         """If cc.proc has exited (poll() != None), the reader must break out
