@@ -3,17 +3,18 @@
 One subprocess per send() call (like PrintBackend) but delivers text chunks
 in real-time via on_output (like PtyBackend). Simpler than PTY: no screen-
 scraping, no pyte, no noise filtering — just newline-delimited JSON events.
+
+ClaudeJsonStream is the testable seam: tests mock it the same way PtyBackend
+tests mock ClaudeCode.
 """
 
 from __future__ import annotations
 
-import json
-import os
-import signal
-import subprocess
 import threading
 import time
 from typing import Callable, Optional
+
+import claude_json_stream as _cjs_mod
 
 from .base import ClaudeBackend
 
@@ -24,8 +25,8 @@ _TYPING_PULSE_SECONDS = 3.0
 class JsonStreamBackend(ClaudeBackend):
     def __init__(self, uid: int, chat_id: int):
         super().__init__(uid, chat_id)
-        self._proc: Optional[subprocess.Popen] = None
-        self._proc_lock = threading.Lock()
+        self._stream: Optional[_cjs_mod.ClaudeJsonStream] = None
+        self._stream_lock = threading.Lock()
         self._typing_stop: Optional[threading.Event] = None
         # Called with the new session_id when the result event arrives.
         self.on_session: Optional[Callable[[str], None]] = None
@@ -39,25 +40,21 @@ class JsonStreamBackend(ClaudeBackend):
         timeout = agent.user_timeout.get(key, agent.TIMEOUT)
         session_id = agent.user_sessions.get(key)
 
+        import os, time as _time
         debug_path = os.path.join(
             agent.DEBUG_DIR,
-            f"{self.uid}-{self.chat_id}-{int(time.time())}.log",
+            f'{self.uid}-{self.chat_id}-{int(_time.time())}.log',
         )
-        cmd = [
-            agent.CLAUDE_BIN,
-            '--print', '--dangerously-skip-permissions',
-            '--output-format', 'stream-json',
-            '--include-partial-messages',
-            '--model', model,
-            '--debug-file', debug_path,
-            '-p', prompt,
-        ]
-        if session_id:
-            cmd += ['--resume', session_id]
 
-        env = os.environ.copy()
-        env['CTA_UID'] = str(self.uid)
-        env['CTA_CHAT_ID'] = str(self.chat_id)
+        stream = _cjs_mod.ClaudeJsonStream(
+            prompt=prompt,
+            cwd=cwd,
+            model=model,
+            session_id=session_id,
+            claude_bin=agent.CLAUDE_BIN,
+            debug_log=debug_path,
+            extra_env={'CTA_UID': str(self.uid), 'CTA_CHAT_ID': str(self.chat_id)},
+        )
 
         agent.claude_active_keys.add(key)
         sem = agent._claude_semaphore
@@ -67,49 +64,44 @@ class JsonStreamBackend(ClaudeBackend):
                 agent._cancelled_keys.discard(key)
                 return
             print(
-                f"[STREAM] uid={self.uid} chat={self.chat_id} "
-                f"model={model} session={'resume' if session_id else 'new'} "
-                f"debug={debug_path}",
+                f'[STREAM] uid={self.uid} chat={self.chat_id} '
+                f'model={model} session={"resume" if session_id else "new"} '
+                f'debug={debug_path}',
                 flush=True,
             )
             try:
-                proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    stdin=subprocess.DEVNULL,
-                    text=True,
-                    cwd=cwd,
-                    env=env,
-                    start_new_session=True,
-                )
+                stream.start()
             except FileNotFoundError:
                 if self.on_output:
-                    self.on_output("(claude CLI not found — install @anthropic-ai/claude-code)")
+                    self.on_output('(claude CLI not found — install @anthropic-ai/claude-code)')
                 return
-            with self._proc_lock:
-                self._proc = proc
-            agent._current_procs[key] = proc
+            with self._stream_lock:
+                self._stream = stream
+            agent._current_procs[key] = stream.proc
             self._start_typing()
             try:
-                self._run_reader(proc, timeout or agent.TIMEOUT, key)
+                self._run_reader(stream, timeout or agent.TIMEOUT, key)
             finally:
                 agent._current_procs.pop(key, None)
-                with self._proc_lock:
-                    if self._proc is proc:
-                        self._proc = None
+                with self._stream_lock:
+                    if self._stream is stream:
+                        self._stream = None
                 self._stop_typing()
         finally:
             sem.release()
             agent.claude_active_keys.discard(key)
 
-    def _run_reader(self, proc: subprocess.Popen, timeout: int, key: tuple) -> None:
+    def _run_reader(
+        self,
+        stream: '_cjs_mod.ClaudeJsonStream',
+        timeout: int,
+        key: tuple,
+    ) -> None:
         import agent
 
         deadline = time.time() + timeout
         pending: list[str] = []
         last_flush = time.time()
-        last_text: dict[str, str] = {}  # msg_id → cumulative text seen so far
 
         def flush() -> None:
             nonlocal pending, last_flush
@@ -124,25 +116,16 @@ class JsonStreamBackend(ClaudeBackend):
             if text and self.on_output:
                 self.on_output(text)
 
-        for raw in iter(proc.stdout.readline, ''):
+        for event in stream.iter_events():
             if time.time() > deadline:
-                proc.kill()
-                proc.communicate()
+                stream.stop()
                 if self.on_output:
                     self.on_output('(Claude timed out)')
                 return
 
-            line = raw.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
             etype = event.get('type')
-            if etype == 'assistant':
-                delta = self._extract_delta(event, last_text)
+            if etype == 'stream_event':
+                delta = _extract_text_delta(event)
                 if delta:
                     pending.append(delta)
                     if time.time() - last_flush >= _COALESCE_SECONDS:
@@ -158,29 +141,7 @@ class JsonStreamBackend(ClaudeBackend):
                         self.on_output(msg)
                 return
 
-        proc.wait(timeout=5)
         flush()
-
-    @staticmethod
-    def _extract_delta(event: dict, last_text: dict[str, str]) -> str:
-        """Return only the new text in this partial-message event.
-
-        With --include-partial-messages, each assistant event is a cumulative
-        snapshot of the message so far. We diff against last_text to get the
-        delta so we don't re-emit already-seen content.
-        """
-        msg = event.get('message') or {}
-        msg_id = msg.get('id', '')
-        full = ''.join(
-            block.get('text', '')
-            for block in (msg.get('content') or [])
-            if block.get('type') == 'text'
-        )
-        prev = last_text.get(msg_id, '')
-        delta = full[len(prev):]
-        if msg_id:
-            last_text[msg_id] = full
-        return delta
 
     def _start_typing(self) -> None:
         if self.on_typing is None:
@@ -216,33 +177,35 @@ class JsonStreamBackend(ClaudeBackend):
     def cancel(self) -> bool:
         import agent
 
-        with self._proc_lock:
-            proc = self._proc
-        if proc is None:
+        with self._stream_lock:
+            stream = self._stream
+        if stream is None:
             key = self.key
             if key in agent.claude_active_keys:
                 agent._cancelled_keys.add(key)
                 return True
             return False
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            try:
-                proc.kill()
-            except Exception:
-                return False
+            stream.stop()
+        except Exception:
+            return False
         agent._cancelled_keys.add(self.key)
         return True
 
     def stop(self) -> None:
         self._stop_typing()
-        with self._proc_lock:
-            proc = self._proc
-        if proc is not None:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+        with self._stream_lock:
+            stream = self._stream
+        if stream is not None:
+            stream.stop()
+
+
+def _extract_text_delta(event: dict) -> str:
+    """Extract new text from a stream_event content_block_delta event."""
+    inner = event.get('event') or {}
+    if inner.get('type') != 'content_block_delta':
+        return ''
+    delta = inner.get('delta') or {}
+    if delta.get('type') != 'text_delta':
+        return ''
+    return delta.get('text', '')
