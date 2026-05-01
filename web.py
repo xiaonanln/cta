@@ -1012,6 +1012,43 @@ def _web_status():
     return {"model": agent.MODEL, "cwd": agent.DEFAULT_CWD, "sessions": sessions}
 
 
+@app.route("/sessions/reload", methods=["POST"])
+def _web_sessions_reload():
+    """Re-read agents.json and merge any missing entries into live memory.
+
+    Entries that already exist in memory are not overwritten — this is a
+    safe, additive operation. Useful for restoring lost agent state without
+    restarting CTA.
+    """
+    try:
+        with open(agent.AGENTS_PATH) as f:
+            data = json.load(f)
+    except Exception as e:
+        return {"error": str(e)}, 500
+    added = []
+    for key_str, entry in data.items():
+        try:
+            uid_str, chat_str = key_str.split(":", 1)
+            key = (int(uid_str), int(chat_str))
+            before = {
+                "session": agent.user_sessions.get(key),
+                "cwd": agent.user_cwd.get(key),
+                "model": agent.user_model.get(key),
+            }
+            agent._load_entry(key, entry)
+            after = {
+                "session": agent.user_sessions.get(key),
+                "cwd": agent.user_cwd.get(key),
+                "model": agent.user_model.get(key),
+            }
+            if before != after:
+                added.append(key_str)
+        except Exception:
+            pass
+    agent.save_sessions()
+    return {"ok": True, "merged": added}
+
+
 @app.route("/config", methods=["GET"])
 def _web_get_config():
     try:

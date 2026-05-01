@@ -201,39 +201,51 @@ def init(config: dict):
     os.makedirs(DEBUG_DIR, exist_ok=True)
 
 
+def _load_entry(key, entry):
+    """Merge one agents.json entry into in-memory dicts (only fills missing keys)."""
+    if isinstance(entry, str):  # backward compat
+        user_sessions.setdefault(key, entry)
+        return
+    if entry.get("session"):
+        user_sessions.setdefault(key, entry["session"])
+    if entry.get("cwd"):
+        user_cwd.setdefault(key, entry["cwd"])
+    if entry.get("model"):
+        user_model.setdefault(key, entry["model"])
+    if entry.get("last_active"):
+        last_active.setdefault(key, entry["last_active"])
+    if entry.get("label"):
+        chat_labels.setdefault(key, entry["label"])
+    if entry.get("backend_mode") in ("stream", "pty"):
+        user_backend_mode.setdefault(key, entry["backend_mode"])
+    elif entry.get("pty_mode"):  # legacy
+        user_backend_mode.setdefault(key, "pty")
+
+
 def load_sessions():
     if not os.path.exists(AGENTS_PATH):
         return
     try:
         with open(AGENTS_PATH) as f:
             data = json.load(f)
-        for key_str, entry in data.items():
-            uid_str, chat_str = key_str.split(":", 1)
-            key = (int(uid_str), int(chat_str))
-            if isinstance(entry, str):  # backward compat
-                user_sessions[key] = entry
-            else:
-                if entry.get("session"):
-                    user_sessions[key] = entry["session"]
-                if entry.get("cwd"):
-                    user_cwd[key] = entry["cwd"]
-                if entry.get("model"):
-                    user_model[key] = entry["model"]
-                if entry.get("last_active"):
-                    last_active[key] = entry["last_active"]
-                if entry.get("label"):
-                    chat_labels[key] = entry["label"]
-                if entry.get("backend_mode") in ("stream", "pty"):
-                    user_backend_mode[key] = entry["backend_mode"]
-                elif entry.get("pty_mode"):  # legacy
-                    user_backend_mode[key] = "pty"
-        tui_log(f"[dim]Loaded {len(data)} agent(s) from {AGENTS_PATH}[/]")
     except Exception as e:
         tui_log(f"[red]Warning: could not load sessions: {escape(str(e))}[/]")
+        return
+    loaded = 0
+    for key_str, entry in data.items():
+        try:
+            uid_str, chat_str = key_str.split(":", 1)
+            key = (int(uid_str), int(chat_str))
+            _load_entry(key, entry)
+            loaded += 1
+        except Exception as e:
+            tui_log(f"[red]Warning: skipped malformed entry {key_str!r}: {escape(str(e))}[/]")
+    tui_log(f"[dim]Loaded {loaded}/{len(data)} agent(s) from {AGENTS_PATH}[/]")
 
 
 def save_sessions():
     tmp = AGENTS_PATH + ".tmp"
+    bak = AGENTS_PATH + ".bak"
     try:
         all_keys = (set(user_sessions) | set(user_cwd) | set(user_model)
                     | set(last_active) | set(chat_labels) | set(user_backend_mode))
@@ -257,6 +269,12 @@ def save_sessions():
             data[f"{uid}:{chat_id}"] = entry
         with open(tmp, "w") as f:
             json.dump(data, f, indent=2)
+        # Rotate backup before replacing the live file.
+        if os.path.exists(AGENTS_PATH):
+            try:
+                shutil.copy2(AGENTS_PATH, bak)
+            except OSError:
+                pass
         os.replace(tmp, AGENTS_PATH)
     except Exception as e:
         tui_log(f"[red]Warning: could not save sessions: {escape(str(e))}[/]")
