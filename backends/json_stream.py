@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Callable, Optional
+from typing import Optional
 
 import claude_json_stream as _cjs_mod
 
@@ -20,7 +20,6 @@ from .base import ClaudeBackend
 
 _COALESCE_SECONDS = 3.0
 _TYPING_PULSE_SECONDS = 3.0
-_INVALID_SESSION_MSG = 'No conversation found with session ID'
 
 
 class JsonStreamBackend(ClaudeBackend):
@@ -29,8 +28,6 @@ class JsonStreamBackend(ClaudeBackend):
         self._stream: Optional[_cjs_mod.ClaudeJsonStream] = None
         self._stream_lock = threading.Lock()
         self._typing_stop: Optional[threading.Event] = None
-        # Called with the new session_id when the result event arrives.
-        self.on_session: Optional[Callable[[str], None]] = None
 
     def send(self, prompt: str) -> None:
         import agent
@@ -94,13 +91,13 @@ class JsonStreamBackend(ClaudeBackend):
                             self._stream = None
                 if not invalid_session or not session_id:
                     break
-                # Stale session — clear it and retry without --resume.
+                # Stale session — notify agent to clear it, then retry without --resume.
                 print(
                     f'[STREAM] invalid session {session_id} for {key}, retrying without resume',
                     flush=True,
                 )
-                agent.user_sessions.pop(key, None)
-                agent.save_sessions()
+                if self.on_clear_session:
+                    self.on_clear_session()
                 session_id = None
         finally:
             self._stop_typing()
@@ -159,6 +156,9 @@ class JsonStreamBackend(ClaudeBackend):
                     pending.append(delta)
                     last_text_time = now
             elif etype == 'result':
+                footer = agent._append_usage_footer('', event)
+                if footer:
+                    pending.append(footer)
                 flush()
                 sid = event.get('session_id', '')
                 if sid and self.on_session:

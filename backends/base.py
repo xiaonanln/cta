@@ -11,8 +11,15 @@ class ClaudeBackend(ABC):
 
     Subclasses encapsulate one execution mode and stream output back via
     the ``on_output`` callback. ``send`` may block (synchronous modes like
-    print) or return immediately (async modes like PTY); callers must not
-    assume blocking semantics.
+    print/stream) or return immediately (async modes like PTY); callers must
+    not assume blocking semantics.
+
+    Callbacks (all optional, set by agent before calling send):
+      on_output(text)      — new text chunk ready to deliver
+      on_typing()          — pulse Telegram "typing" indicator
+      on_log(msg)          — log a message to the TUI
+      on_session(sid)      — new Claude session_id arrived; persist it
+      on_clear_session()   — stale session detected; clear the stored id
     """
 
     def __init__(self, uid: int, chat_id: int):
@@ -21,6 +28,8 @@ class ClaudeBackend(ABC):
         self.on_output: Optional[Callable[[str], None]] = None
         self.on_typing: Optional[Callable[[], None]] = None
         self.on_log: Optional[Callable[[str], None]] = None
+        self.on_session: Optional[Callable[[str], None]] = None
+        self.on_clear_session: Optional[Callable[[], None]] = None
 
     @property
     def key(self) -> tuple[int, int]:

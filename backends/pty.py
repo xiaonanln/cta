@@ -29,14 +29,7 @@ class PtyBackend(ClaudeBackend):
         self._last_activity: float = 0.0
         self._typing_stop: threading.Event | None = None
         self._typing_thread: threading.Thread | None = None
-        # Set by agent to supply (cwd, model, session_id) at PTY start time
-        # without the backend needing to import agent. session_id is the
-        # session recorded by the print backend; when set, ClaudeCode passes
-        # `--resume <id>` so the PTY resumes that conversation.
         self.start_config: Optional[Callable[[], tuple[str, str, Optional[str]]]] = None
-        # Called when claude rejects the session_id as invalid so the agent can
-        # clear its stored session before we retry without it.
-        self.on_invalid_session: Optional[Callable[[], None]] = None
 
     @property
     def cc(self) -> claude_code.ClaudeCode | None:
@@ -81,8 +74,8 @@ class PtyBackend(ClaudeBackend):
             ):
                 # Stale session — clear it in agent state and retry fresh.
                 print(f"[PTY] invalid session {session_id} for {self.key}, retrying without resume", flush=True)
-                if self.on_invalid_session:
-                    self.on_invalid_session()
+                if self.on_clear_session:
+                    self.on_clear_session()
                 cc = claude_code.ClaudeCode(
                     cwd=cwd, model=model, session_id=None,
                     extra_env={"CTA_UID": str(self.uid), "CTA_CHAT_ID": str(self.chat_id)},
