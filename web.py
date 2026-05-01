@@ -1073,10 +1073,7 @@ def _web_set_config():
             agent._claude_semaphore = threading.Semaphore(n)
         cfg["max_concurrent_claude"] = n
     if "path_prefix" in data:
-        prefix = data["path_prefix"].strip()
-        cfg["path_prefix"] = prefix
-        agent.PATH_PREFIX = prefix
-        agent._apply_path_prefix(prefix)
+        cfg["path_prefix"] = data["path_prefix"].strip()
     if "global_preamble" in data:
         text = data["global_preamble"].strip()
         if text:

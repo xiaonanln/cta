@@ -2320,13 +2320,14 @@ class TestWebAPI(unittest.TestCase):
                 r = self.client.post("/config", json={"path_prefix": "/tmp/testbin"})
             self.assertEqual(r.status_code, 200)
             self.assertTrue(r.get_json().get("ok"))
-            self.assertEqual(agent.PATH_PREFIX, "/tmp/testbin")
+            # saved to disk
             with open(tmp_cfg) as f:
                 cfg = json.load(f)
             self.assertEqual(cfg["path_prefix"], "/tmp/testbin")
+            # not applied dynamically — PATH and in-memory prefix unchanged
+            self.assertEqual(agent.PATH_PREFIX, orig_prefix)
+            self.assertEqual(os.environ.get("PATH", ""), orig_path)
         finally:
-            os.environ["PATH"] = orig_path
-            agent.PATH_PREFIX = orig_prefix
             os.unlink(tmp_cfg)
 
     # ── GET /status ──
