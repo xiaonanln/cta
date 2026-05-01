@@ -448,6 +448,10 @@ _WEB_HTML = """<!DOCTYPE html>
         <label>Allowed users</label>
         <input id="cfg-users" type="text" placeholder="comma-separated user IDs, empty = all" />
       </div>
+      <div class="cfg-row">
+        <label>PATH prefix</label>
+        <input id="cfg-path-prefix" type="text" placeholder="colon-separated dirs to prepend to PATH, e.g. ~/bin:/opt/homebrew/bin" />
+      </div>
       <div class="cfg-row" style="flex-direction:column;align-items:flex-start;gap:0.4rem;">
         <label>System preamble <span style="font-weight:400;color:var(--fg3);font-size:.75rem;">(hardcoded; injected before Global preamble on every turn)</span></label>
         <pre id="cfg-system-preamble" style="width:100%;box-sizing:border-box;font-family:inherit;font-size:0.82rem;background:var(--bg3);color:var(--fg2);border:1px solid var(--border);border-radius:4px;padding:0.5rem;white-space:pre-wrap;word-break:break-word;margin:0;"></pre>
@@ -817,6 +821,7 @@ _WEB_HTML = """<!DOCTYPE html>
       document.getElementById('cfg-port').value = d.web_port ?? '';
       document.getElementById('cfg-cwd').value = d.default_cwd || '';
       document.getElementById('cfg-users').value = (d.allowed_users || []).join(', ');
+      document.getElementById('cfg-path-prefix').value = d.path_prefix || '';
       document.getElementById('cfg-system-preamble').textContent = d.system_preamble || '';
       document.getElementById('cfg-global-preamble').value = d.global_preamble || '';
     } catch {}
@@ -833,6 +838,7 @@ _WEB_HTML = """<!DOCTYPE html>
       default_cwd: document.getElementById('cfg-cwd').value.trim(),
       allowed_users: document.getElementById('cfg-users').value
         .split(',').map(s => s.trim()).filter(Boolean).map(Number),
+      path_prefix: document.getElementById('cfg-path-prefix').value.trim(),
       global_preamble: document.getElementById('cfg-global-preamble').value,
     };
     if (token) body.telegram_bot_token = token;
@@ -1021,6 +1027,7 @@ def _web_get_config():
         "default_cwd": cfg.get("default_cwd", agent.DEFAULT_CWD),
         "allowed_users": cfg.get("allowed_users", list(agent.ALLOWED_USERS)),
         "max_concurrent_claude": cfg.get("max_concurrent_claude", agent.MAX_CONCURRENT_CLAUDE),
+        "path_prefix": cfg.get("path_prefix", agent.PATH_PREFIX),
         "global_preamble": agent._read_global_preamble(),
         "system_preamble": agent._system_preamble("<uid>", "<chat_id>"),
     }
@@ -1065,6 +1072,11 @@ def _web_set_config():
             # semaphore once their permits land.
             agent._claude_semaphore = threading.Semaphore(n)
         cfg["max_concurrent_claude"] = n
+    if "path_prefix" in data:
+        prefix = data["path_prefix"].strip()
+        cfg["path_prefix"] = prefix
+        agent.PATH_PREFIX = prefix
+        agent._apply_path_prefix(prefix)
     if "global_preamble" in data:
         text = data["global_preamble"].strip()
         if text:

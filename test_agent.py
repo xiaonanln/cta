@@ -2297,6 +2297,38 @@ class TestWebAPI(unittest.TestCase):
         self.assertIn("cron.py", sp)
         self.assertIn("Telegram MCP", sp)
 
+    def test_config_get_returns_path_prefix(self):
+        with tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False) as f:
+            json.dump({**agent.DEFAULT_CONFIG, "telegram_bot_token": "tok", "path_prefix": "/opt/mybin"}, f)
+            tmp_cfg = f.name
+        try:
+            with patch.object(agent, "CONFIG_PATH", tmp_cfg):
+                r = self.client.get("/config")
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.get_json()["path_prefix"], "/opt/mybin")
+        finally:
+            os.unlink(tmp_cfg)
+
+    def test_config_post_saves_path_prefix(self):
+        orig_path = os.environ.get("PATH", "")
+        orig_prefix = agent.PATH_PREFIX
+        with tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False) as f:
+            json.dump({**agent.DEFAULT_CONFIG, "telegram_bot_token": "tok"}, f)
+            tmp_cfg = f.name
+        try:
+            with patch.object(agent, "CONFIG_PATH", tmp_cfg):
+                r = self.client.post("/config", json={"path_prefix": "/tmp/testbin"})
+            self.assertEqual(r.status_code, 200)
+            self.assertTrue(r.get_json().get("ok"))
+            self.assertEqual(agent.PATH_PREFIX, "/tmp/testbin")
+            with open(tmp_cfg) as f:
+                cfg = json.load(f)
+            self.assertEqual(cfg["path_prefix"], "/tmp/testbin")
+        finally:
+            os.environ["PATH"] = orig_path
+            agent.PATH_PREFIX = orig_prefix
+            os.unlink(tmp_cfg)
+
     # ── GET /status ──
 
     def test_status_returns_sessions(self):
