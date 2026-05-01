@@ -909,7 +909,7 @@ class TestBotHandlers(unittest.TestCase):
     @patch("backends.pty.claude_code.ClaudeCode")
     def test_pty_backend_retries_without_session_on_invalid_session_error(self, mock_cc_class):
         """If cc.start() raises ClaudeNotReady with 'No conversation found with session ID',
-        PtyBackend must call on_invalid_session, then retry with session_id=None."""
+        PtyBackend must call on_clear_session, then retry with session_id=None."""
         invalid_instance = MagicMock()
         invalid_instance.proc = None
         invalid_instance.start.side_effect = claude_code.ClaudeNotReady(
@@ -922,13 +922,13 @@ class TestBotHandlers(unittest.TestCase):
         cleared = []
         b = backends.PtyBackend(123, 456)
         b.start_config = lambda: ("/tmp", "claude-sonnet-4-6", "sess-stale")
-        b.on_invalid_session = lambda: cleared.append(True)
+        b.on_clear_session = lambda: cleared.append(True)
         b._ensure_started()
         # Check cc before stop() tears it down
         self.assertIs(b.cc, fresh_instance)
         b.stop()
 
-        # on_invalid_session must have been called
+        # on_clear_session must have been called
         self.assertEqual(cleared, [True])
         # First ClaudeCode built with stale session; second with session_id=None
         first_kwargs = mock_cc_class.call_args_list[0][1]
@@ -968,7 +968,7 @@ class TestBotHandlers(unittest.TestCase):
         cleared = []
         b = backends.PtyBackend(123, 456)
         b.start_config = lambda: ("/tmp", "claude-sonnet-4-6", "sess-old")
-        b.on_invalid_session = lambda: cleared.append(True)
+        b.on_clear_session = lambda: cleared.append(True)
         b._ensure_started()
 
         self.assertEqual(cleared, [True])
@@ -2578,15 +2578,15 @@ class TestGetBackend(unittest.TestCase):
         cwd, model, sid = b.start_config()
         self.assertIsNone(sid)
 
-    def test_pty_on_invalid_session_clears_session_and_saves(self):
-        """on_invalid_session must remove the key from user_sessions and persist."""
+    def test_pty_on_clear_session_clears_session_and_saves(self):
+        """on_clear_session must remove the key from user_sessions and persist."""
         agent.user_backend_mode[(1, 2)] = "pty"
         agent.user_sessions[(1, 2)] = "sess-stale"
         try:
             b = agent._get_backend((1, 2))
-            self.assertIsNotNone(b.on_invalid_session)
+            self.assertIsNotNone(b.on_clear_session)
             with patch("agent.save_sessions") as mock_save:
-                b.on_invalid_session()
+                b.on_clear_session()
                 mock_save.assert_called_once()
             self.assertNotIn((1, 2), agent.user_sessions)
         finally:
@@ -2715,6 +2715,8 @@ class TestJsonStreamBackendSend(unittest.TestCase):
     def _make_backend(self, uid=1, chat_id=2):
         b = backends.JsonStreamBackend(uid, chat_id)
         b.on_session = MagicMock()
+        key = (uid, chat_id)
+        b.on_clear_session = lambda k=key: agent.user_sessions.pop(k, None)
         return b
 
     def _make_mock_stream(self, events):

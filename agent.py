@@ -607,6 +607,11 @@ def _get_backend(key: tuple[int, int]) -> "backends.ClaudeBackend":
     uid, chat_id = key
     b = desired_cls(uid, chat_id)
     b.on_log = tui_log
+
+    def _on_clear_session(k=key) -> None:
+        user_sessions.pop(k, None)
+        save_sessions()
+
     if isinstance(b, backends.PtyBackend):
         b.on_typing = lambda: bot.send_chat_action(chat_id, "typing")
         b.start_config = lambda: (
@@ -614,12 +619,10 @@ def _get_backend(key: tuple[int, int]) -> "backends.ClaudeBackend":
             user_model.get(key, MODEL),
             user_sessions.get(key),
         )
-        def _on_invalid_session(k=key) -> None:
-            user_sessions.pop(k, None)
-            save_sessions()
-        b.on_invalid_session = _on_invalid_session
+        b.on_clear_session = _on_clear_session
     if isinstance(b, backends.JsonStreamBackend):
         b.on_typing = lambda: bot.send_chat_action(chat_id, "typing")
+        b.on_clear_session = _on_clear_session
         def _on_session(sid: str, k=key) -> None:
             user_sessions[k] = sid
             save_sessions()
@@ -664,6 +667,33 @@ def _chat_push(uid: int, chat_id: int, role: str, text: str):
 
 
 # ── Message processing ────────────────────────────────────────────────────────
+
+def _build_preamble(uid: int, chat_id: int) -> str:
+    """Build the prompt prefix injected before every agent turn.
+
+    Includes the system identity block, any cron parse error warning,
+    the global preamble, and the per-chat custom preamble.
+    """
+    crons_path = os.path.join(CRONS_DIR, f"{uid}:{chat_id}.json")
+    _ensure_cron_file(uid, chat_id)
+    crons_err = _crons_parse_error(uid, chat_id)
+    if crons_err:
+        tui_log(f"[red]⚠ crons parse error {uid}:{chat_id}: {escape(crons_err)}[/]")
+    custom_preamble = _read_preamble(uid, chat_id)
+    parts = [_system_preamble(uid, chat_id)]
+    if crons_err:
+        parts.append(
+            f"⚠ Your crons file at {crons_path} is INVALID JSON ({crons_err}). "
+            "Scheduled jobs in it will NOT run and are hidden from the UI. "
+            "Fix the JSON syntax (likely unescaped quotes in a prompt string) "
+            "so your crons work again."
+        )
+    if GLOBAL_PREAMBLE:
+        parts.append(GLOBAL_PREAMBLE)
+    if custom_preamble:
+        parts.append(custom_preamble)
+    return "\n".join(parts) + "\n"
+
 
 def _send_markdown(message, text: str):
     """Send text with MarkdownV2 formatting, falling back to plain text."""
@@ -710,36 +740,17 @@ def _typing_loop(chat_id: int, done: threading.Event):
 
 def _process_message(uid: int, chat_id: int, message, done: threading.Event):
     print(f"[PROCESS_MSG] uid={uid} chat={chat_id}", flush=True)
-    global claude_active_keys
     key = (uid, chat_id)
     cwd = user_cwd.get(key, DEFAULT_CWD)
-    model = user_model.get(key, MODEL)
-    timeout = user_timeout.get(key, TIMEOUT)
-    session_id = user_sessions.get(key)
     username = message.from_user.username or str(uid)
     if message.chat.type == "private":
         chat_labels[key] = f"DM:{username}"
     else:
         chat_labels[key] = message.chat.title or str(chat_id)
 
-    # Build preamble with agent identity and context files
-    memory_path = os.path.join(MEMORY_DIR, f"{uid}:{chat_id}.md")
-    crons_path = os.path.join(CRONS_DIR, f"{uid}:{chat_id}.json")
-    _ensure_cron_file(uid, chat_id)
-    custom_preamble = _read_preamble(uid, chat_id)
-    crons_err = _crons_parse_error(uid, chat_id)
-    if crons_err:
-        tui_log(f"[red]⚠ crons parse error {uid}:{chat_id}: {escape(crons_err)}[/]")
-    memory_prefix = (
-        _system_preamble(uid, chat_id) + "\n"
-        + (f"⚠ Your crons file at {crons_path} is INVALID JSON ({crons_err}). Scheduled jobs in it will NOT run and are hidden from the UI. Fix the JSON syntax (likely unescaped quotes in a prompt string) so your crons work again.\n\n" if crons_err else "")
-        + (f"{GLOBAL_PREAMBLE}\n\n" if GLOBAL_PREAMBLE else "")
-        + (f"{custom_preamble}\n\n" if custom_preamble else "")
-    )
-
-    # Build prompt — download document to temp file if present
+    preamble = _build_preamble(uid, chat_id)
     caption = message.caption or ""
-    prompt = memory_prefix + (message.text or caption)
+    prompt = preamble + (message.text or caption)
     tmp_photo = None
     if message.document:
         try:
@@ -755,7 +766,7 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
             tmp.close()
             tmp_photo = tmp.name
             user_instruction = f"\n\nUser's question: {caption}" if caption else ""
-            prompt = memory_prefix + f"Use the Read tool to read and analyze the file at: {tmp_photo}{user_instruction}"
+            prompt = preamble + f"Use the Read tool to read and analyze the file at: {tmp_photo}{user_instruction}"
         except Exception as e:
             tui_log(f"[red]⚠ file download failed: {escape(str(e))}[/]")
             bot.reply_to(message, f"❌ Could not download file: {e}")
@@ -772,7 +783,7 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
             tmp.close()
             tmp_photo = tmp.name
             user_instruction = f"\n\nUser's question: {caption}" if caption else ""
-            prompt = memory_prefix + f"Use the Read tool to view the image at: {tmp_photo}{user_instruction}"
+            prompt = preamble + f"Use the Read tool to view the image at: {tmp_photo}{user_instruction}"
         except Exception as e:
             tui_log(f"[red]⚠ photo download failed: {escape(str(e))}[/]")
             bot.reply_to(message, f"❌ Could not download photo: {e}")
@@ -798,7 +809,7 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
                 return
             tui_log(f"[cyan]🎙 transcript:[/] {escape(transcript)}")
             _chat_push(uid, message.chat.id, "user", f"🎙 {transcript}")
-            prompt = memory_prefix + transcript
+            prompt = preamble + transcript
         except ImportError:
             bot.reply_to(message, "❌ Whisper not installed. Run: pip install openai-whisper")
             done.set()
@@ -818,7 +829,7 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
             return
 
     mode = user_backend_mode.get(key, "print")
-    print(f"[CALL_CLAUDE] uid={uid} chat={chat_id} model={model} cwd={cwd} mode={mode}", flush=True)
+    print(f"[CALL_CLAUDE] uid={uid} chat={chat_id} model={user_model.get(key, MODEL)} cwd={cwd} mode={mode}", flush=True)
     backend = _get_backend(key)
     backend.on_output = _make_output_handler(uid, chat_id, message, username, mode)
     try:
@@ -880,28 +891,13 @@ def _make_output_handler(uid: int, chat_id: int, message, username: str, mode: s
 
 
 def _process_cron(uid: int, chat_id: int, task: dict, done: threading.Event):
-    global claude_active_keys
     key = (uid, chat_id)
     cwd = user_cwd.get(key, DEFAULT_CWD)
     model = user_model.get(key, MODEL)
     timeout = user_timeout.get(key, TIMEOUT)
     session_id = user_sessions.get(key)
     job_id = task["job_id"]
-
-    memory_path = os.path.join(MEMORY_DIR, f"{uid}:{chat_id}.md")
-    crons_path = os.path.join(CRONS_DIR, f"{uid}:{chat_id}.json")
-    _ensure_cron_file(uid, chat_id)
-    custom_preamble = _read_preamble(uid, chat_id)
-    crons_err = _crons_parse_error(uid, chat_id)
-    if crons_err:
-        tui_log(f"[red]⚠ crons parse error {uid}:{chat_id}: {escape(crons_err)}[/]")
-    preamble = (
-        _system_preamble(uid, chat_id) + "\n"
-        + (f"⚠ Your crons file at {crons_path} is INVALID JSON ({crons_err}). Scheduled jobs in it will NOT run and are hidden from the UI. Fix the JSON syntax (likely unescaped quotes in a prompt string) so your crons work again.\n\n" if crons_err else "")
-        + (f"{GLOBAL_PREAMBLE}\n\n" if GLOBAL_PREAMBLE else "")
-        + (f"{custom_preamble}\n\n" if custom_preamble else "")
-    )
-    prompt = preamble + f"[Scheduled task {job_id}]\n{task['prompt']}"
+    prompt = _build_preamble(uid, chat_id) + f"[Scheduled task {job_id}]\n{task['prompt']}"
 
     claude_active_keys.add(key)
     try:
