@@ -745,6 +745,7 @@ class TestBotHandlers(unittest.TestCase):
             except Exception:
                 pass
             agent._backends.pop(key, None)
+        agent.user_backend_mode.clear()
 
     def test_start_replies(self):
         agent.cmd_start(make_fake_message("/start"))
@@ -772,33 +773,39 @@ class TestBotHandlers(unittest.TestCase):
         self.assertNotIn((123, 123), agent.user_sessions)
         self.bot.reply_to.assert_called_once()
 
-    def test_pty_status_default_off(self):
+    def test_backend_status_default_print(self):
         agent.user_backend_mode.pop((123, 123), None)
-        agent.cmd_pty(make_fake_message("/pty"))
+        agent.cmd_backend(make_fake_message("/backend"))
         reply = self.bot.reply_to.call_args[0][1]
-        self.assertIn("off", reply)
+        self.assertIn("print", reply)
 
-    def test_pty_on_sets_flag(self):
+    def test_backend_stream_sets_mode(self):
         agent.user_backend_mode.pop((123, 123), None)
-        agent.cmd_pty(make_fake_message("/pty on"))
-        self.assertEqual(agent.user_backend_mode.get((123, 123)), "pty")
-        self.assertIn("on", self.bot.reply_to.call_args[0][1])
+        agent.cmd_backend(make_fake_message("/backend stream"))
+        self.assertEqual(agent.user_backend_mode.get((123, 123)), "stream")
+        self.assertIn("stream", self.bot.reply_to.call_args[0][1])
 
-    def test_pty_off_clears_flag_and_stops_instance(self):
+    def test_backend_pty_sets_mode(self):
+        agent.user_backend_mode.pop((123, 123), None)
+        agent.cmd_backend(make_fake_message("/backend pty"))
+        self.assertEqual(agent.user_backend_mode.get((123, 123)), "pty")
+        self.assertIn("pty", self.bot.reply_to.call_args[0][1])
+
+    def test_backend_print_clears_mode_and_stops_instance(self):
         agent.user_backend_mode[(123, 123)] = "pty"
         fake_backend = MagicMock()
         agent._backends[(123, 123)] = fake_backend
-        agent.cmd_pty(make_fake_message("/pty off"))
+        agent.cmd_backend(make_fake_message("/backend print"))
         self.assertNotIn((123, 123), agent.user_backend_mode)
         self.assertNotIn((123, 123), agent._backends)
         fake_backend.stop.assert_called_once()
 
-    def test_pty_invalid_arg_shows_usage(self):
-        agent.cmd_pty(make_fake_message("/pty wat"))
+    def test_backend_invalid_arg_shows_usage(self):
+        agent.cmd_backend(make_fake_message("/backend wat"))
         self.assertIn("Usage", self.bot.reply_to.call_args[0][1])
 
-    def test_pty_blocked_unknown_user(self):
-        agent.cmd_pty(make_fake_message("/pty on", user_id=999))
+    def test_backend_blocked_unknown_user(self):
+        agent.cmd_backend(make_fake_message("/backend pty", user_id=999))
         self.bot.reply_to.assert_not_called()
 
     def test_clear_stops_backend(self):

@@ -1011,8 +1011,7 @@ def cmd_help(message):
         "/opus — switch to latest Opus model (clears session)\n"
         "/sonnet — switch to latest Sonnet model (clears session)\n"
         "/timeout `<seconds>` — set per-chat Claude timeout (or `reset`)\n"
-        "/stream `on|off|status` — toggle stream-json mode (streaming, default: off)\n"
-        "/pty `on|off|status` — toggle ClaudeCode PTY mode (default: off)\n"
+        "/backend `print|stream|pty|status` — switch backend (default: print)\n"
         "/status — show model, cwd, timeout, and session info"
     ), parse_mode="Markdown")
 
@@ -1139,65 +1138,33 @@ def cmd_sonnet(message):
         print(f"[CMD_SONNET] reply_to FAILED: {e!r}", flush=True)
 
 
-def cmd_stream(message):
-    """/stream [on|off|status] — toggle stream-json mode for this chat.
+_MODE_LABELS = {
+    "print": "print (`claude --print`)",
+    "stream": "stream (`--output-format stream-json`)",
+    "pty": "pty (ClaudeCode PTY wrapper)",
+}
 
-    Stream mode uses `claude --print --output-format stream-json` and delivers
-    text chunks in real-time (like PTY) without the PTY complexity. Mutually
-    exclusive with /pty — enabling one disables the other.
-    """
+
+def cmd_backend(message):
+    """/backend [print|stream|pty|status] — switch the claude backend for this chat."""
     if not _allowed(message): return
     uid = message.from_user.id
     key = (uid, message.chat.id)
-    arg = message.text.replace("/stream", "", 1).strip().lower()
+    arg = message.text.replace("/backend", "", 1).strip().lower()
     if arg in ("", "status"):
         mode = user_backend_mode.get(key, "print")
-        bot.reply_to(message, f"📡 Stream mode: `{'on' if mode == 'stream' else 'off'}`", parse_mode="Markdown")
+        bot.reply_to(message, f"Backend: `{mode}`", parse_mode="Markdown")
         return
-    if arg == "on":
-        user_backend_mode[key] = "stream"
+    if arg in ("print", "stream", "pty"):
+        if arg == "print":
+            user_backend_mode.pop(key, None)
+        else:
+            user_backend_mode[key] = arg
         _stop_backend(key)
         save_sessions()
-        bot.reply_to(message, "📡 Stream mode → `on` (using `--output-format stream-json`)", parse_mode="Markdown")
+        bot.reply_to(message, f"Backend → {_MODE_LABELS[arg]}", parse_mode="Markdown")
         return
-    if arg == "off":
-        user_backend_mode.pop(key, None)
-        _stop_backend(key)
-        save_sessions()
-        bot.reply_to(message, "📡 Stream mode → `off` (using `claude --print`)", parse_mode="Markdown")
-        return
-    bot.reply_to(message, "Usage: `/stream on|off|status`", parse_mode="Markdown")
-
-
-def cmd_pty(message):
-    """/pty [on|off|status] — toggle ClaudeCode PTY mode for this chat.
-
-    Default is `--print` mode (the existing subprocess-per-message path).
-    PTY mode keeps a long-lived `claude` interactive process per chat and
-    drives it via the TUI; this avoids `--print`'s known tool-use streaming
-    hangs but is newer code and may have rough edges.
-    """
-    if not _allowed(message): return
-    uid = message.from_user.id
-    key = (uid, message.chat.id)
-    arg = message.text.replace("/pty", "", 1).strip().lower()
-    if arg in ("", "status"):
-        mode = user_backend_mode.get(key, "print")
-        bot.reply_to(message, f"🧪 PTY mode: `{'on' if mode == 'pty' else 'off'}`", parse_mode="Markdown")
-        return
-    if arg == "on":
-        user_backend_mode[key] = "pty"
-        _stop_backend(key)
-        save_sessions()
-        bot.reply_to(message, "🧪 PTY mode → `on` (using ClaudeCode wrapper)", parse_mode="Markdown")
-        return
-    if arg == "off":
-        user_backend_mode.pop(key, None)
-        _stop_backend(key)
-        save_sessions()
-        bot.reply_to(message, "🧪 PTY mode → `off` (using `claude --print`)", parse_mode="Markdown")
-        return
-    bot.reply_to(message, "Usage: `/pty on|off|status`", parse_mode="Markdown")
+    bot.reply_to(message, "Usage: `/backend print|stream|pty|status`", parse_mode="Markdown")
 
 
 def cmd_timeout(message):
@@ -1312,8 +1279,7 @@ def create_bot():
     bot.message_handler(commands=["model"])(cmd_model)
     bot.message_handler(commands=["opus"])(cmd_opus)
     bot.message_handler(commands=["sonnet"])(cmd_sonnet)
-    bot.message_handler(commands=["stream"])(cmd_stream)
-    bot.message_handler(commands=["pty"])(cmd_pty)
+    bot.message_handler(commands=["backend"])(cmd_backend)
     bot.message_handler(commands=["timeout"])(cmd_timeout)
     bot.message_handler(commands=["status"])(cmd_status)
     bot.message_handler(func=lambda m: m.text and not m.text.startswith("/"))(handle_message)
