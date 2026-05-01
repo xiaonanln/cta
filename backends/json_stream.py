@@ -127,18 +127,17 @@ class JsonStreamBackend(ClaudeBackend):
 
         deadline = time.time() + timeout
         pending: list[str] = []
-        last_flush = time.time()
+        last_text_time: float = 0.0  # 0 means no text received yet
 
         def flush() -> None:
-            nonlocal pending, last_flush
+            nonlocal pending
             if not pending:
                 return
             if key in agent._cancelled_keys:
                 pending.clear()
                 return
-            text = '\n'.join(pending).strip()
+            text = ''.join(pending).strip()
             pending.clear()
-            last_flush = time.time()
             if text and self.on_output:
                 self.on_output(text)
 
@@ -153,9 +152,12 @@ class JsonStreamBackend(ClaudeBackend):
             if etype == 'stream_event':
                 delta = _extract_text_delta(event)
                 if delta:
-                    pending.append(delta)
-                    if time.time() - last_flush >= _COALESCE_SECONDS:
+                    now = time.time()
+                    # Flush accumulated text if Claude paused (e.g. during tool use).
+                    if last_text_time and now - last_text_time >= _COALESCE_SECONDS:
                         flush()
+                    pending.append(delta)
+                    last_text_time = now
             elif etype == 'result':
                 flush()
                 sid = event.get('session_id', '')

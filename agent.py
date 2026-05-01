@@ -820,7 +820,7 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
     mode = user_backend_mode.get(key, "print")
     print(f"[CALL_CLAUDE] uid={uid} chat={chat_id} model={model} cwd={cwd} mode={mode}", flush=True)
     backend = _get_backend(key)
-    backend.on_output = _make_output_handler(uid, chat_id, message, username, mode != "print")
+    backend.on_output = _make_output_handler(uid, chat_id, message, username, mode)
     try:
         backend.send(prompt)
     except claude_code.ClaudeNotReady as e:
@@ -836,7 +836,7 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
             os.unlink(tmp_photo)
 
 
-def _make_output_handler(uid: int, chat_id: int, message, username: str, streaming: bool):
+def _make_output_handler(uid: int, chat_id: int, message, username: str, mode: str):
     """Build the callback a backend invokes for each chunk of new output.
 
     Centralises post-processing (history, msg_counts, persistence, Telegram
@@ -855,14 +855,23 @@ def _make_output_handler(uid: int, chat_id: int, message, username: str, streami
         print(f"[CLAUDE_OUTPUT] uid={uid} chat={chat_id}\n{text}", flush=True)
         _chat_push(uid, chat_id, "assistant", text)
         save_sessions()
-        if streaming:
-            # Streaming output arrives in chunks not tied to a single user message;
-            # skip reply_to. PTY output is also raw terminal text so skip MarkdownV2.
+        if mode == "pty":
+            # PTY output is raw terminal text; skip MarkdownV2 and reply_to.
             for chunk in _split_reply(text):
                 try:
                     bot.send_message(chat_id, chunk)
                 except Exception as e:
-                    tui_log(f"[red]streaming send error {key}: {escape(str(e))}[/]")
+                    tui_log(f"[red]pty send error {key}: {escape(str(e))}[/]")
+        elif mode == "stream":
+            # stream-json output is proper markdown; skip reply_to but apply MarkdownV2.
+            for chunk in _split_reply(text):
+                try:
+                    bot.send_message(chat_id, telegramify_markdown.markdownify(chunk), parse_mode="MarkdownV2")
+                except Exception:
+                    try:
+                        bot.send_message(chat_id, chunk)
+                    except Exception as e:
+                        tui_log(f"[red]stream send error {key}: {escape(str(e))}[/]")
         else:
             for chunk in _split_reply(text):
                 _send_markdown(message, chunk)
