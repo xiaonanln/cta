@@ -200,6 +200,9 @@ class TestSessionPersistence(unittest.TestCase):
         self.tmp.close()
         self._orig_sessions_path = agent.AGENTS_PATH
         agent.AGENTS_PATH = self.tmp.name
+        import web
+        web.app.config["TESTING"] = True
+        self.client = web.app.test_client()
 
     def tearDown(self):
         agent.user_sessions.clear()
@@ -209,7 +212,7 @@ class TestSessionPersistence(unittest.TestCase):
         agent.chat_labels.clear()
         agent.AGENTS_PATH = self._orig_sessions_path
         agent.init(agent.DEFAULT_CONFIG)
-        for path in [self.tmp.name, self.tmp.name + ".tmp"]:
+        for path in [self.tmp.name, self.tmp.name + ".tmp", self.tmp.name + ".bak"]:
             if os.path.exists(path):
                 os.unlink(path)
 
@@ -267,11 +270,11 @@ class TestSessionPersistence(unittest.TestCase):
         agent.load_sessions()  # should not raise
         self.assertEqual(len(agent.user_sessions), 0)
 
-    def test_load_corrupt_file_does_not_crash(self):
+    def test_load_corrupt_file_exits(self):
         with open(self.tmp.name, "w") as f:
             f.write("not valid json{{{")
-        agent.load_sessions()  # should not raise
-        self.assertEqual(len(agent.user_sessions), 0)
+        with self.assertRaises(SystemExit):
+            agent.load_sessions()
 
     def test_save_is_atomic(self):
         """save_sessions must not leave a .tmp file behind."""
@@ -316,6 +319,59 @@ class TestSessionPersistence(unittest.TestCase):
         agent.last_active.clear()
         agent.load_sessions()
         self.assertEqual(agent.last_active.get((123, 456)), 1735000000.0)
+
+    def test_load_malformed_entry_exits(self):
+        """A bad entry in agents.json must cause CTA to exit rather than silently skip."""
+        with open(self.tmp.name, "w") as f:
+            json.dump({
+                "99:99": {"session": "good-before"},
+                "not-an-int:nope": {"session": "bad"},
+                "88:88": {"session": "good-after"},
+            }, f)
+        with self.assertRaises(SystemExit):
+            agent.load_sessions()
+
+    def test_load_does_not_overwrite_existing_memory(self):
+        """load_sessions (and _load_entry) must not clobber values already in memory."""
+        agent.user_sessions[(1, 1)] = "live-session"
+        agent.user_cwd[(1, 1)] = "/live/cwd"
+        with open(self.tmp.name, "w") as f:
+            json.dump({"1:1": {"session": "stale-session", "cwd": "/stale/cwd"}}, f)
+        agent.load_sessions()
+        self.assertEqual(agent.user_sessions[(1, 1)], "live-session")
+        self.assertEqual(agent.user_cwd[(1, 1)], "/live/cwd")
+
+    def test_save_creates_backup(self):
+        """save_sessions must rotate the previous file to .bak before replacing it."""
+        agent.user_sessions[(1, 1)] = "first"
+        agent.save_sessions()
+        # Write a second time — first save's content becomes .bak
+        agent.user_sessions[(1, 1)] = "second"
+        agent.save_sessions()
+        bak = self.tmp.name + ".bak"
+        self.assertTrue(os.path.exists(bak))
+        with open(bak) as f:
+            data = json.load(f)
+        self.assertEqual(data["1:1"]["session"], "first")
+
+    def test_sessions_reload_endpoint(self):
+        """POST /sessions/reload should merge missing entries from agents.json into memory."""
+        # Seed agents.json with two entries; only one is in live memory.
+        agent.user_sessions[(7, 7)] = "live-sess"
+        agent.user_cwd[(5, 5)] = "/from-file"
+        agent.last_active[(5, 5)] = 1234.0
+        agent.save_sessions()
+        # Now remove (5,5) from memory to simulate data loss.
+        agent.user_cwd.pop((5, 5))
+        agent.last_active.pop((5, 5))
+
+        resp = self.client.post("/sessions/reload")
+        self.assertEqual(resp.status_code, 200)
+        body = json.loads(resp.data)
+        self.assertTrue(body["ok"])
+        # (5,5) should be restored; (7,7) unchanged.
+        self.assertEqual(agent.user_cwd.get((5, 5)), "/from-file")
+        self.assertEqual(agent.user_sessions.get((7, 7)), "live-sess")
 
 
 # ── call_claude ───────────────────────────────────────────────────────────────
