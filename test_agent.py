@@ -298,16 +298,16 @@ class TestSessionPersistence(unittest.TestCase):
     def test_pty_mode_only_chat_persists(self):
         """A chat with only `/pty on` (no session/cwd/model/label/last_active) must
         still get serialized so the toggle survives restart. Regression for the case
-        where save_sessions' all_keys union excluded user_pty_mode."""
-        agent.user_pty_mode[(789, 101)] = True
+        where save_sessions' all_keys union excluded user_backend_mode."""
+        agent.user_backend_mode[(789, 101)] = "pty"
         try:
             agent.save_sessions()
             with open(self.tmp.name) as f:
                 data = json.load(f)
             self.assertIn("789:101", data)
-            self.assertTrue(data["789:101"].get("pty_mode"))
+            self.assertEqual(data["789:101"].get("backend_mode"), "pty")
         finally:
-            agent.user_pty_mode.pop((789, 101), None)
+            agent.user_backend_mode.pop((789, 101), None)
 
     def test_last_active_roundtrip(self):
         """last_active should be persisted to sessions.json and reloaded after restart."""
@@ -773,23 +773,23 @@ class TestBotHandlers(unittest.TestCase):
         self.bot.reply_to.assert_called_once()
 
     def test_pty_status_default_off(self):
-        agent.user_pty_mode.pop((123, 123), None)
+        agent.user_backend_mode.pop((123, 123), None)
         agent.cmd_pty(make_fake_message("/pty"))
         reply = self.bot.reply_to.call_args[0][1]
         self.assertIn("off", reply)
 
     def test_pty_on_sets_flag(self):
-        agent.user_pty_mode.pop((123, 123), None)
+        agent.user_backend_mode.pop((123, 123), None)
         agent.cmd_pty(make_fake_message("/pty on"))
-        self.assertTrue(agent.user_pty_mode.get((123, 123)))
+        self.assertEqual(agent.user_backend_mode.get((123, 123)), "pty")
         self.assertIn("on", self.bot.reply_to.call_args[0][1])
 
     def test_pty_off_clears_flag_and_stops_instance(self):
-        agent.user_pty_mode[(123, 123)] = True
+        agent.user_backend_mode[(123, 123)] = "pty"
         fake_backend = MagicMock()
         agent._backends[(123, 123)] = fake_backend
         agent.cmd_pty(make_fake_message("/pty off"))
-        self.assertNotIn((123, 123), agent.user_pty_mode)
+        self.assertNotIn((123, 123), agent.user_backend_mode)
         self.assertNotIn((123, 123), agent._backends)
         fake_backend.stop.assert_called_once()
 
@@ -975,7 +975,7 @@ class TestBotHandlers(unittest.TestCase):
         The long-lived reader inside the backend surfaces the response."""
         backend = MagicMock(spec=backends.PtyBackend)
         mock_get.return_value = backend
-        agent.user_pty_mode[(123, 123)] = True
+        agent.user_backend_mode[(123, 123)] = "pty"
         try:
             agent.handle_message(make_fake_message("hello"))
             time.sleep(0.5)
@@ -984,7 +984,7 @@ class TestBotHandlers(unittest.TestCase):
             self.assertIn("hello", backend.send.call_args[0][0])
             mock_print.assert_not_called()
         finally:
-            agent.user_pty_mode.pop((123, 123), None)
+            agent.user_backend_mode.pop((123, 123), None)
 
     def test_cd_clears_session(self):
         agent.user_sessions[(123, 123)] = "old-sess"
@@ -2508,11 +2508,11 @@ class TestGetBackend(unittest.TestCase):
 
     def setUp(self):
         agent._backends.clear()
-        agent.user_pty_mode.clear()
+        agent.user_backend_mode.clear()
 
     def tearDown(self):
         agent._backends.clear()
-        agent.user_pty_mode.clear()
+        agent.user_backend_mode.clear()
 
     def test_creates_print_backend_by_default(self):
         b = agent._get_backend((1, 2))
@@ -2520,9 +2520,14 @@ class TestGetBackend(unittest.TestCase):
         self.assertIn((1, 2), agent._backends)
 
     def test_creates_pty_backend_when_pty_on(self):
-        agent.user_pty_mode[(1, 2)] = True
+        agent.user_backend_mode[(1, 2)] = "pty"
         b = agent._get_backend((1, 2))
         self.assertIsInstance(b, backends.PtyBackend)
+
+    def test_creates_stream_backend_when_stream_on(self):
+        agent.user_backend_mode[(1, 2)] = "stream"
+        b = agent._get_backend((1, 2))
+        self.assertIsInstance(b, backends.JsonStreamBackend)
 
     def test_reuses_existing_backend_same_class(self):
         first = agent._get_backend((1, 2))
@@ -2532,17 +2537,17 @@ class TestGetBackend(unittest.TestCase):
     def test_swaps_print_to_pty_stops_old(self):
         old = agent._get_backend((1, 2))  # PrintBackend
         old.stop = MagicMock()
-        agent.user_pty_mode[(1, 2)] = True
+        agent.user_backend_mode[(1, 2)] = "pty"
         new = agent._get_backend((1, 2))
         old.stop.assert_called_once()
         self.assertIsInstance(new, backends.PtyBackend)
         self.assertIsNot(old, new)
 
     def test_swaps_pty_to_print_stops_old(self):
-        agent.user_pty_mode[(1, 2)] = True
+        agent.user_backend_mode[(1, 2)] = "pty"
         old = agent._get_backend((1, 2))  # PtyBackend
         old.stop = MagicMock()
-        agent.user_pty_mode.pop((1, 2))
+        agent.user_backend_mode.pop((1, 2))
         new = agent._get_backend((1, 2))
         old.stop.assert_called_once()
         self.assertIsInstance(new, backends.PrintBackend)
@@ -2551,7 +2556,7 @@ class TestGetBackend(unittest.TestCase):
         """Once /pty turns PTY on, the backend's start_config must surface the
         session_id stored by print mode so ClaudeCode launches with
         `--resume <id>` and resumes that conversation."""
-        agent.user_pty_mode[(1, 2)] = True
+        agent.user_backend_mode[(1, 2)] = "pty"
         agent.user_sessions[(1, 2)] = "sess-from-print"
         try:
             b = agent._get_backend((1, 2))
@@ -2561,14 +2566,14 @@ class TestGetBackend(unittest.TestCase):
             agent.user_sessions.pop((1, 2), None)
 
     def test_pty_start_config_session_id_none_when_no_session(self):
-        agent.user_pty_mode[(1, 2)] = True
+        agent.user_backend_mode[(1, 2)] = "pty"
         b = agent._get_backend((1, 2))
         cwd, model, sid = b.start_config()
         self.assertIsNone(sid)
 
     def test_pty_on_invalid_session_clears_session_and_saves(self):
         """on_invalid_session must remove the key from user_sessions and persist."""
-        agent.user_pty_mode[(1, 2)] = True
+        agent.user_backend_mode[(1, 2)] = "pty"
         agent.user_sessions[(1, 2)] = "sess-stale"
         try:
             b = agent._get_backend((1, 2))
@@ -2577,6 +2582,19 @@ class TestGetBackend(unittest.TestCase):
                 b.on_invalid_session()
                 mock_save.assert_called_once()
             self.assertNotIn((1, 2), agent.user_sessions)
+        finally:
+            agent.user_sessions.pop((1, 2), None)
+
+    def test_stream_on_session_callback_updates_and_saves(self):
+        """on_session from JsonStreamBackend must update user_sessions and persist."""
+        agent.user_backend_mode[(1, 2)] = "stream"
+        try:
+            b = agent._get_backend((1, 2))
+            self.assertIsNotNone(b.on_session)
+            with patch("agent.save_sessions") as mock_save:
+                b.on_session("new-sid")
+                mock_save.assert_called_once()
+            self.assertEqual(agent.user_sessions.get((1, 2)), "new-sid")
         finally:
             agent.user_sessions.pop((1, 2), None)
 
