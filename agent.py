@@ -107,6 +107,7 @@ _claude_semaphore = threading.Semaphore(MAX_CONCURRENT_CLAUDE)
 MODEL = "claude-sonnet-4-6"
 WEB_PORT = 17488
 DEFAULT_CWD = os.getcwd()
+PATH_PREFIX = ""
 CLAUDE_BIN = shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
 AGENTS_PATH = os.path.join(CTA_HOME, "agents.json")
 MEMORY_DIR = os.path.join(CTA_HOME, "memory")
@@ -177,7 +178,7 @@ def _load_whisper():
 
 def init(config: dict):
     global BOT_TOKEN, ALLOWED_USERS, TIMEOUT, MODEL, WEB_PORT, DEFAULT_CWD, GLOBAL_PREAMBLE, WHISPER_MODEL
-    global MAX_CONCURRENT_CLAUDE, _claude_semaphore, CLAUDE_BIN
+    global MAX_CONCURRENT_CLAUDE, _claude_semaphore, CLAUDE_BIN, PATH_PREFIX
     BOT_TOKEN = config["telegram_bot_token"]
     ALLOWED_USERS = set(config["allowed_users"])
     TIMEOUT = config["claude_timeout"]
@@ -186,7 +187,8 @@ def init(config: dict):
     MODEL = config.get("model", "claude-sonnet-4-6")
     WEB_PORT = config.get("web_port", 17488)
     WHISPER_MODEL = config.get("whisper_model", "base")
-    _apply_path_prefix(config.get("path_prefix", ""))
+    PATH_PREFIX = config.get("path_prefix", "")
+    _apply_path_prefix(PATH_PREFIX)
     # Re-resolve CLAUDE_BIN AFTER applying path_prefix so an install discoverable
     # only via the new prefix is actually used by the print backend.
     CLAUDE_BIN = shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
