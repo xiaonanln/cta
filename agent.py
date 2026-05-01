@@ -124,7 +124,7 @@ user_sessions: dict[tuple[int, int], str] = {}  # (uid, chat_id) → Claude sess
 user_cwd: dict[tuple[int, int], str] = {}  # (uid, chat_id) → working directory
 user_model: dict[tuple[int, int], str] = {}  # (uid, chat_id) → model override
 user_timeout: dict[tuple[int, int], int] = {}  # (uid, chat_id) → timeout override (seconds)
-user_pty_mode: dict[tuple[int, int], bool] = {}  # (uid, chat_id) → True = use ClaudeCode PTY
+user_backend_mode: dict[tuple[int, int], str] = {}  # (uid, chat_id) → "print" (default) / "stream" / "pty"
 _backends: dict[tuple[int, int], "backends.ClaudeBackend"] = {}  # (uid, chat_id) → live backend
 user_queues: dict[tuple[int, int], queue.Queue] = {}
 user_queues_lock = threading.Lock()
@@ -223,8 +223,10 @@ def load_sessions():
                     last_active[key] = entry["last_active"]
                 if entry.get("label"):
                     chat_labels[key] = entry["label"]
-                if entry.get("pty_mode"):
-                    user_pty_mode[key] = True
+                if entry.get("backend_mode") in ("stream", "pty"):
+                    user_backend_mode[key] = entry["backend_mode"]
+                elif entry.get("pty_mode"):  # legacy
+                    user_backend_mode[key] = "pty"
         tui_log(f"[dim]Loaded {len(data)} agent(s) from {AGENTS_PATH}[/]")
     except Exception as e:
         tui_log(f"[red]Warning: could not load sessions: {escape(str(e))}[/]")
@@ -234,7 +236,7 @@ def save_sessions():
     tmp = AGENTS_PATH + ".tmp"
     try:
         all_keys = (set(user_sessions) | set(user_cwd) | set(user_model)
-                    | set(last_active) | set(chat_labels) | set(user_pty_mode))
+                    | set(last_active) | set(chat_labels) | set(user_backend_mode))
         data = {}
         for key in all_keys:
             uid, chat_id = key
@@ -249,8 +251,9 @@ def save_sessions():
                 entry["last_active"] = last_active[key]
             if key in chat_labels:
                 entry["label"] = chat_labels[key]
-            if user_pty_mode.get(key):
-                entry["pty_mode"] = True
+            mode = user_backend_mode.get(key, "print")
+            if mode != "print":
+                entry["backend_mode"] = mode
             data[f"{uid}:{chat_id}"] = entry
         with open(tmp, "w") as f:
             json.dump(data, f, indent=2)
@@ -266,7 +269,7 @@ def _purge_chat(uid: int, chat_id: int):
     created from scratch."""
     key = (uid, chat_id)
     _stop_backend(key)
-    for d in (user_sessions, user_cwd, user_model, user_timeout, user_pty_mode,
+    for d in (user_sessions, user_cwd, user_model, user_timeout, user_backend_mode,
               msg_counts, last_reply, last_active, chat_labels, chat_history):
         d.pop(key, None)
     with _chat_sse_lock:
@@ -585,10 +588,17 @@ def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str
 
 # ── Backend dispatch ──────────────────────────────────────────────────────────
 
+_MODE_TO_CLS = {
+    "pty": "PtyBackend",
+    "stream": "JsonStreamBackend",
+    "print": "PrintBackend",
+}
+
+
 def _get_backend(key: tuple[int, int]) -> "backends.ClaudeBackend":
-    """Return the live backend for this chat, swapping mode if /pty was toggled."""
-    pty_on = user_pty_mode.get(key, False)
-    desired_cls = backends.PtyBackend if pty_on else backends.PrintBackend
+    """Return the live backend for this chat, swapping mode if toggled."""
+    mode = user_backend_mode.get(key, "print")
+    desired_cls = getattr(backends, _MODE_TO_CLS.get(mode, "PrintBackend"))
     b = _backends.get(key)
     if b is not None and isinstance(b, desired_cls):
         return b
@@ -608,6 +618,12 @@ def _get_backend(key: tuple[int, int]) -> "backends.ClaudeBackend":
             user_sessions.pop(k, None)
             save_sessions()
         b.on_invalid_session = _on_invalid_session
+    if isinstance(b, backends.JsonStreamBackend):
+        b.on_typing = lambda: bot.send_chat_action(chat_id, "typing")
+        def _on_session(sid: str, k=key) -> None:
+            user_sessions[k] = sid
+            save_sessions()
+        b.on_session = _on_session
     _backends[key] = b
     return b
 
@@ -801,10 +817,10 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
             done.set()
             return
 
-    pty_mode = user_pty_mode.get(key, False)
-    print(f"[CALL_CLAUDE] uid={uid} chat={chat_id} model={model} cwd={cwd} mode={'pty' if pty_mode else 'print'}", flush=True)
+    mode = user_backend_mode.get(key, "print")
+    print(f"[CALL_CLAUDE] uid={uid} chat={chat_id} model={model} cwd={cwd} mode={mode}", flush=True)
     backend = _get_backend(key)
-    backend.on_output = _make_output_handler(uid, chat_id, message, username, pty_mode)
+    backend.on_output = _make_output_handler(uid, chat_id, message, username, mode != "print")
     try:
         backend.send(prompt)
     except claude_code.ClaudeNotReady as e:
@@ -820,7 +836,7 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
             os.unlink(tmp_photo)
 
 
-def _make_output_handler(uid: int, chat_id: int, message, username: str, pty_mode: bool):
+def _make_output_handler(uid: int, chat_id: int, message, username: str, streaming: bool):
     """Build the callback a backend invokes for each chunk of new output.
 
     Centralises post-processing (history, msg_counts, persistence, Telegram
@@ -839,14 +855,14 @@ def _make_output_handler(uid: int, chat_id: int, message, username: str, pty_mod
         print(f"[CLAUDE_OUTPUT] uid={uid} chat={chat_id}\n{text}", flush=True)
         _chat_push(uid, chat_id, "assistant", text)
         save_sessions()
-        if pty_mode:
-            # PTY output is raw terminal text — skip MarkdownV2 (would mostly fail
-            # to parse) and skip reply_to (chunks aren't tied to a single user msg).
+        if streaming:
+            # Streaming output arrives in chunks not tied to a single user message;
+            # skip reply_to. PTY output is also raw terminal text so skip MarkdownV2.
             for chunk in _split_reply(text):
                 try:
                     bot.send_message(chat_id, chunk)
                 except Exception as e:
-                    tui_log(f"[red]pty send error {key}: {escape(str(e))}[/]")
+                    tui_log(f"[red]streaming send error {key}: {escape(str(e))}[/]")
         else:
             for chunk in _split_reply(text):
                 _send_markdown(message, chunk)
@@ -995,7 +1011,7 @@ def cmd_help(message):
         "/opus — switch to latest Opus model (clears session)\n"
         "/sonnet — switch to latest Sonnet model (clears session)\n"
         "/timeout `<seconds>` — set per-chat Claude timeout (or `reset`)\n"
-        "/pty `on|off|status` — toggle ClaudeCode PTY mode (default: off)\n"
+        "/backend `print|stream|pty|status` — switch backend (default: print)\n"
         "/status — show model, cwd, timeout, and session info"
     ), parse_mode="Markdown")
 
@@ -1122,34 +1138,33 @@ def cmd_sonnet(message):
         print(f"[CMD_SONNET] reply_to FAILED: {e!r}", flush=True)
 
 
-def cmd_pty(message):
-    """/pty [on|off|status] — toggle ClaudeCode PTY mode for this chat.
+_MODE_LABELS = {
+    "print": "print (`claude --print`)",
+    "stream": "stream (`--output-format stream-json`)",
+    "pty": "pty (ClaudeCode PTY wrapper)",
+}
 
-    Default is `--print` mode (the existing subprocess-per-message path).
-    PTY mode keeps a long-lived `claude` interactive process per chat and
-    drives it via the TUI; this avoids `--print`'s known tool-use streaming
-    hangs but is newer code and may have rough edges.
-    """
+
+def cmd_backend(message):
+    """/backend [print|stream|pty|status] — switch the claude backend for this chat."""
     if not _allowed(message): return
     uid = message.from_user.id
     key = (uid, message.chat.id)
-    arg = message.text.replace("/pty", "", 1).strip().lower()
+    arg = message.text.replace("/backend", "", 1).strip().lower()
     if arg in ("", "status"):
-        on = user_pty_mode.get(key, False)
-        bot.reply_to(message, f"🧪 PTY mode: `{'on' if on else 'off'}`", parse_mode="Markdown")
+        mode = user_backend_mode.get(key, "print")
+        bot.reply_to(message, f"Backend: `{mode}`", parse_mode="Markdown")
         return
-    if arg == "on":
-        user_pty_mode[key] = True
-        save_sessions()
-        bot.reply_to(message, "🧪 PTY mode → `on` (using ClaudeCode wrapper)", parse_mode="Markdown")
-        return
-    if arg == "off":
-        user_pty_mode.pop(key, None)
+    if arg in ("print", "stream", "pty"):
+        if arg == "print":
+            user_backend_mode.pop(key, None)
+        else:
+            user_backend_mode[key] = arg
         _stop_backend(key)
         save_sessions()
-        bot.reply_to(message, "🧪 PTY mode → `off` (using `claude --print`)", parse_mode="Markdown")
+        bot.reply_to(message, f"Backend → {_MODE_LABELS[arg]}", parse_mode="Markdown")
         return
-    bot.reply_to(message, "Usage: `/pty on|off|status`", parse_mode="Markdown")
+    bot.reply_to(message, "Usage: `/backend print|stream|pty|status`", parse_mode="Markdown")
 
 
 def cmd_timeout(message):
@@ -1264,7 +1279,7 @@ def create_bot():
     bot.message_handler(commands=["model"])(cmd_model)
     bot.message_handler(commands=["opus"])(cmd_opus)
     bot.message_handler(commands=["sonnet"])(cmd_sonnet)
-    bot.message_handler(commands=["pty"])(cmd_pty)
+    bot.message_handler(commands=["backend"])(cmd_backend)
     bot.message_handler(commands=["timeout"])(cmd_timeout)
     bot.message_handler(commands=["status"])(cmd_status)
     bot.message_handler(func=lambda m: m.text and not m.text.startswith("/"))(handle_message)

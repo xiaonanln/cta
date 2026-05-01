@@ -7,7 +7,8 @@ to branch on mode for every operation.
 """
 
 from .base import ClaudeBackend
+from .json_stream import JsonStreamBackend
 from .print_mode import PrintBackend
 from .pty import PtyBackend
 
-__all__ = ["ClaudeBackend", "PrintBackend", "PtyBackend"]
+__all__ = ["ClaudeBackend", "JsonStreamBackend", "PrintBackend", "PtyBackend"]

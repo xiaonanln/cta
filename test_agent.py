@@ -298,16 +298,16 @@ class TestSessionPersistence(unittest.TestCase):
     def test_pty_mode_only_chat_persists(self):
         """A chat with only `/pty on` (no session/cwd/model/label/last_active) must
         still get serialized so the toggle survives restart. Regression for the case
-        where save_sessions' all_keys union excluded user_pty_mode."""
-        agent.user_pty_mode[(789, 101)] = True
+        where save_sessions' all_keys union excluded user_backend_mode."""
+        agent.user_backend_mode[(789, 101)] = "pty"
         try:
             agent.save_sessions()
             with open(self.tmp.name) as f:
                 data = json.load(f)
             self.assertIn("789:101", data)
-            self.assertTrue(data["789:101"].get("pty_mode"))
+            self.assertEqual(data["789:101"].get("backend_mode"), "pty")
         finally:
-            agent.user_pty_mode.pop((789, 101), None)
+            agent.user_backend_mode.pop((789, 101), None)
 
     def test_last_active_roundtrip(self):
         """last_active should be persisted to sessions.json and reloaded after restart."""
@@ -745,6 +745,7 @@ class TestBotHandlers(unittest.TestCase):
             except Exception:
                 pass
             agent._backends.pop(key, None)
+        agent.user_backend_mode.clear()
 
     def test_start_replies(self):
         agent.cmd_start(make_fake_message("/start"))
@@ -772,33 +773,39 @@ class TestBotHandlers(unittest.TestCase):
         self.assertNotIn((123, 123), agent.user_sessions)
         self.bot.reply_to.assert_called_once()
 
-    def test_pty_status_default_off(self):
-        agent.user_pty_mode.pop((123, 123), None)
-        agent.cmd_pty(make_fake_message("/pty"))
+    def test_backend_status_default_print(self):
+        agent.user_backend_mode.pop((123, 123), None)
+        agent.cmd_backend(make_fake_message("/backend"))
         reply = self.bot.reply_to.call_args[0][1]
-        self.assertIn("off", reply)
+        self.assertIn("print", reply)
 
-    def test_pty_on_sets_flag(self):
-        agent.user_pty_mode.pop((123, 123), None)
-        agent.cmd_pty(make_fake_message("/pty on"))
-        self.assertTrue(agent.user_pty_mode.get((123, 123)))
-        self.assertIn("on", self.bot.reply_to.call_args[0][1])
+    def test_backend_stream_sets_mode(self):
+        agent.user_backend_mode.pop((123, 123), None)
+        agent.cmd_backend(make_fake_message("/backend stream"))
+        self.assertEqual(agent.user_backend_mode.get((123, 123)), "stream")
+        self.assertIn("stream", self.bot.reply_to.call_args[0][1])
 
-    def test_pty_off_clears_flag_and_stops_instance(self):
-        agent.user_pty_mode[(123, 123)] = True
+    def test_backend_pty_sets_mode(self):
+        agent.user_backend_mode.pop((123, 123), None)
+        agent.cmd_backend(make_fake_message("/backend pty"))
+        self.assertEqual(agent.user_backend_mode.get((123, 123)), "pty")
+        self.assertIn("pty", self.bot.reply_to.call_args[0][1])
+
+    def test_backend_print_clears_mode_and_stops_instance(self):
+        agent.user_backend_mode[(123, 123)] = "pty"
         fake_backend = MagicMock()
         agent._backends[(123, 123)] = fake_backend
-        agent.cmd_pty(make_fake_message("/pty off"))
-        self.assertNotIn((123, 123), agent.user_pty_mode)
+        agent.cmd_backend(make_fake_message("/backend print"))
+        self.assertNotIn((123, 123), agent.user_backend_mode)
         self.assertNotIn((123, 123), agent._backends)
         fake_backend.stop.assert_called_once()
 
-    def test_pty_invalid_arg_shows_usage(self):
-        agent.cmd_pty(make_fake_message("/pty wat"))
+    def test_backend_invalid_arg_shows_usage(self):
+        agent.cmd_backend(make_fake_message("/backend wat"))
         self.assertIn("Usage", self.bot.reply_to.call_args[0][1])
 
-    def test_pty_blocked_unknown_user(self):
-        agent.cmd_pty(make_fake_message("/pty on", user_id=999))
+    def test_backend_blocked_unknown_user(self):
+        agent.cmd_backend(make_fake_message("/backend pty", user_id=999))
         self.bot.reply_to.assert_not_called()
 
     def test_clear_stops_backend(self):
@@ -975,7 +982,7 @@ class TestBotHandlers(unittest.TestCase):
         The long-lived reader inside the backend surfaces the response."""
         backend = MagicMock(spec=backends.PtyBackend)
         mock_get.return_value = backend
-        agent.user_pty_mode[(123, 123)] = True
+        agent.user_backend_mode[(123, 123)] = "pty"
         try:
             agent.handle_message(make_fake_message("hello"))
             time.sleep(0.5)
@@ -984,7 +991,7 @@ class TestBotHandlers(unittest.TestCase):
             self.assertIn("hello", backend.send.call_args[0][0])
             mock_print.assert_not_called()
         finally:
-            agent.user_pty_mode.pop((123, 123), None)
+            agent.user_backend_mode.pop((123, 123), None)
 
     def test_cd_clears_session(self):
         agent.user_sessions[(123, 123)] = "old-sess"
@@ -2508,11 +2515,11 @@ class TestGetBackend(unittest.TestCase):
 
     def setUp(self):
         agent._backends.clear()
-        agent.user_pty_mode.clear()
+        agent.user_backend_mode.clear()
 
     def tearDown(self):
         agent._backends.clear()
-        agent.user_pty_mode.clear()
+        agent.user_backend_mode.clear()
 
     def test_creates_print_backend_by_default(self):
         b = agent._get_backend((1, 2))
@@ -2520,9 +2527,14 @@ class TestGetBackend(unittest.TestCase):
         self.assertIn((1, 2), agent._backends)
 
     def test_creates_pty_backend_when_pty_on(self):
-        agent.user_pty_mode[(1, 2)] = True
+        agent.user_backend_mode[(1, 2)] = "pty"
         b = agent._get_backend((1, 2))
         self.assertIsInstance(b, backends.PtyBackend)
+
+    def test_creates_stream_backend_when_stream_on(self):
+        agent.user_backend_mode[(1, 2)] = "stream"
+        b = agent._get_backend((1, 2))
+        self.assertIsInstance(b, backends.JsonStreamBackend)
 
     def test_reuses_existing_backend_same_class(self):
         first = agent._get_backend((1, 2))
@@ -2532,17 +2544,17 @@ class TestGetBackend(unittest.TestCase):
     def test_swaps_print_to_pty_stops_old(self):
         old = agent._get_backend((1, 2))  # PrintBackend
         old.stop = MagicMock()
-        agent.user_pty_mode[(1, 2)] = True
+        agent.user_backend_mode[(1, 2)] = "pty"
         new = agent._get_backend((1, 2))
         old.stop.assert_called_once()
         self.assertIsInstance(new, backends.PtyBackend)
         self.assertIsNot(old, new)
 
     def test_swaps_pty_to_print_stops_old(self):
-        agent.user_pty_mode[(1, 2)] = True
+        agent.user_backend_mode[(1, 2)] = "pty"
         old = agent._get_backend((1, 2))  # PtyBackend
         old.stop = MagicMock()
-        agent.user_pty_mode.pop((1, 2))
+        agent.user_backend_mode.pop((1, 2))
         new = agent._get_backend((1, 2))
         old.stop.assert_called_once()
         self.assertIsInstance(new, backends.PrintBackend)
@@ -2551,7 +2563,7 @@ class TestGetBackend(unittest.TestCase):
         """Once /pty turns PTY on, the backend's start_config must surface the
         session_id stored by print mode so ClaudeCode launches with
         `--resume <id>` and resumes that conversation."""
-        agent.user_pty_mode[(1, 2)] = True
+        agent.user_backend_mode[(1, 2)] = "pty"
         agent.user_sessions[(1, 2)] = "sess-from-print"
         try:
             b = agent._get_backend((1, 2))
@@ -2561,14 +2573,14 @@ class TestGetBackend(unittest.TestCase):
             agent.user_sessions.pop((1, 2), None)
 
     def test_pty_start_config_session_id_none_when_no_session(self):
-        agent.user_pty_mode[(1, 2)] = True
+        agent.user_backend_mode[(1, 2)] = "pty"
         b = agent._get_backend((1, 2))
         cwd, model, sid = b.start_config()
         self.assertIsNone(sid)
 
     def test_pty_on_invalid_session_clears_session_and_saves(self):
         """on_invalid_session must remove the key from user_sessions and persist."""
-        agent.user_pty_mode[(1, 2)] = True
+        agent.user_backend_mode[(1, 2)] = "pty"
         agent.user_sessions[(1, 2)] = "sess-stale"
         try:
             b = agent._get_backend((1, 2))
@@ -2577,6 +2589,19 @@ class TestGetBackend(unittest.TestCase):
                 b.on_invalid_session()
                 mock_save.assert_called_once()
             self.assertNotIn((1, 2), agent.user_sessions)
+        finally:
+            agent.user_sessions.pop((1, 2), None)
+
+    def test_stream_on_session_callback_updates_and_saves(self):
+        """on_session from JsonStreamBackend must update user_sessions and persist."""
+        agent.user_backend_mode[(1, 2)] = "stream"
+        try:
+            b = agent._get_backend((1, 2))
+            self.assertIsNotNone(b.on_session)
+            with patch("agent.save_sessions") as mock_save:
+                b.on_session("new-sid")
+                mock_save.assert_called_once()
+            self.assertEqual(agent.user_sessions.get((1, 2)), "new-sid")
         finally:
             agent.user_sessions.pop((1, 2), None)
 
@@ -2652,6 +2677,286 @@ class TestPrintBackendSend(unittest.TestCase):
     def test_cancel_returns_false_when_nothing_active(self):
         b = backends.PrintBackend(1, 2)
         self.assertFalse(b.cancel())
+
+
+class TestJsonStreamBackendSend(unittest.TestCase):
+    """Unit tests for JsonStreamBackend using a mocked ClaudeJsonStream.
+
+    The mock is injected at backends.json_stream._cjs_mod.ClaudeJsonStream —
+    the same seam pattern as PtyBackend tests mock ClaudeCode.
+    """
+
+    def setUp(self):
+        self.bot = setup_fake_bot()
+        agent.ALLOWED_USERS.clear()
+        agent.ALLOWED_USERS.add(1)
+        agent._backends.clear()
+        agent.user_sessions.clear()
+        agent.user_cwd.clear()
+        agent.user_model.clear()
+        agent.user_timeout.clear()
+        agent._cancelled_keys.clear()
+        agent.claude_active_keys.clear()
+        agent._current_procs.clear()
+        self._key = (1, 2)
+
+    def tearDown(self):
+        agent._backends.clear()
+        agent.user_sessions.clear()
+        agent.user_cwd.clear()
+        agent.user_model.clear()
+        agent.user_timeout.clear()
+        agent._cancelled_keys.clear()
+        agent.claude_active_keys.clear()
+        agent._current_procs.clear()
+
+    # ── helpers ──────────────────────────────────────────────────────────
+
+    def _make_backend(self, uid=1, chat_id=2):
+        b = backends.JsonStreamBackend(uid, chat_id)
+        b.on_session = MagicMock()
+        return b
+
+    def _make_mock_stream(self, events):
+        """Mock ClaudeJsonStream instance that yields the given events."""
+        m = MagicMock()
+        m.proc = MagicMock()
+        m.proc.poll.return_value = None
+        m.iter_events.return_value = iter(events)
+        return m
+
+    def _delta(self, text):
+        return {
+            'type': 'stream_event',
+            'event': {
+                'type': 'content_block_delta',
+                'delta': {'type': 'text_delta', 'text': text},
+            },
+        }
+
+    def _result(self, session_id='sid-1', is_error=False, result='', num_turns=1):
+        return {
+            'type': 'result',
+            'session_id': session_id,
+            'is_error': is_error,
+            'subtype': 'error_during_execution' if is_error else 'success',
+            'result': result,
+            'num_turns': num_turns,
+        }
+
+    # ── basic send / output ───────────────────────────────────────────────
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_text_deltas_forwarded_via_on_output(self, mock_cls):
+        mock_cls.return_value = self._make_mock_stream([
+            self._delta('hello '),
+            self._delta('world'),
+            self._result(session_id='sid-1'),
+        ])
+        b = self._make_backend()
+        received = []
+        b.on_output = received.append
+        b.send('hi')
+        self.assertEqual(len(received), 1)
+        self.assertIn('hello ', received[0])
+        self.assertIn('world', received[0])
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_session_id_saved_from_result_event(self, mock_cls):
+        mock_cls.return_value = self._make_mock_stream([
+            self._delta('reply'),
+            self._result(session_id='new-sid-123'),
+        ])
+        b = self._make_backend()
+        b.on_output = lambda _: None
+        b.send('hi')
+        b.on_session.assert_called_once_with('new-sid-123')
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_on_output_none_does_not_crash(self, mock_cls):
+        mock_cls.return_value = self._make_mock_stream([
+            self._delta('text'),
+            self._result(),
+        ])
+        b = self._make_backend()
+        b.on_output = None
+        b.send('hi')  # must not raise
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_error_result_forwarded_via_on_output(self, mock_cls):
+        mock_cls.return_value = self._make_mock_stream([
+            self._result(is_error=True, result='some API error', num_turns=1),
+        ])
+        b = self._make_backend()
+        received = []
+        b.on_output = received.append
+        b.send('hi')
+        self.assertEqual(len(received), 1)
+        self.assertIn('some API error', received[0])
+
+    # ── constructor args ──────────────────────────────────────────────────
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_session_id_passed_to_stream(self, mock_cls):
+        agent.user_sessions[self._key] = 'existing-sid'
+        mock_cls.return_value = self._make_mock_stream([self._result()])
+        b = self._make_backend()
+        b.on_output = lambda _: None
+        b.send('hi')
+        self.assertEqual(mock_cls.call_args[1].get('session_id'), 'existing-sid')
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_no_session_id_passed_when_none_stored(self, mock_cls):
+        mock_cls.return_value = self._make_mock_stream([self._result()])
+        b = self._make_backend()
+        b.on_output = lambda _: None
+        b.send('hi')
+        self.assertIsNone(mock_cls.call_args[1].get('session_id'))
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_cta_env_vars_passed(self, mock_cls):
+        mock_cls.return_value = self._make_mock_stream([self._result()])
+        b = self._make_backend(uid=123, chat_id=456)
+        b.on_output = lambda _: None
+        b.send('hi')
+        extra_env = mock_cls.call_args[1].get('extra_env', {})
+        self.assertEqual(extra_env.get('CTA_UID'), '123')
+        self.assertEqual(extra_env.get('CTA_CHAT_ID'), '456')
+
+    # ── invalid session retry ─────────────────────────────────────────────
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_retries_without_session_on_invalid_session_signal(self, mock_cls):
+        """is_error=True + num_turns=0 + empty result → stale session, retry fresh."""
+        agent.user_sessions[self._key] = 'stale-sid'
+        invalid_stream = self._make_mock_stream([
+            self._result(is_error=True, result='', num_turns=0),
+        ])
+        fresh_stream = self._make_mock_stream([
+            self._delta('fresh reply'),
+            self._result(session_id='new-sid'),
+        ])
+        mock_cls.side_effect = [invalid_stream, fresh_stream]
+        b = self._make_backend()
+        received = []
+        b.on_output = received.append
+        with patch('agent.save_sessions'):
+            b.send('hi')
+        self.assertEqual(mock_cls.call_count, 2)
+        self.assertEqual(mock_cls.call_args_list[0][1].get('session_id'), 'stale-sid')
+        self.assertIsNone(mock_cls.call_args_list[1][1].get('session_id'))
+        self.assertNotIn(self._key, agent.user_sessions)
+        self.assertTrue(any('fresh reply' in r for r in received))
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_does_not_retry_when_no_session_was_set(self, mock_cls):
+        """Invalid-session signal without a prior session_id must not retry."""
+        mock_cls.return_value = self._make_mock_stream([
+            self._result(is_error=True, result='', num_turns=0),
+        ])
+        b = self._make_backend()
+        b.on_output = lambda _: None
+        b.send('hi')
+        self.assertEqual(mock_cls.call_count, 1)
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_non_session_error_not_retried(self, mock_cls):
+        """A real error result (non-empty result text, num_turns>0) must not retry."""
+        agent.user_sessions[self._key] = 'sess'
+        mock_cls.return_value = self._make_mock_stream([
+            self._result(is_error=True, result='rate limit exceeded', num_turns=1),
+        ])
+        b = self._make_backend()
+        received = []
+        b.on_output = received.append
+        b.send('hi')
+        self.assertEqual(mock_cls.call_count, 1)
+        self.assertIn('rate limit exceeded', received[0])
+
+    # ── cancel / flag handling ────────────────────────────────────────────
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_bails_early_if_cancelled_before_start(self, mock_cls):
+        """Key in _cancelled_keys at acquire time → return without creating stream."""
+        agent._cancelled_keys.add(self._key)
+        b = self._make_backend()
+        received = []
+        b.on_output = received.append
+        b.send('hi')
+        mock_cls.assert_not_called()
+        self.assertEqual(received, [])
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_cancel_flag_consumed_after_bail(self, mock_cls):
+        """Early-bail must clear the flag so the next prompt is not also dropped."""
+        agent._cancelled_keys.add(self._key)
+        self._make_backend().send('hi')
+        self.assertNotIn(self._key, agent._cancelled_keys)
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_cancel_flag_consumed_after_normal_send(self, mock_cls):
+        """Flag added mid-stream must be cleared after send() returns."""
+        key = self._key
+
+        def events_with_midstream_cancel():
+            yield self._delta('partial')
+            agent._cancelled_keys.add(key)
+            yield self._result()
+
+        m = MagicMock()
+        m.proc = MagicMock()
+        m.iter_events.return_value = events_with_midstream_cancel()
+        mock_cls.return_value = m
+        b = self._make_backend()
+        received = []
+        b.on_output = received.append
+        b.send('hi')
+        # Output suppressed by the cancel
+        self.assertEqual(received, [])
+        # Flag cleared so next prompt is not dropped
+        self.assertNotIn(key, agent._cancelled_keys)
+
+    # ── typing indicator ──────────────────────────────────────────────────
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_on_typing_called_during_send(self, mock_cls):
+        mock_cls.return_value = self._make_mock_stream([self._result()])
+        b = self._make_backend()
+        b.on_output = lambda _: None
+        typing_calls = []
+        b.on_typing = lambda: typing_calls.append(1)
+        b.send('hi')
+        time.sleep(0.05)
+        self.assertGreater(len(typing_calls), 0)
+
+    # ── error handling ────────────────────────────────────────────────────
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_file_not_found_reported_via_on_output(self, mock_cls):
+        m = MagicMock()
+        m.start.side_effect = FileNotFoundError
+        mock_cls.return_value = m
+        b = self._make_backend()
+        received = []
+        b.on_output = received.append
+        b.send('hi')
+        self.assertEqual(len(received), 1)
+        self.assertIn('not found', received[0])
+
+    # ── cancel() method ───────────────────────────────────────────────────
+
+    def test_cancel_returns_false_when_idle(self):
+        b = self._make_backend()
+        self.assertFalse(b.cancel())
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_cancel_marks_key_when_active_but_no_stream_yet(self, mock_cls):
+        """If send() is blocked at the semaphore, cancel() has no stream yet but
+        must still mark the key so send() bails when a slot opens."""
+        b = self._make_backend()
+        agent.claude_active_keys.add(self._key)
+        self.assertTrue(b.cancel())
+        self.assertIn(self._key, agent._cancelled_keys)
 
 
 class TestClaudeCodeBuildCmd(unittest.TestCase):
