@@ -156,6 +156,9 @@ class JsonStreamBackend(ClaudeBackend):
                     pending.append(delta)
                     last_text_time = now
             elif etype == 'result':
+                footer = agent._append_usage_footer('', event)
+                if footer:
+                    pending.append(footer)
                 flush()
                 sid = event.get('session_id', '')
                 if sid and self.on_session:

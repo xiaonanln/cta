@@ -2736,8 +2736,9 @@ class TestJsonStreamBackendSend(unittest.TestCase):
             },
         }
 
-    def _result(self, session_id='sid-1', is_error=False, result='', num_turns=1):
-        return {
+    def _result(self, session_id='sid-1', is_error=False, result='', num_turns=1,
+                usage=None, model_usage=None):
+        ev = {
             'type': 'result',
             'session_id': session_id,
             'is_error': is_error,
@@ -2745,6 +2746,71 @@ class TestJsonStreamBackendSend(unittest.TestCase):
             'result': result,
             'num_turns': num_turns,
         }
+        if usage is not None:
+            ev['usage'] = usage
+        if model_usage is not None:
+            ev['modelUsage'] = model_usage
+        return ev
+
+    # ── usage footer ──────────────────────────────────────────────────────
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_usage_footer_appended_to_last_message(self, mock_cls):
+        """Usage data in the result event should append a ctx/out footer to the
+        final on_output call, matching the print-mode behaviour."""
+        mock_cls.return_value = self._make_mock_stream([
+            self._delta('Hello!'),
+            self._result(
+                usage={
+                    'input_tokens': 100,
+                    'cache_creation_input_tokens': 0,
+                    'cache_read_input_tokens': 17000,
+                    'output_tokens': 42,
+                },
+                model_usage={'claude-sonnet-4-6': {'contextWindow': 200000}},
+            ),
+        ])
+        b = self._make_backend()
+        received = []
+        b.on_output = received.append
+        b.send('hi')
+        self.assertEqual(len(received), 1)
+        self.assertIn('Hello!', received[0])
+        self.assertIn('ctx:', received[0])
+        self.assertIn('/200K', received[0])
+        self.assertIn('out:', received[0])
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_usage_footer_fallback_without_context_window(self, mock_cls):
+        """When modelUsage.contextWindow is absent, fall back to 'in: X / out: Y'."""
+        mock_cls.return_value = self._make_mock_stream([
+            self._delta('Hi'),
+            self._result(
+                usage={'input_tokens': 50, 'output_tokens': 10},
+            ),
+        ])
+        b = self._make_backend()
+        received = []
+        b.on_output = received.append
+        b.send('hi')
+        self.assertEqual(len(received), 1)
+        self.assertIn('in:', received[0])
+        self.assertIn('out:', received[0])
+        self.assertNotIn('ctx:', received[0])
+
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_no_usage_footer_when_usage_absent(self, mock_cls):
+        """When the result event carries no usage, no footer is appended."""
+        mock_cls.return_value = self._make_mock_stream([
+            self._delta('hello world'),
+            self._result(),
+        ])
+        b = self._make_backend()
+        received = []
+        b.on_output = received.append
+        b.send('hi')
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0], 'hello world')
 
     # ── basic send / output ───────────────────────────────────────────────
 
