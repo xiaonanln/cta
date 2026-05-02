@@ -3150,6 +3150,30 @@ class TestJsonStreamBackendSend(unittest.TestCase):
         time.sleep(0.05)
         self.assertGreater(len(typing_calls), 0)
 
+    @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
+    def test_typing_keeps_pulsing_during_silent_tool_call(self, mock_cls):
+        """Typing must keep pulsing when no stream events arrive for a long
+        period (e.g. Claude is executing a silent tool call)."""
+        def slow_events():
+            time.sleep(0.5)
+            yield self._result()
+
+        m = MagicMock()
+        m.proc = MagicMock()
+        m.proc.poll.return_value = None
+        m.iter_events.return_value = slow_events()
+        mock_cls.return_value = m
+
+        b = self._make_backend()
+        b.on_output = lambda _: None
+        typing_calls = []
+        b.on_typing = lambda: typing_calls.append(time.time())
+
+        with patch('backends.json_stream._TYPING_PULSE_SECONDS', 0.1):
+            b.send('hi')
+
+        self.assertGreaterEqual(len(typing_calls), 3)
+
     # ── error handling ────────────────────────────────────────────────────
 
     @patch('backends.json_stream._cjs_mod.ClaudeJsonStream')
