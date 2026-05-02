@@ -297,6 +297,32 @@ _WEB_HTML = """<!DOCTYPE html>
     .stat-val { color: var(--fg); font-family: monospace; font-size: .75rem;
                 text-align: right; max-width: 250px;
                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* WCA view */
+    #v-wca { padding: 1.25rem; flex-direction: column; gap: .75rem; }
+    .wca-controls { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
+    #wca-comp-inp { width: 230px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+                    padding: .35rem .65rem; color: var(--fg); font-size: .8rem; font-family: monospace;
+                    outline: none; }
+    #wca-comp-inp:focus { border-color: var(--accent); }
+    #wca-search { flex: 1; min-width: 140px; background: var(--bg); border: 1px solid var(--border);
+                  border-radius: 6px; padding: .35rem .65rem; color: var(--fg); font-size: .8rem;
+                  font-family: inherit; outline: none; }
+    #wca-search:focus { border-color: var(--accent); }
+    .wca-load-btn { padding: .35rem .85rem; background: var(--accent); border: none; border-radius: 6px;
+                    color: #fff; font-size: .8rem; font-weight: 600; cursor: pointer; flex-shrink: 0; }
+    .wca-load-btn:hover { opacity: .85; }
+    .wca-load-btn:disabled { opacity: .4; cursor: default; }
+    #wca-count { font-size: .75rem; color: var(--fg2); white-space: nowrap; }
+    .wca-table { width: 100%; border-collapse: collapse; font-size: .78rem; }
+    .wca-table th { text-align: left; color: var(--fg2); font-weight: 600;
+                    padding: .4rem .75rem; border-bottom: 1px solid var(--border); position: sticky; top: 0;
+                    background: var(--bg); }
+    .wca-table td { padding: .4rem .75rem; border-bottom: 1px solid var(--border2); vertical-align: middle; }
+    .wca-table tr:hover td { background: var(--bg2); }
+    .wca-evt { display: inline-block; background: var(--bg3); color: var(--fg2); border-radius: 4px;
+               padding: .1rem .35rem; font-size: .68rem; font-family: monospace; margin: .05rem; }
+    #wca-msg { font-size: .8rem; color: var(--fg2); padding: .5rem 0; }
+
     /* config view */
     #view-config { padding: 1.25rem; }
     .cfg-form { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
@@ -341,6 +367,9 @@ _WEB_HTML = """<!DOCTYPE html>
     </div>
     <div class="nav-item" data-view="config">
       <span class="nav-icon">🔧</span> Config
+    </div>
+    <div class="nav-item" data-view="wca">
+      <span class="nav-icon">🏆</span> WCA
     </div>
   </div>
 
@@ -409,6 +438,19 @@ _WEB_HTML = """<!DOCTYPE html>
   <div class="view" id="view-status">
     <div id="v-status">
       <div class="stat-block" id="stat-block"></div>
+    </div>
+  </div>
+
+  <!-- WCA view -->
+  <div class="view" id="view-wca">
+    <div id="v-wca">
+      <div class="wca-controls">
+        <input id="wca-comp-inp" value="AustralianNationals2026" placeholder="Competition ID (e.g. AustralianNationals2026)" />
+        <button class="wca-load-btn" id="wca-load-btn" onclick="loadWCA()">Load</button>
+        <input id="wca-search" placeholder="Filter by name, WCA ID, country…" oninput="filterWCA()" />
+        <span id="wca-count"></span>
+      </div>
+      <div id="wca-table-area"></div>
     </div>
   </div>
 
@@ -486,7 +528,7 @@ _WEB_HTML = """<!DOCTYPE html>
   // ── Nav switching ──
   let currentView = 'chats';
   let chatUid = null, chatChatId = null, chatES = null;
-  const VIEW_LABELS = { chats: 'Chats', crons: 'Cronjobs', log: 'Log', status: 'Status', config: 'Config' };
+  const VIEW_LABELS = { chats: 'Chats', crons: 'Cronjobs', log: 'Log', status: 'Status', config: 'Config', wca: 'WCA' };
 
   function viewFromHash() {
     const h = location.hash.replace(/^#/, '');
@@ -512,6 +554,7 @@ _WEB_HTML = """<!DOCTYPE html>
     document.getElementById('topbar-label').firstElementChild.textContent = VIEW_LABELS[name] || name;
     document.getElementById('topbar-sub').textContent = '';
     if (name === 'config') loadConfig();
+    if (name === 'wca' && !_wcaData) loadWCA();
     if (!_popNav) {
       const hash = name === 'chats' ? '' : '#' + name;
       history.pushState({view: name}, '', location.pathname + hash);
@@ -940,6 +983,68 @@ _WEB_HTML = """<!DOCTYPE html>
     this.style.height = Math.min(this.scrollHeight, 150) + 'px';
   });
 
+  // ── WCA ──
+  let _wcaData = null;
+
+  async function loadWCA() {
+    const comp = document.getElementById('wca-comp-inp').value.trim();
+    if (!comp) return;
+    const area = document.getElementById('wca-table-area');
+    const btn = document.getElementById('wca-load-btn');
+    area.innerHTML = '<div id="wca-msg">Loading…</div>';
+    document.getElementById('wca-count').textContent = '';
+    document.getElementById('wca-search').value = '';
+    btn.disabled = true;
+    try {
+      const r = await fetch('/wca?competition=' + encodeURIComponent(comp));
+      const d = await r.json();
+      if (!r.ok) {
+        area.innerHTML = `<div id="wca-msg" style="color:#e64553">${esc(d.error || 'Failed')}</div>`;
+        return;
+      }
+      _wcaData = d;
+      renderWCA(d.persons);
+      document.getElementById('topbar-sub').textContent = d.competition;
+    } catch {
+      area.innerHTML = '<div id="wca-msg" style="color:#e64553">Network error</div>';
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function renderWCA(persons) {
+    const area = document.getElementById('wca-table-area');
+    document.getElementById('wca-count').textContent = `${persons.length} competitors`;
+    if (!persons.length) {
+      area.innerHTML = '<div id="wca-msg">No accepted registrations found</div>';
+      return;
+    }
+    area.innerHTML = `<table class="wca-table">
+      <thead><tr>
+        <th>#</th><th>Name</th><th>WCA ID</th><th>Country</th><th>Events</th>
+      </tr></thead>
+      <tbody>${persons.map((p, i) => `
+        <tr>
+          <td style="color:var(--fg3);width:2.5rem">${i + 1}</td>
+          <td>${esc(p.name)}</td>
+          <td style="font-family:monospace;color:var(--accent)">${esc(p.wca_id || '—')}</td>
+          <td>${esc(p.country)}</td>
+          <td>${p.events.map(e => `<span class="wca-evt">${esc(e)}</span>`).join('')}</td>
+        </tr>`).join('')}
+      </tbody></table>`;
+  }
+
+  function filterWCA() {
+    if (!_wcaData) return;
+    const q = document.getElementById('wca-search').value.toLowerCase();
+    const filtered = _wcaData.persons.filter(p =>
+      p.name.toLowerCase().includes(q) ||
+      (p.wca_id || '').toLowerCase().includes(q) ||
+      p.country.toLowerCase().includes(q)
+    );
+    renderWCA(filtered);
+  }
+
   // ── Theme toggle ──
   function toggleTheme() {
     const light = document.body.classList.toggle('light');
@@ -1248,6 +1353,37 @@ def _web_update_cronjob(uid, chat_id, job_id):
             tui_log(f"[magenta]⏰ cron updated[/] {uid}:{chat_id} job={job_id}")
             return {"ok": True, "next_run": next_run}
     return {"error": "Job not found"}, 404
+
+
+@app.route("/wca")
+def _web_wca():
+    import urllib.request as _urllib_req
+    competition = request.args.get("competition", "").strip()
+    if not competition:
+        return {"error": "competition parameter required"}, 400
+    if not re.match(r'^[A-Za-z0-9_-]+$', competition):
+        return {"error": "invalid competition id"}, 400
+    url = f"https://www.worldcubeassociation.org/api/v0/competitions/{competition}/wcif/public"
+    try:
+        req = _urllib_req.Request(url, headers={"User-Agent": "CTA/1.0", "Accept": "application/json"})
+        with _urllib_req.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception as e:
+        return {"error": f"WCA API error: {e}"}, 502
+    persons = []
+    for p in data.get("persons", []):
+        reg = p.get("registration") or {}
+        if not reg.get("isCompeting", False):
+            continue
+        persons.append({
+            "name": p.get("name", ""),
+            "wca_id": p.get("wcaId", ""),
+            "country": p.get("countryIso2", ""),
+            "events": reg.get("eventIds", []),
+            "status": reg.get("status", ""),
+        })
+    persons.sort(key=lambda p: p["name"].lower())
+    return {"competition": data.get("name", competition), "persons": persons}
 
 
 @app.route("/chats")
