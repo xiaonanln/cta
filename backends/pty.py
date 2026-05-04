@@ -8,16 +8,16 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Callable, Optional
+from typing import Callable
 
 import claude_code
 
 from .base import ClaudeBackend
 
-_TYPING_IDLE_SECONDS = 3.0   # stop typing after this many seconds without output
-_TYPING_PULSE_SECONDS = 3.0  # re-send typing action this often (Telegram expires after ~5s)
-_OUTPUT_COALESCE_SECONDS = 3.0  # buffer lines and flush after this many seconds of quiet (noise frames don't reset the timer)
-_now = time.time  # indirection so tests can patch the reader_loop clock without touching the real time module
+_TYPING_IDLE_SECONDS: float = 3.0   # stop typing after this many seconds without output
+_TYPING_PULSE_SECONDS: float = 3.0  # re-send typing action this often (Telegram expires after ~5s)
+_OUTPUT_COALESCE_SECONDS: float = 3.0  # buffer lines and flush after this many seconds of quiet (noise frames don't reset the timer)
+_now: Callable[[], float] = time.time  # indirection so tests can patch the reader_loop clock without touching the real time module
 
 
 class PtyBackend(ClaudeBackend):
@@ -29,7 +29,7 @@ class PtyBackend(ClaudeBackend):
         self._last_activity: float = 0.0
         self._typing_stop: threading.Event | None = None
         self._typing_thread: threading.Thread | None = None
-        self.start_config: Optional[Callable[[], tuple[str, str, Optional[str]]]] = None
+        self.start_config: Callable[[], tuple[str, str, str | None]] | None = None
 
     @property
     def cc(self) -> claude_code.ClaudeCode | None:

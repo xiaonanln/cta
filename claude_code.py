@@ -71,13 +71,13 @@ class ClaudeCode:
         debug_log: str | None = None,
         rows: int = 40,
         cols: int = 120,
-        extra_env: dict | None = None,
+        extra_env: dict[str, str] | None = None,
     ):
-        self.cwd = cwd
-        self.model = model
-        self.session_id = session_id
-        self.extra_env = dict(extra_env) if extra_env else {}
-        self.claude_bin = (
+        self.cwd: str | None = cwd
+        self.model: str | None = model
+        self.session_id: str | None = session_id
+        self.extra_env: dict[str, str] = dict(extra_env) if extra_env else {}
+        self.claude_bin: str = (
             claude_bin
             or shutil.which('claude')
             or os.path.expanduser('~/.local/bin/claude')
@@ -87,18 +87,18 @@ class ClaudeCode:
             debug_dir = os.path.expanduser('~/.cta/debug')
             os.makedirs(debug_dir, exist_ok=True)
             debug_log = os.path.join(debug_dir, f'claudecode-{int(time.time())}.log')
-        self.debug_log = debug_log
-        self.rows = rows
-        self.cols = cols
+        self.debug_log: str = debug_log
+        self.rows: int = rows
+        self.cols: int = cols
         self.proc: subprocess.Popen | None = None
         self.master_fd: int | None = None
-        self._buffer_raw = ''     # accumulated raw output (with ANSI)
-        self._buffer_clean = ''   # stripped, used for prompt detection
+        self._buffer_raw: str = ''     # accumulated raw output (with ANSI)
+        self._buffer_clean: str = ''   # stripped, used for prompt detection
         # pyte virtual terminal — maintains the actual rendered screen
         # state so we can read the final, post-redraw content rather than
         # the accumulated stream of frames.
-        self._screen = pyte.Screen(self.cols, self.rows)
-        self._stream = pyte.ByteStream(self._screen)
+        self._screen: pyte.Screen = pyte.Screen(self.cols, self.rows)
+        self._stream: pyte.ByteStream = pyte.ByteStream(self._screen)
         # Hashes of lines we've already returned via read_new_output, so
         # we don't re-emit them on every screen redraw. Reset on start().
         self._yielded_line_hashes: set[int] = set()
