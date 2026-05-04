@@ -18,7 +18,7 @@ CTA is a self-hosted Telegram bot that connects to Claude Code CLI running on yo
 
 - Claude Max or Pro subscription
 - Claude Code CLI installed and authenticated (`claude` works in your terminal)
-- Python 3.9+
+- Python 3.12+
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
 
 ## Setup

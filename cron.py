@@ -23,6 +23,8 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from argparse import Namespace
+from typing import Any
 
 
 def _base_url() -> str:
@@ -36,7 +38,7 @@ def _base_url() -> str:
     return f"http://127.0.0.1:{port}"
 
 
-def _ctx(args) -> tuple[int, int]:
+def _ctx(args: Namespace) -> tuple[int, int]:
     uid = args.uid if args.uid is not None else os.environ.get("CTA_UID")
     chat_id = args.chat_id if args.chat_id is not None else os.environ.get("CTA_CHAT_ID")
     if uid is None or chat_id is None:
@@ -44,7 +46,7 @@ def _ctx(args) -> tuple[int, int]:
     return int(uid), int(chat_id)
 
 
-def _request(method: str, path: str, body: dict = None) -> dict:
+def _request(method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(
         _base_url() + path,
@@ -61,7 +63,7 @@ def _request(method: str, path: str, body: dict = None) -> dict:
         sys.exit(f"error: could not reach CTA at {_base_url()} ({e.reason})")
 
 
-def cmd_add(args):
+def cmd_add(args: Namespace) -> None:
     uid, chat_id = _ctx(args)
     r = _request("POST", "/cronjobs", {
         "uid": uid, "chat_id": chat_id,
@@ -70,7 +72,7 @@ def cmd_add(args):
     print(f"added {args.job_id} — next_run {r.get('next_run', '?')}")
 
 
-def cmd_list(args):
+def cmd_list(args: Namespace) -> None:
     uid, chat_id = _ctx(args)
     r = _request("GET", "/cronjobs")
     jobs = [j for j in r.get("jobs", []) if j["uid"] == uid and j["chat_id"] == chat_id]
@@ -85,15 +87,15 @@ def cmd_list(args):
         print(f"    prompt: {j.get('prompt', '')[:120]}{'…' if len(j.get('prompt','')) > 120 else ''}")
 
 
-def cmd_remove(args):
+def cmd_remove(args: Namespace) -> None:
     uid, chat_id = _ctx(args)
     _request("DELETE", f"/cronjobs/{uid}/{chat_id}/{args.job_id}")
     print(f"removed {args.job_id}")
 
 
-def cmd_update(args):
+def cmd_update(args: Namespace) -> None:
     uid, chat_id = _ctx(args)
-    body = {}
+    body: dict[str, str] = {}
     if args.schedule is not None:
         body["schedule"] = args.schedule
     if args.prompt is not None:
@@ -104,7 +106,7 @@ def cmd_update(args):
     print(f"updated {args.job_id} — next_run {r.get('next_run', '?')}")
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="cron.py", description="Manage CTA cron jobs")
     p.add_argument("--uid", type=int, help="user id (default: $CTA_UID)")
     p.add_argument("--chat-id", type=int, help="chat id (default: $CTA_CHAT_ID)")

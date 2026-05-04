@@ -21,6 +21,8 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from argparse import Namespace
+from typing import Any
 
 
 def _base_url() -> str:
@@ -34,7 +36,7 @@ def _base_url() -> str:
     return f"http://127.0.0.1:{port}"
 
 
-def _request(method: str, path: str, body: dict = None) -> dict:
+def _request(method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(
         _base_url() + path,
@@ -51,7 +53,7 @@ def _request(method: str, path: str, body: dict = None) -> dict:
         sys.exit(f"error: could not reach CTA at {_base_url()} ({e.reason})")
 
 
-def _resolve_chat(args) -> tuple:
+def _resolve_chat(args: Namespace) -> tuple[int, int]:
     """Return (uid, chat_id) from either --uid + --chat-id or --to <label>.
 
     Exact label match — fails loudly on 0 or >1 matches so addressing is
@@ -72,13 +74,13 @@ def _resolve_chat(args) -> tuple:
     sys.exit("error: pass --to <label> or --uid + --chat-id")
 
 
-def cmd_send(args):
+def cmd_send(args: Namespace) -> None:
     uid, chat_id = _resolve_chat(args)
     _request("POST", f"/chat/{uid}/{chat_id}/send", {"text": args.message})
     print(f"sent to {uid}:{chat_id}")
 
 
-def cmd_list(args):
+def cmd_list(args: Namespace) -> None:
     sessions = _request("GET", "/chats").get("chats", [])
     if not sessions:
         print("(no chats)")
@@ -88,7 +90,7 @@ def cmd_list(args):
         print(f"{label:<30} uid={s['uid']} chat_id={s['chat_id']}")
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="notify.py",
                                 description="Send a message to another CTA chat.")
     sub = p.add_subparsers(dest="cmd", required=True)

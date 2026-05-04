@@ -21,6 +21,7 @@ import threading
 import time
 from collections import deque
 from datetime import datetime
+from typing import Callable
 
 import telebot
 import telegramify_markdown
@@ -77,7 +78,7 @@ def _apply_path_prefix(prefix: str) -> None:
         os.environ["PATH"] = os.pathsep.join(new_parts) + os.pathsep + base
 
 
-def load_config() -> dict:
+def load_config() -> dict[str, object]:
     """Load config from ~/.cta/config.json. Creates a template if not found."""
     config = dict(DEFAULT_CONFIG)
 
@@ -148,7 +149,7 @@ def _read_global_preamble() -> str:
         return ""
 
 
-def _system_preamble(uid_display, chat_id_display) -> str:
+def _system_preamble(uid_display: object, chat_id_display: object) -> str:
     """Build the hardcoded preamble prepended to every agent turn.
 
     Accepts uid/chat_id as stringifiable values so the /config endpoint can
@@ -165,7 +166,7 @@ def _system_preamble(uid_display, chat_id_display) -> str:
     )
 
 
-def _load_whisper():
+def _load_whisper() -> object:
     """Lazily load the Whisper model (slow first call, cached after)."""
     global _whisper_model_instance
     if _whisper_model_instance is None:
@@ -176,7 +177,7 @@ def _load_whisper():
     return _whisper_model_instance
 
 
-def init(config: dict):
+def init(config: dict[str, object]) -> None:
     global BOT_TOKEN, ALLOWED_USERS, TIMEOUT, MODEL, WEB_PORT, DEFAULT_CWD, GLOBAL_PREAMBLE, WHISPER_MODEL
     global MAX_CONCURRENT_CLAUDE, _claude_semaphore, CLAUDE_BIN, PATH_PREFIX
     BOT_TOKEN = config["telegram_bot_token"]
@@ -201,7 +202,7 @@ def init(config: dict):
     os.makedirs(DEBUG_DIR, exist_ok=True)
 
 
-def _load_entry(key, entry):
+def _load_entry(key: tuple[int, int], entry: object) -> None:
     """Merge one agents.json entry into in-memory dicts (only fills missing keys)."""
     if isinstance(entry, str):  # backward compat
         user_sessions.setdefault(key, entry)
@@ -222,7 +223,7 @@ def _load_entry(key, entry):
         user_backend_mode.setdefault(key, "pty")
 
 
-def load_sessions():
+def load_sessions() -> None:
     if not os.path.exists(AGENTS_PATH):
         return
     try:
@@ -259,7 +260,7 @@ def atomic_write(path: str, text: str) -> None:
         raise
 
 
-def save_sessions():
+def save_sessions() -> None:
     bak = AGENTS_PATH + ".bak"
     try:
         all_keys = (set(user_sessions) | set(user_cwd) | set(user_model)
@@ -293,7 +294,7 @@ def save_sessions():
         tui_log(f"[red]Warning: could not save sessions: {escape(str(e))}[/]")
 
 
-def _purge_chat(uid: int, chat_id: int):
+def _purge_chat(uid: int, chat_id: int) -> None:
     """Hard-delete all state for a chat: in-memory dicts + on-disk files
     (memory, crons, preamble). The chat disappears from the UI; if the user
     sends another message in that Telegram chat later, a fresh session is
@@ -351,14 +352,14 @@ _CRON_EXAMPLE = [
 ]
 
 
-def _ensure_cron_file(uid: int, chat_id: int):
+def _ensure_cron_file(uid: int, chat_id: int) -> None:
     """Write an example cron file if none exists yet, so Claude knows the format."""
     path = _cron_path(uid, chat_id)
     if not os.path.exists(path):
         _save_cron_jobs(uid, chat_id, _CRON_EXAMPLE)
 
 
-def _load_cron_jobs(uid: int, chat_id: int) -> list:
+def _load_cron_jobs(uid: int, chat_id: int) -> list[dict[str, object]]:
     path = _cron_path(uid, chat_id)
     try:
         with open(path) as f:
@@ -367,7 +368,7 @@ def _load_cron_jobs(uid: int, chat_id: int) -> list:
         return []
 
 
-def _crons_parse_error(uid: int, chat_id: int):
+def _crons_parse_error(uid: int, chat_id: int) -> str | None:
     """Return a short error message if the crons file exists but won't parse, else None.
 
     Silent parse failures in _load_cron_jobs used to hide broken files from both
@@ -387,7 +388,7 @@ def _crons_parse_error(uid: int, chat_id: int):
         return str(e)
 
 
-def _save_cron_jobs(uid: int, chat_id: int, jobs: list):
+def _save_cron_jobs(uid: int, chat_id: int, jobs: list[dict[str, object]]) -> None:
     path = _cron_path(uid, chat_id)
     try:
         atomic_write(path, json.dumps(jobs, indent=2))
@@ -395,7 +396,7 @@ def _save_cron_jobs(uid: int, chat_id: int, jobs: list):
         tui_log(f"[red]Warning: could not save crons for {uid}:{chat_id}: {escape(str(e))}[/]")
 
 
-def _cron_tick_once(now: datetime):
+def _cron_tick_once(now: datetime) -> None:
     """Run one scheduler tick: fire due jobs and persist next_run updates."""
     from croniter import croniter
     if not os.path.isdir(CRONS_DIR):
@@ -442,7 +443,7 @@ def _cron_tick_once(now: datetime):
             _save_cron_jobs(uid, chat_id, jobs)
 
 
-def _cron_scheduler():
+def _cron_scheduler() -> None:
     """Background thread: fires due cron jobs into user queues every 60s."""
     while True:
         time.sleep(60)
@@ -480,7 +481,7 @@ def _kill_tracked_subprocs() -> int:
     return n
 
 
-def _install_shutdown_handler():
+def _install_shutdown_handler() -> None:
     """Install SIGTERM handler that kills tracked subprocesses before exit.
 
     launchctl sends SIGTERM before SIGKILL; this gives us a chance to clean up
@@ -496,7 +497,7 @@ def _install_shutdown_handler():
     signal.signal(signal.SIGINT, _handler)
 
 
-def _polling_loop():
+def _polling_loop() -> None:
     """Run bot.infinity_polling in a loop, reconnecting after errors.
 
     Errno 49 ('can't assign address') and other transient network failures
@@ -522,7 +523,7 @@ def _format_tokens_k(n: int) -> str:
     return f"{n/1000:.0f}K"
 
 
-def _append_usage_footer(text: str, data: dict) -> str:
+def _append_usage_footer(text: str, data: dict[str, object]) -> str:
     """Append a context-window + output-tokens footer to a Claude reply.
 
     Format: '— ctx: 17K/200K (8%) / out: 42'. The ctx number is total input
@@ -545,9 +546,9 @@ def _append_usage_footer(text: str, data: dict) -> str:
     return f"{text}\n\n📊 in: {_format_tokens_k(inp)} / out: {_format_tokens_k(out)}"
 
 
-def call_claude(prompt: str, cwd: str = None, session_id: str = None, model: str = None,
-                timeout: int = None,
-                uid: int = None, chat_id: int = None) -> tuple[str, str]:
+def call_claude(prompt: str, cwd: str | None = None, session_id: str | None = None, model: str | None = None,
+                timeout: int | None = None,
+                uid: int | None = None, chat_id: int | None = None) -> tuple[str, str]:
     """Call Claude Code CLI. Returns (text, session_id).
 
     When uid/chat_id are provided, sets CTA_UID/CTA_CHAT_ID in the subprocess env
@@ -670,7 +671,7 @@ def _stop_backend(key: tuple[int, int]) -> None:
 
 _CHAT_HISTORY_MAX = 200
 
-def _chat_push(uid: int, chat_id: int, role: str, text: str):
+def _chat_push(uid: int, chat_id: int, role: str, text: str) -> None:
     """Append a message to per-chat history and broadcast to web chat SSE subscribers."""
     key = (uid, chat_id)
     now = time.time()
@@ -723,7 +724,7 @@ def _build_preamble(uid: int, chat_id: int) -> str:
     return "\n".join(parts) + "\n"
 
 
-def _send_markdown(message, text: str):
+def _send_markdown(message: object, text: str) -> None:
     """Send text with MarkdownV2 formatting, falling back to plain text."""
     if isinstance(message, _WebMessage):
         # Web-originated message: send back to Telegram via send_message (no reply_to)
@@ -752,7 +753,7 @@ def _split_reply(text: str, limit: int = 4096) -> list[str]:
     return chunks
 
 
-def _typing_loop(chat_id: int, done: threading.Event):
+def _typing_loop(chat_id: int, done: threading.Event) -> None:
     """Send typing action immediately, then every 3s until done.
 
     Telegram's typing indicator expires after ~5s; 3s gives enough headroom
@@ -766,7 +767,7 @@ def _typing_loop(chat_id: int, done: threading.Event):
             break
 
 
-def _process_message(uid: int, chat_id: int, message, done: threading.Event):
+def _process_message(uid: int, chat_id: int, message: object, done: threading.Event) -> None:
     print(f"[PROCESS_MSG] uid={uid} chat={chat_id}", flush=True)
     key = (uid, chat_id)
     cwd = user_cwd.get(key, DEFAULT_CWD)
@@ -875,7 +876,7 @@ def _process_message(uid: int, chat_id: int, message, done: threading.Event):
             os.unlink(tmp_photo)
 
 
-def _make_output_handler(uid: int, chat_id: int, message, username: str, mode: str):
+def _make_output_handler(uid: int, chat_id: int, message: object, username: str, mode: str) -> Callable[[str], None]:
     """Build the callback a backend invokes for each chunk of new output.
 
     Centralises post-processing (history, msg_counts, persistence, Telegram
@@ -918,7 +919,7 @@ def _make_output_handler(uid: int, chat_id: int, message, username: str, mode: s
     return on_output
 
 
-def _process_cron(uid: int, chat_id: int, task: dict, done: threading.Event):
+def _process_cron(uid: int, chat_id: int, task: dict[str, object], done: threading.Event) -> None:
     key = (uid, chat_id)
     cwd = user_cwd.get(key, DEFAULT_CWD)
     model = user_model.get(key, MODEL)
@@ -952,7 +953,7 @@ def _process_cron(uid: int, chat_id: int, task: dict, done: threading.Event):
         bot.send_message(chat_id, telegramify_markdown.markdownify(chunk), parse_mode="MarkdownV2")
 
 
-def _is_plain_text(item) -> bool:
+def _is_plain_text(item: object) -> bool:
     """Return True if item is a plain text message that can be batched."""
     return (
         not isinstance(item, dict)
@@ -964,7 +965,7 @@ def _is_plain_text(item) -> bool:
     )
 
 
-def _user_worker(uid: int, chat_id: int, q: queue.Queue):
+def _user_worker(uid: int, chat_id: int, q: queue.Queue[object]) -> None:
     while True:
         item = q.get()
         print(f"[WORKER_DEQUEUE] uid={uid} chat={chat_id} type={'cron' if isinstance(item, dict) else 'msg'}", flush=True)
@@ -1008,7 +1009,7 @@ def _user_worker(uid: int, chat_id: int, q: queue.Queue):
             q.task_done()
 
 
-def _get_user_queue(uid: int, chat_id: int) -> queue.Queue:
+def _get_user_queue(uid: int, chat_id: int) -> queue.Queue[object]:
     key = (uid, chat_id)
     with user_queues_lock:
         if key not in user_queues:
@@ -1020,16 +1021,16 @@ def _get_user_queue(uid: int, chat_id: int) -> queue.Queue:
 
 # ── Bot handlers ──────────────────────────────────────────────────────────────
 
-def _allowed(message) -> bool:
+def _allowed(message: object) -> bool:
     return not ALLOWED_USERS or message.from_user.id in ALLOWED_USERS
 
 
-def cmd_start(message):
+def cmd_start(message: object) -> None:
     if not _allowed(message): return
     bot.reply_to(message, "👋 Hi! I'm powered by Claude Code CLI. Just send me a message.")
 
 
-def cmd_help(message):
+def cmd_help(message: object) -> None:
     print(f"[CMD_HELP] entered chat={message.chat.id} text={message.text!r}", flush=True)
     if not _allowed(message): return
     bot.reply_to(message, (
@@ -1049,7 +1050,7 @@ def cmd_help(message):
     ), parse_mode="Markdown")
 
 
-def cmd_clear(message):
+def cmd_clear(message: object) -> None:
     if not _allowed(message): return
     key = (message.from_user.id, message.chat.id)
     user_sessions.pop(key, None)
@@ -1058,7 +1059,7 @@ def cmd_clear(message):
     bot.reply_to(message, "🧹 Conversation cleared.")
 
 
-def cmd_cancel(message):
+def cmd_cancel(message: object) -> None:
     if not _allowed(message): return
     uid = message.from_user.id
     key = (uid, message.chat.id)
@@ -1091,7 +1092,7 @@ def cmd_cancel(message):
         bot.reply_to(message, "Nothing to cancel.")
 
 
-def cmd_cd(message):
+def cmd_cd(message: object) -> None:
     if not _allowed(message): return
     uid = message.from_user.id
     path = message.text.replace("/cd", "", 1).strip()
@@ -1116,12 +1117,12 @@ def cmd_cd(message):
     bot.reply_to(message, f"📂 → `{expanded}`{suffix} (session cleared)", parse_mode="Markdown")
 
 
-def cmd_pwd(message):
+def cmd_pwd(message: object) -> None:
     if not _allowed(message): return
     bot.reply_to(message, f"📂 `{user_cwd.get((message.from_user.id, message.chat.id), DEFAULT_CWD)}`", parse_mode="Markdown")
 
 
-def cmd_model(message):
+def cmd_model(message: object) -> None:
     if not _allowed(message): return
     uid = message.from_user.id
     name = message.text.replace("/model", "", 1).strip()
@@ -1135,7 +1136,7 @@ def cmd_model(message):
     bot.reply_to(message, f"🤖 Model → `{name}`", parse_mode="Markdown")
 
 
-def cmd_opus(message):
+def cmd_opus(message: object) -> None:
     print(f"[CMD_OPUS] entered chat={message.chat.id} user={message.from_user.id} text={message.text!r}", flush=True)
     if not _allowed(message):
         print(f"[CMD_OPUS] denied", flush=True)
@@ -1153,7 +1154,7 @@ def cmd_opus(message):
         print(f"[CMD_OPUS] reply_to FAILED: {e!r}", flush=True)
 
 
-def cmd_sonnet(message):
+def cmd_sonnet(message: object) -> None:
     print(f"[CMD_SONNET] entered chat={message.chat.id} user={message.from_user.id} text={message.text!r}", flush=True)
     if not _allowed(message):
         print(f"[CMD_SONNET] denied", flush=True)
@@ -1178,7 +1179,7 @@ _MODE_LABELS = {
 }
 
 
-def cmd_backend(message):
+def cmd_backend(message: object) -> None:
     """/backend [print|stream|pty|status] — switch the claude backend for this chat."""
     if not _allowed(message): return
     uid = message.from_user.id
@@ -1200,7 +1201,7 @@ def cmd_backend(message):
     bot.reply_to(message, "Usage: `/backend print|stream|pty|status`", parse_mode="Markdown")
 
 
-def cmd_timeout(message):
+def cmd_timeout(message: object) -> None:
     if not _allowed(message): return
     uid = message.from_user.id
     key = (uid, message.chat.id)
@@ -1224,7 +1225,7 @@ def cmd_timeout(message):
     bot.reply_to(message, f"⏱ Timeout → `{seconds}s`", parse_mode="Markdown")
 
 
-def cmd_status(message):
+def cmd_status(message: object) -> None:
     if not _allowed(message): return
     uid = message.from_user.id
     key = (uid, message.chat.id)
@@ -1238,7 +1239,7 @@ def cmd_status(message):
     )
 
 
-def handle_message(message):
+def handle_message(message: object) -> None:
     print(f"[HANDLE_MSG] chat={message.chat.id} user={message.from_user.id} text={message.text!r}", flush=True)
     uid = message.from_user.id
     if message.chat.type == "private":
@@ -1252,7 +1253,7 @@ def handle_message(message):
     _get_user_queue(uid, message.chat.id).put(message)
 
 
-def handle_document(message):
+def handle_document(message: object) -> None:
     uid = message.from_user.id
     if message.chat.type == "private":
         source = "[DM]"
@@ -1265,7 +1266,7 @@ def handle_document(message):
     _get_user_queue(uid, message.chat.id).put(message)
 
 
-def handle_photo(message):
+def handle_photo(message: object) -> None:
     uid = message.from_user.id
     if message.chat.type == "private":
         source = "[DM]"
@@ -1277,7 +1278,7 @@ def handle_photo(message):
     _get_user_queue(uid, message.chat.id).put(message)
 
 
-def handle_voice(message):
+def handle_voice(message: object) -> None:
     uid = message.from_user.id
     if message.chat.type == "private":
         source = "[DM]"
@@ -1292,11 +1293,11 @@ def handle_voice(message):
 # ── Bot setup ─────────────────────────────────────────────────────────────────
 
 class _Suppress409(logging.Filter):
-    def filter(self, record):
+    def filter(self, record: logging.LogRecord) -> bool:
         return "409" not in record.getMessage()
 
 
-def create_bot():
+def create_bot() -> telebot.TeleBot:
     global bot
     telebot_log = logging.getLogger("TeleBot")
     telebot_log.addFilter(_Suppress409())

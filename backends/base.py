@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Callable, Optional
+from typing import Callable
 
 
 class ClaudeBackend(ABC):
@@ -22,14 +22,14 @@ class ClaudeBackend(ABC):
       on_clear_session()   — stale session detected; clear the stored id
     """
 
-    def __init__(self, uid: int, chat_id: int):
-        self.uid = uid
-        self.chat_id = chat_id
-        self.on_output: Optional[Callable[[str], None]] = None
-        self.on_typing: Optional[Callable[[], None]] = None
-        self.on_log: Optional[Callable[[str], None]] = None
-        self.on_session: Optional[Callable[[str], None]] = None
-        self.on_clear_session: Optional[Callable[[], None]] = None
+    def __init__(self, uid: int, chat_id: int) -> None:
+        self.uid: int = uid
+        self.chat_id: int = chat_id
+        self.on_output: Callable[[str], None] | None = None
+        self.on_typing: Callable[[], None] | None = None
+        self.on_log: Callable[[str], None] | None = None
+        self.on_session: Callable[[str], None] | None = None
+        self.on_clear_session: Callable[[], None] | None = None
 
     @property
     def key(self) -> tuple[int, int]:

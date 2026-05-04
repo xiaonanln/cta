@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Optional
 
 import claude_json_stream as _cjs_mod
 
@@ -23,11 +22,11 @@ _TYPING_PULSE_SECONDS = 3.0
 
 
 class JsonStreamBackend(ClaudeBackend):
-    def __init__(self, uid: int, chat_id: int):
+    def __init__(self, uid: int, chat_id: int) -> None:
         super().__init__(uid, chat_id)
-        self._stream: Optional[_cjs_mod.ClaudeJsonStream] = None
-        self._stream_lock = threading.Lock()
-        self._typing_stop: Optional[threading.Event] = None
+        self._stream: _cjs_mod.ClaudeJsonStream | None = None
+        self._stream_lock: threading.Lock = threading.Lock()
+        self._typing_stop: threading.Event | None = None
 
     def send(self, prompt: str) -> None:
         import agent
@@ -110,7 +109,7 @@ class JsonStreamBackend(ClaudeBackend):
         self,
         stream: '_cjs_mod.ClaudeJsonStream',
         timeout: int,
-        key: tuple,
+        key: tuple[int, int],
         had_session: bool = False,
     ) -> bool:
         """Read events until EOF or result. Returns True if the session ID was rejected.
@@ -233,7 +232,7 @@ class JsonStreamBackend(ClaudeBackend):
             stream.stop()
 
 
-def _extract_text_delta(event: dict) -> str:
+def _extract_text_delta(event: dict[str, object]) -> str:
     """Extract new text from a stream_event content_block_delta event."""
     inner = event.get('event') or {}
     if inner.get('type') != 'content_block_delta':
