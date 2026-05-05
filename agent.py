@@ -697,6 +697,19 @@ def _chat_push(uid: int, chat_id: int, role: str, text: str) -> None:
 
 # ── Message processing ────────────────────────────────────────────────────────
 
+def _reply_context(message: object) -> str:
+    """Return a quoted-context block if the message is a Telegram reply, else ''."""
+    replied = getattr(message, "reply_to_message", None)
+    if not replied:
+        return ""
+    text = getattr(replied, "text", None) or getattr(replied, "caption", None)
+    if not text:
+        return ""
+    sender = getattr(replied, "from_user", None)
+    name = (getattr(sender, "username", None) or getattr(sender, "first_name", None) or "unknown") if sender else "unknown"
+    return f"[Replying to {name}'s message]:\n{text}\n\n"
+
+
 def _build_preamble(uid: int, chat_id: int) -> str:
     """Build the prompt prefix injected before every agent turn.
 
@@ -779,7 +792,8 @@ def _process_message(uid: int, chat_id: int, message: object, done: threading.Ev
 
     preamble = _build_preamble(uid, chat_id)
     caption = message.caption or ""
-    prompt = preamble + (message.text or caption)
+    reply_ctx = _reply_context(message)
+    prompt = preamble + reply_ctx + (message.text or caption)
     tmp_photo = None
     if message.document:
         try:
@@ -795,7 +809,7 @@ def _process_message(uid: int, chat_id: int, message: object, done: threading.Ev
             tmp.close()
             tmp_photo = tmp.name
             user_instruction = f"\n\nUser's question: {caption}" if caption else ""
-            prompt = preamble + f"Use the Read tool to read and analyze the file at: {tmp_photo}{user_instruction}"
+            prompt = preamble + reply_ctx + f"Use the Read tool to read and analyze the file at: {tmp_photo}{user_instruction}"
         except Exception as e:
             tui_log(f"[red]⚠ file download failed: {escape(str(e))}[/]")
             bot.reply_to(message, f"❌ Could not download file: {e}")
@@ -812,7 +826,7 @@ def _process_message(uid: int, chat_id: int, message: object, done: threading.Ev
             tmp.close()
             tmp_photo = tmp.name
             user_instruction = f"\n\nUser's question: {caption}" if caption else ""
-            prompt = preamble + f"Use the Read tool to view the image at: {tmp_photo}{user_instruction}"
+            prompt = preamble + reply_ctx + f"Use the Read tool to view the image at: {tmp_photo}{user_instruction}"
         except Exception as e:
             tui_log(f"[red]⚠ photo download failed: {escape(str(e))}[/]")
             bot.reply_to(message, f"❌ Could not download photo: {e}")
@@ -838,7 +852,7 @@ def _process_message(uid: int, chat_id: int, message: object, done: threading.Ev
                 return
             tui_log(f"[cyan]🎙 transcript:[/] {escape(transcript)}")
             _chat_push(uid, message.chat.id, "user", f"🎙 {transcript}")
-            prompt = preamble + transcript
+            prompt = preamble + reply_ctx + transcript
         except ImportError:
             bot.reply_to(message, "❌ Whisper not installed. Run: pip install openai-whisper")
             done.set()
