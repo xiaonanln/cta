@@ -968,7 +968,11 @@ def _process_cron(uid: int, chat_id: int, task: dict[str, object], done: threadi
 
 
 def _is_plain_text(item: object) -> bool:
-    """Return True if item is a plain text message that can be batched."""
+    """Return True if item is a plain text message that can be batched.
+
+    Reply messages are excluded — their reply_to_message context must be
+    preserved intact and cannot survive the text-only batching path.
+    """
     return (
         not isinstance(item, dict)
         and getattr(item, "text", None)
@@ -976,6 +980,7 @@ def _is_plain_text(item: object) -> bool:
         and not getattr(item, "voice", None)
         and not getattr(item, "audio", None)
         and not getattr(item, "photo", None)
+        and not getattr(item, "reply_to_message", None)
     )
 
 
