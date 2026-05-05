@@ -39,6 +39,7 @@ def make_fake_message(text, user_id=123, username="tester", chat_type="private",
     msg.chat.type = chat_type
     msg.chat.title = chat_title
     msg.message_id = 1
+    msg.reply_to_message = None
     return msg
 
 
