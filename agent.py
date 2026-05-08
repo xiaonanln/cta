@@ -50,6 +50,7 @@ CONFIG_PATH = os.path.join(CTA_HOME, "config.json")
 CTA_ROOT = os.path.dirname(os.path.abspath(__file__))
 CRON_CLI_PATH = os.path.join(CTA_ROOT, "cron.py")
 NOTIFY_CLI_PATH = os.path.join(CTA_ROOT, "notify.py")
+SEND_IMAGE_CLI_PATH = os.path.join(CTA_ROOT, "send_image.py")
 
 DEFAULT_CONFIG = {
     "telegram_bot_token": "",
@@ -163,6 +164,7 @@ def _system_preamble(uid_display: object, chat_id_display: object) -> str:
         f"Always reply after tool use.\n"
         f"Do NOT use Telegram MCP plugin tools — agent.py handles replies.\n"
         f"Do NOT use built-in CronCreate, CronList, CronDelete tools. Manage crons with: python3 {CRON_CLI_PATH} add|list|remove|update (preferred — avoids JSON escape bugs; CTA_UID/CTA_CHAT_ID are already set in env). File at {crons_path} is fallback for inspection only.\n"
+        f"To send a chart or image to this chat: python3 {SEND_IMAGE_CLI_PATH} <file_path> [caption]\n"
     )
 
 
