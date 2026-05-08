@@ -1482,6 +1482,26 @@ def _web_chat_send(uid, chat_id):
     return {"ok": True}
 
 
+@app.route("/chat/<sint:uid>/<sint:chat_id>/send_photo", methods=["POST"])
+def _web_chat_send_photo(uid, chat_id):
+    data = request.get_json(silent=True) or {}
+    file_path = data.get("file_path", "").strip()
+    caption = data.get("caption", "").strip() or None
+    if not file_path:
+        return {"error": "missing file_path"}, 400
+    if not os.path.isfile(file_path):
+        return {"error": f"file not found: {file_path}"}, 400
+    key = (uid, chat_id)
+    if key not in agent.chat_labels:
+        return {"error": "unknown chat"}, 404
+    try:
+        with open(file_path, "rb") as f:
+            agent.bot.send_photo(chat_id, f, caption=caption)
+    except Exception as e:
+        return {"error": str(e)}, 500
+    return {"ok": True}
+
+
 @app.route("/chat/<sint:uid>/<sint:chat_id>", methods=["DELETE"])
 def _web_chat_delete(uid, chat_id):
     """Hard-delete all state for a chat (sessions, in-memory dicts, and the
