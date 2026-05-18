@@ -844,15 +844,16 @@ def _process_message(uid: int, chat_id: int, message: object, done: threading.Ev
             tmp.write(data)
             tmp.close()
             tmp_photo = tmp.name
-            bot.reply_to(message, "🎙 Transcribing…")
+            wait_msg = bot.reply_to(message, "🎙 Transcribing…")
             whisper_model = _load_whisper()
             result = whisper_model.transcribe(tmp_photo)
             transcript = result["text"].strip()
             if not transcript:
-                bot.reply_to(message, "❌ Could not transcribe voice message.")
+                bot.edit_message_text("❌ Could not transcribe voice message.", message.chat.id, wait_msg.message_id)
                 done.set()
                 return
             tui_log(f"[cyan]🎙 transcript:[/] {escape(transcript)}")
+            bot.edit_message_text(f"🎙 {transcript}", message.chat.id, wait_msg.message_id)
             _chat_push(uid, message.chat.id, "user", f"🎙 {transcript}")
             prompt = preamble + reply_ctx + transcript
         except ImportError:
